@@ -1,0 +1,9 @@
+node_modules
+.git
+.env
+.web-credentials
+workspace
+data
+runtime
+*.log
+pnpm-lock.yaml

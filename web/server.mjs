@@ -1,0 +1,965 @@
+// The Multi-Agent web server.
+//
+// All state lives in PostgreSQL (web/db.mjs); agents work in their own containers (one per agent);
+// model upstreams are configured in the UI — several of them, switchable at any time — not hard-coded in .env.
+//
+// Auth: put ?k=<ACCESS_TOKEN> in the URL once, then a cookie carries it. Without a token we only listen on 127.0.0.1.
+import { env, ROOT } from './env.mjs'
+import * as db from './db.mjs'
+import { fitContext, listModels, probeContext } from './model.mjs'
+import { callUpstream, normProtocol, PROTOCOLS } from './protocols.mjs'
+import { langOf, tr, Say, errorText } from './i18n.mjs'
+import { createServer } from 'node:http'
+import { readFile, mkdir } from 'node:fs/promises'
+import { existsSync, statSync } from 'node:fs'
+import { join, extname } from 'node:path'
+import { spawn } from 'node:child_process'
+
+const WEB = join(ROOT, 'web')
+const WORKROOT = join(ROOT, 'workspace')
+
+const CFG = {
+  token: env.ACCESS_TOKEN || '',
+  port:  Number(env.WEB_PORT || 8080),
+  host:  env.BIND_HOST || (env.ACCESS_TOKEN ? '0.0.0.0' : '127.0.0.1'),
+  tools: env.AGENT_TOOLS === 'on',
+}
+
+// The speaker name stored on the human's messages. It is a data marker, not display text:
+// existing rows and both clients (web/app.js, the Flutter app) compare against it, so it
+// must never be translated. The model sees it as "User" (see modelSpeaker).
+const USER_SPEAKER = db.USER_SPEAKER  // stored speaker value for the person in group logs (data, not UI text)
+const modelSpeaker = s => (s === USER_SPEAKER ? 'User' : s)
+
+// ---------- Agents ----------
+// DB row → the field names the frontend uses. The frontend shouldn't care whether the column is ord or order.
+const toBot = (r, lang = 'en') => ({
+  id: r.id, name: r.name, description: r.description, persona: r.persona,
+  order: r.ord, color: r.color, provider_id: r.provider_id ?? '', model: r.model ?? '',
+  // Capability tags reflect the tools the backend actually grants, not what the persona says —
+  // a tag claiming bash that can't actually run it is worse than no tag.
+  tools: (CFG.tools ? ['shell', 'files', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
+})
+const loadBots = async (lang = 'en') => (await db.listAgents()).map(r => toBot(r, lang))
+
+// ---------- Conversation list ----------
+/** Groups and direct chats mixed together, sorted by last activity — that's what an IM looks like. */
+async function listConversations(lang) {
+  const bots = await loadBots(lang)
+  const last = await db.lastMessages()
+  const cut = (s, n) => String(s ?? '').replace(/\s+/g, ' ').slice(0, n)
+  const items = bots.map(b => {
+    const m = last.get(`dm:${b.id}`)
+    return {
+      kind: 'agent', id: b.id, name: b.name, tag: b.description, color: b.color,
+      members: [b.id],
+      preview: m ? (m.role === 'user' ? tr(lang, 'conv.youSaid', { text: cut(m.content, 60) }) : cut(m.content, 60)) : '',
+      at: m?.at ?? 0,
+    }
+  })
+  for (const g of await db.listGroups()) {
+    const m = last.get(`group:${g.id}`)
+    items.push({
+      kind: 'group', id: g.id, name: g.name, tag: tr(lang, 'conv.members', { n: g.members.length }), lead: g.lead ?? '',
+      members: g.members,
+      colors: g.members.map(id => bots.find(b => b.id === id)?.color).filter(Boolean),
+      preview: m ? tr(lang, 'conv.said', {
+        who: m.speaker === USER_SPEAKER ? tr(lang, 'conv.user') : m.speaker, text: cut(m.content, 52) }) : '',
+      at: m?.at ?? (+g.created_at || 0),
+    })
+  }
+  return items.sort((a, b) => b.at - a.at)
+}
+
+const MAX_HANDOFFS = 5       // max handoffs between agents in one round, so they can't chat forever
+const FETCH_MAX = 300        // how many candidate rows to pull from the DB; the real trimming is by context budget
+
+/**
+ * The group discussions an agent remembers — every group he's in, not just the current one.
+ * Fed to him in direct chats too: a real employee doesn't forget this morning's group chat just because the window changed.
+ */
+async function groupRecallFor(bot) {
+  const groups = (await db.listGroups()).filter(g => g.members.includes(bot.id))
+  const chunks = []
+  for (const g of groups) {
+    const log = await db.recent('group', g.id, 30)
+    if (log.length) chunks.push(`[Group: ${g.name}]\n` + log.map(e => `[${modelSpeaker(e.speaker)}] ${e.content}`).join('\n'))
+  }
+  return chunks.join('\n\n')
+}
+
+function systemFor(bot, memory, peers, box, recall, lead = null) {
+  const parts = [bot.persona]
+  parts.push(`
+
+--- Language ---
+Reply in the language the user writes in.`)
+  if (box) parts.push(`
+
+--- Your work environment ---
+You have your own machine (a container) with working directory /work; only you can get in.
+You are root — install and write whatever you like; it stays on your own machine.${peers?.length ? `
+In group chats there is a ./group directory: the group's shared drive, visible to everyone in the group —
+to hand something to a colleague, \`cp x group/\`; what colleagues give you is there too.` : ''}
+Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).`)
+  if (peers?.length) {
+    parts.push(`
+
+--- This is a group chat ---
+These colleagues are also in the group:
+${peers.map(p => `- ${p.name}: ${p.description}`).join('\n')}
+
+Messages show who said them: "[name] content"; "[User]" is the human.
+${!lead ? '' : lead.id === bot.id ? `
+**You are this group's lead.** When the user hasn't named anyone, you speak first: think the matter through, break it into
+pieces that can be handed out, @ the right colleague to do each, keep track of progress, and finally summarize the result for the user.
+Don't grind away alone on work you could hand out.` : `
+**This group's lead is ${lead.name}.** When your part is done, when you're stuck, or when you're unsure who should pick it up next, @${lead.name}.`}
+
+**This group is turn-based — this rule matters most:**
+Only one person talks at a time. After you finish, the person you @ starts working; when they finish,
+it comes back around to you. You are not processes running concurrently.
+
+Two consequences:
+- **Hand off only with @name.** Don't use the shell to write files, send messages or leave notes for colleagues — they don't read those,
+  and doing so just wastes your own turn.
+- **Never wait for a colleague.** Don't sleep, don't poll group/ for a file to appear, don't write loops like
+  "for i in $(seq ...); do test -f ...". You can't wait for them — they only start once you've finished.
+  @ the work out, and then your turn is over.
+
+Other rules:
+- Speak only for your own part. Don't speak for colleagues, and don't make up things they said.
+- Don't repeat what's already been said; if a colleague got it right, build on it instead of restating it.
+- @ only one person at a time, on its own line at the end of your reply.
+- When the matter is done and nobody needs to follow up, don't @ anyone — that is what stops the group chat.
+- People are watching you, so don't treat "I've done X" as a figure of speech: if you didn't do it, say so.`)
+  }
+  if (memory.own?.trim()) parts.push(`\n\n--- Your memory (maintained by humans, only you can read it) ---\n${memory.own.trim()}`)
+  if (memory.group?.trim()) parts.push(`\n\n--- This group's memory (everyone in the group can read it; maintained by humans) ---\n${memory.group.trim()}`)
+  if (recall?.trim()) parts.push(`
+
+--- Group discussions you remember ---
+These are group chats you took part in. This is a private conversation now, but of course you remember them:
+${recall.trim()}`)
+  return parts.join('')
+}
+
+// ---------- Containers: one per agent — that's real isolation ----------
+//
+// ⚠️ Tools are OFF by default (only on with AGENT_TOOLS=on). Once on, every agent can run arbitrary
+// commands in its own container — exactly the "hands-on like a real employee" we want, but it also means
+// whoever holds ACCESS_TOKEN = holds a shell in a container, and any outside text an agent reads
+// (web pages, logs, colleagues' messages) may be a prompt injection.
+//
+// A container mounts only two directories:
+//   /work    ← workspace/agents/<id>   its own desk
+//   /groups  ← workspace/groups        every group's shared drive (in group chats /work/group is symlinked there)
+// The platform's code and .env aren't in there; it can't reach them.
+const CLI = env.CONTAINER_CLI || 'docker'
+const IMAGE = env.AGENT_IMAGE || 'multi-agent-worker:1'
+const EXEC_TIMEOUT = Number(env.AGENT_EXEC_TIMEOUT || 120) * 1000
+const OUT_MAX = 12_000
+// Container names are global on the whole host. Two deployments on the same machine that don't change the prefix
+// fight over the same ma-agent-chief — the mount check makes each side delete and recreate the other's container.
+const PREFIX = env.AGENT_PREFIX || 'ma'
+const cname = id => `${PREFIX}-agent-${id}`
+
+// ⚠️ When starting sibling containers, the left side of -v is a HOST path, not a path inside our own container.
+// When we run in a container WORKROOT is /app/workspace, while on the host it's somewhere else —
+// using WORKROOT would mount the agent's container on an empty directory, with no error at all.
+const HOSTWORK = env.WORKSPACE_HOST_PATH || WORKROOT
+
+function cliRun(argv, input, timeout = EXEC_TIMEOUT) {
+  return new Promise(done => {
+    const p = spawn(CLI, argv, { stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = '', err = ''
+    const timer = setTimeout(() => { p.kill('SIGKILL'); done({ code: 124, out, err: err + '\n(timed out)' }) }, timeout)
+    p.stdout.on('data', d => { out += d })
+    p.stderr.on('data', d => { err += d })
+    p.on('close', code => { clearTimeout(timer); done({ code, out, err }) })
+    p.on('error', e => { clearTimeout(timer); done({ code: 127, out, err: String(e.message) }) })
+    p.stdin.end(input ?? '')
+  })
+}
+
+let imageReady = false
+/**
+ * Make sure the worker image exists; build it on the spot if not.
+ *
+ * This is for "one-command deploy": otherwise the first line of the deploy docs would be "docker build
+ * an image yourself first" — exactly the step most likely to be skipped, and skipping it only errors on the first chat.
+ * The Dockerfile is read from deploy/agent.Dockerfile and fed on stdin — no second copy in the code.
+ */
+let imageBuild = null
+// Two conversations speaking for the first time at once would each build the same image — share one promise.
+function ensureImage() {
+  if (imageReady) return Promise.resolve()
+  imageBuild ??= buildImage().finally(() => { imageBuild = null })
+  return imageBuild
+}
+async function buildImage() {
+  if ((await cliRun(['image', 'inspect', IMAGE], null, 30_000)).code === 0) { imageReady = true; return }
+  const df = await readFile(join(ROOT, 'deploy', 'agent.Dockerfile'), 'utf8')
+  console.log(`First run: building the agent image ${IMAGE} (a minute or two, only once)…`)
+  const r = await cliRun(['build', '-t', IMAGE, '-'], df, 900_000)
+  if (r.code !== 0) throw new Say('container.buildFailed', { image: IMAGE, detail: (r.err || r.out).slice(-500) }, 500)
+  console.log(`Image ${IMAGE} is ready`)
+  imageReady = true
+}
+
+const containerReady = new Set()
+
+/**
+ * One agent does one thing at a time.
+ *
+ * ⚠️ The /work/group symlink is shared by the WHOLE container: while he runs tools in group A,
+ * if group B (or a direct chat) also reaches him, ensureContainer repoints the symlink to B — and his later
+ * `cp x group/` in A lands in B's shared drive (the cross-group leak from 2.14, triggered by concurrency).
+ * Two conversations calling him for the first time would also each run `docker run --name` and collide. One lock stops both.
+ */
+const agentLocks = new Map()
+function withAgent(id, fn) {
+  const prev = agentLocks.get(id) ?? Promise.resolve()
+  const run = prev.catch(() => {}).then(fn)
+  const tail = run.catch(() => {})
+  agentLocks.set(id, tail)
+  tail.then(() => { if (agentLocks.get(id) === tail) agentLocks.delete(id) })
+  return run
+}
+
+/** Run a command in a container. If someone deleted the container from outside, drop the "ready" cache so the next round recreates it. */
+async function execIn(c, argv, input) {
+  const r = await cliRun(['exec', ...argv], input)
+  if (/No such container/i.test(r.err)) containerReady.delete(c)
+  return r
+}
+
+/** Make sure this agent's container is running, and point /work/group at the current group. */
+async function ensureContainer(botId, groupId) {
+  await ensureImage()
+  const name = cname(botId)
+  if (!containerReady.has(name)) {
+    const work = join(HOSTWORK, 'agents', botId)
+    await mkdir(join(WORKROOT, 'agents', botId), { recursive: true })
+    await mkdir(join(WORKROOT, 'groups'), { recursive: true })
+    // Also ask where /work is mounted: containers are long-lived, and WORKSPACE_HOST_PATH changes
+    // (upgrades, moving the repo, editing compose). A wrongly mounted container looks perfectly fine —
+    // commands succeed, ls shows files — but the output lands in a directory nobody looks at.
+    // Same shape as 2.14's "symlink still pointing at the previous group", so it must be checked here.
+    const { out } = await cliRun(['inspect', '-f',
+      '{{.State.Running}} {{.Config.Image}} {{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}', name],
+      null, 30_000)
+    let [state, image, mounted] = out.trim().split(' ')
+    if (mounted && mounted !== work) {
+      console.log(`${botId}'s container is still mounted on the old path ${mounted}; recreating on ${work} (old files stay where they are)`)
+      await cliRun(['rm', '-f', name], null, 60_000)
+    } else if (mounted && image !== IMAGE) {
+      // The image was upgraded: old containers don't switch images by themselves.
+      // /work is on the host, so recreating only loses what he apt-installed himself
+      console.log(`${botId}'s container is still on the old image ${image}; recreating on ${IMAGE} (files in /work are kept)`)
+      await cliRun(['rm', '-f', name], null, 60_000)
+      mounted = ''
+    }
+    else if (state === 'true') { /* already running */ }
+    else if (state === 'false') await cliRun(['start', name], null, 60_000)
+    if (!mounted || mounted !== work) {
+      const r = await cliRun(['run', '-d', '--name', name,
+        '--memory', env.AGENT_MEMORY || '2g', '--cpus', env.AGENT_CPUS || '2',
+        '--pids-limit', '512',
+        '-v', `${join(HOSTWORK, 'agents', botId)}:/work`,
+        '-v', `${join(HOSTWORK, 'groups')}:/groups`,
+        '-w', '/work', IMAGE, 'sleep', 'infinity'], null, 120_000)
+      if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
+    }
+    containerReady.add(name)
+  }
+  // The group directory has to really exist on the host first. Group info now lives in the DB, so nobody creates
+  // this directory anymore — without it the symlink points nowhere, `cp report.md group/` just fails,
+  // and the failure only shows up in some agent's tool output.
+  if (groupId) await mkdir(join(WORKROOT, 'groups', groupId), { recursive: true })
+  // Reset the group symlink every time — otherwise it keeps pointing at the previous group (CLAUDE.md 2.14)
+  await cliRun(['exec', name, 'bash', '-lc',
+    groupId ? `rm -f /work/group && ln -s /groups/${groupId} /work/group` : 'rm -f /work/group'],
+    null, 30_000)
+  return name
+}
+
+async function removeContainer(botId) {
+  const name = cname(botId)
+  containerReady.delete(name)
+  await cliRun(['rm', '-f', name], null, 60_000)
+}
+
+const TOOL_SPECS = [
+  { type: 'function', function: {
+    name: 'bash',
+    description: 'Run a shell command in the working directory; returns stdout / stderr / exit code. Use it for inspecting, building, testing, installing and running.',
+    parameters: { type: 'object', required: ['command'], properties: {
+      command: { type: 'string', description: 'The command to run; pipes and redirects are fine' } } } } },
+  { type: 'function', function: {
+    name: 'read_file',
+    description: 'Read the contents of a file.',
+    parameters: { type: 'object', required: ['path'], properties: {
+      path: { type: 'string', description: 'A path relative to the working directory, or an absolute path' } } } } },
+  { type: 'function', function: {
+    name: 'write_file',
+    description: 'Write a file (overwrites). Parent directories are created automatically.',
+    parameters: { type: 'object', required: ['path', 'content'], properties: {
+      path: { type: 'string' }, content: { type: 'string' } } } } },
+]
+
+const clip = (t, max = OUT_MAX) => t.length > max ? `${t.slice(0, max)}\n… (truncated, ${t.length} characters in total)` : t
+
+// The file tools all run inside the container, so path semantics are uniform (/work in the container, not a host path).
+// write_file goes over stdin instead of building a command line — quotes, newlines and $ in the content can't break anything.
+async function runTool(name, args, ctx) {
+  const c = ctx.container
+  if (name === 'bash') {
+    const { code, out, err } = await execIn(c, ['-w', '/work', c, 'bash', '-lc', args.command])
+    const killed = code === 124 ? `\n(over ${EXEC_TIMEOUT / 1000}s — we stopped waiting; the command may still be running in the container)` : ''
+    return clip([out, err && `--- stderr ---\n${err}`, `--- exit ${code} ---${killed}`]
+      .filter(Boolean).join('\n')) || `(no output, exit ${code})`
+  }
+  if (name === 'read_file') {
+    const { code, out, err } = await execIn(c, ['-w', '/work', c, 'cat', '--', args.path])
+    return code === 0 ? clip(out) : `Could not read: ${(err || '').trim() || `exit ${code}`}`
+  }
+  if (name === 'write_file') {
+    const body = args.content ?? ''
+    const { code, err } = await execIn(c,
+      ['-i', '-w', '/work', c, 'bash', '-lc', `mkdir -p "$(dirname -- "$1")" && cat > "$1"`, '_', args.path],
+      body)
+    return code === 0 ? `Wrote ${args.path} (${body.length} characters)` : `Could not write: ${(err || '').trim()}`
+  }
+  return `Unknown tool ${name}`
+}
+
+/** Call the model once. Protocol translation and stream parsing live in protocols.mjs; here we only decide whether to send tools. */
+function callModel(p, messages, onDelta, { bare = false, signal } = {}) {
+  return callUpstream(p, messages, CFG.tools && !bare ? TOOL_SPECS : null, onDelta, signal)
+}
+
+// Upstream failures come from protocols.mjs flagged with `upstream` / `upstreamStatus`.
+const isUpstreamError = e => e?.upstream === true
+const upstreamStatus = e => Number(e?.upstreamStatus) || 0
+
+/**
+ * One full turn for an agent: talk → use tools → look at results → keep talking, until it needs no more tools.
+ * This is the difference between "like a real employee" and "a chat box".
+ *
+ * Re-trim to the context window before every model call — tool output grows the context within the turn,
+ * and trimming only at the entrance would overflow by step three or four.
+ */
+async function runAgent(p, messages, onDelta, onTool, ctx) {
+  const MAX_STEPS = 12
+  const lang = ctx.lang ?? 'en'
+  let text = ''
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const fit = fitContext(messages, p.context_tokens)
+    if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
+    // Retry. Relay gateways hit bad channels at random (200 then an error inside the stream), and in a group chat
+    // one silent empty turn means "the relay died on this person".
+    //
+    // ⚠️ Must back off before retrying. In group relays the first person reliably succeeded and the second reliably
+    // failed — not random, the two calls were too close together and got rate-limited; retrying immediately guarantees another hit.
+    let r
+    for (const wait of [0, 2000, 6000]) {
+      if (wait) await new Promise(t => setTimeout(t, wait))
+      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal }); break }
+      catch (e) {
+        if (ctx.signal?.aborted || !isUpstreamError(e) || wait === 6000) throw e
+        onTool?.({ phase: 'retry', reason: errorText(e, lang).slice(0, 120) })
+      }
+    }
+    const { content, calls } = r
+    if (content) text = content
+    if (!calls.length) return text
+
+    messages.push({
+      role: 'assistant',
+      content: content || null,
+      tool_calls: calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } })),
+    })
+    for (const c of calls) {
+      if (ctx.signal?.aborted) throw new Say('chat.aborted')
+      let args = {}
+      try { args = JSON.parse(c.args || '{}') } catch { args = {} }
+      onTool?.({ phase: 'run', name: c.name, args })
+      const out = await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
+      onTool?.({ phase: 'done', name: c.name, args, output: out })
+      messages.push({ role: 'tool', tool_call_id: c.id, content: out })
+    }
+  }
+  return text || '(hit the tool-use limit; stopping here for now)'
+}
+
+// One-on-one
+function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
+  return withAgent(bot.id, async () => {
+    const prior = (await db.recent('dm', bot.id, FETCH_MAX))
+      .map(m => ({ role: m.role, content: m.content }))
+    // Store first, then start the container: if the container won't start, what the user said shouldn't vanish with it
+    await db.addMessage('dm', bot.id, { role: 'user', speaker: USER_SPEAKER, content: text })
+    // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
+    const container = CFG.tools ? await ensureContainer(bot.id, null) : null
+    const full = await runAgent(p,
+      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot)) },
+       ...prior, { role: 'user', content: text }],
+      onDelta, onTool, { container, signal, bot, lang })
+    await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
+    return full
+  })
+}
+
+// One person speaking once in a group chat: he sees the WHOLE group log, with other people's words prefixed by name
+function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang) {
+  return withAgent(bot.id, async () => {
+    const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
+    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', lead) }]
+    for (const e of await db.recent('group', groupId, FETCH_MAX)) {
+      messages.push(e.speaker === bot.name
+        ? { role: 'assistant', content: e.content }                                   // what he said himself
+        : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
+    }
+    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang })
+  })
+}
+
+/**
+ * Find the colleague @-mentioned in a reply. Only the last @ counts, because the rule is one @ at a time.
+ *
+ * ⚠️ Do NOT add `\b` after the name. `\b` judges word boundaries by [A-Za-z0-9_];
+ * CJK characters aren't \w, so after "@<Chinese name>" there is never a word boundary and it never matches —
+ * and Chinese names are this product's main use case. It bit us for real: Chief wrote @<name>,
+ * the group chat just stopped, which looked like "he didn't want to hand off" but was really the regex not matching.
+ *
+ * Longer names are tried first so that a longer name isn't stolen by a shorter one that is its prefix.
+ */
+function findMention(text, peers) {
+  let hit
+  for (const p of [...peers].sort((a, b) => b.name.length - a.name.length)) {
+    const re = new RegExp(`@\\s*${p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'gi')
+    let m
+    while ((m = re.exec(text)) !== null) {
+      if (!hit || m.index > hit.index) hit = { index: m.index, bot: p }
+    }
+  }
+  return hit?.bot
+}
+
+/**
+ * One conversation: a message comes in; in a direct chat that person replies, in a group the relay runs until nobody is @-ed.
+ * Errors aren't thrown; they're reported via emit('error'), which the UI shows.
+ */
+async function converse(bots, groupId, providers, text, emit, signal, lang = 'en') {
+  try {
+    if (!groupId && bots.length === 1) {
+      const bot = bots[0]
+      emit('start', { botId: bot.id })
+      await askSolo(providers.get(bot.id), bot, text, { own: await db.getMemory('agent', bot.id) },
+        d => emit('delta', { botId: bot.id, text: d }),
+        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, 400) }), signal, lang)
+      emit('end', { botId: bot.id })
+    } else {
+      // Group chat: colleagues relay. Who speaks first — whoever the user @-ed; if nobody, the group's lead;
+      // if no lead is set, whoever sorts first (the old behavior; Chief of Staff is 0).
+      const gid = groupId ?? 'main'
+      await db.addMessage('group', gid, { role: 'user', speaker: USER_SPEAKER, content: text })
+      const g = (await db.listGroups()).find(x => x.id === gid)
+      const lead = bots.find(b => b.id === g?.lead) ?? null
+      let speaker = findMention(text, bots) ?? lead ?? bots[0]
+      const spoken = new Map()
+      for (let turn = 0; turn <= MAX_HANDOFFS && !signal.aborted; turn++) {
+        const peers = bots.filter(b => b.id !== speaker.id)
+        emit('start', { botId: speaker.id, turn })
+        let reply = ''
+        try {
+          reply = await askInGroup(providers.get(speaker.id), speaker, peers, lead,
+            { own: await db.getMemory('agent', speaker.id), group: await db.getMemory('group', gid) },
+            d => emit('delta', { botId: speaker.id, text: d }),
+            t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, 400) }),
+            gid, signal, lang)
+        } catch (e) {
+          emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300) })
+          break
+        }
+        await db.addMessage('group', gid, { role: 'assistant', speaker: speaker.name, content: reply })
+        emit('end', { botId: speaker.id })
+
+        const next = findMention(reply, peers)
+        if (!next) break                                   // nobody @-ed = the matter is done
+        const count = (spoken.get(next.id) ?? 0) + 1
+        spoken.set(next.id, count)
+        if (count > 2) { emit('note', { text: tr(lang, 'chat.spokenEnough', { name: next.name, n: count - 1 }) }); break }
+        // The last turn still @-ed someone: the relay limit is reached. Without saying so the UI shows "A → @B" and B never speaks
+        if (turn === MAX_HANDOFFS) { emit('note', { text: tr(lang, 'chat.relayLimit', { max: MAX_HANDOFFS, name: next.name }) }); break }
+        emit('handoff', { from: speaker.id, to: next.id })
+        speaker = next
+      }
+    }
+  } catch (e) {
+    emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300) })
+  }
+}
+
+// ---------- Upstreams ----------
+// api_key never goes back to the browser; we only say whether it's set and what its tail is.
+const safeProvider = (p, lang = 'en') => ({
+  id: p.id, name: p.name, base_url: p.base_url, protocol: p.protocol,
+  context_tokens: p.context_tokens, auto_context: p.auto_context,
+  ctx_source: tr(lang, p.auto_context ? 'provider.ctxAuto' : 'provider.ctxManual'), is_default: p.is_default,
+  key_hint: p.api_key ? `••••${p.api_key.slice(-4)}` : '',
+})
+
+async function requireProvider() {
+  const p = await db.activeProvider()
+  if (!p) throw new Say('provider.none')
+  return p
+}
+
+// The context window is a property of the model, and the model now follows the agent, so probe per (upstream, model), cached for an hour.
+// Only cache real answers: caching the fallback would mean never asking again after the upstream is fixed.
+const ctxCache = new Map()
+async function contextFor(base, model) {
+  if (!base.auto_context) return base.context_tokens
+  const key = `${base.id}|${base.base_url}|${model}`
+  const hit = ctxCache.get(key)
+  if (hit && hit.until > Date.now()) return hit.tokens
+  const r = await probeContext({ ...base, model })
+  if (r.tokens) ctxCache.set(key, { tokens: r.tokens, until: Date.now() + 3600_000 })
+  return r.tokens ?? 128_000
+}
+
+/** Which upstream and model this agent uses. Without its own upstream it follows the default; the model must be its own choice. */
+async function providerFor(bot) {
+  const base = bot.provider_id ? await db.getProvider(bot.provider_id) : await requireProvider()
+  if (!base) throw new Say('provider.gone', { name: bot.name })
+  if (!bot.model) throw new Say('provider.noModel', { name: bot.name })
+  return { ...base, model: bot.model, context_tokens: await contextFor(base, bot.model) }
+}
+
+/** Save an upstream. Auto = probe per agent's chosen model at chat time; manual = every model on this upstream uses the number given. */
+async function saveProviderWithContext(row, { auto, tokens }) {
+  if (auto) {
+    row.context_tokens = 128_000
+    row.ctx_source = tr('en', 'provider.ctxAuto')
+    row.auto_context = true
+  } else {
+    row.context_tokens = Math.max(2000, Number(tokens) || 128_000)
+    row.ctx_source = tr('en', 'provider.ctxManual')
+    row.auto_context = false
+  }
+  return db.saveProvider(row)
+}
+
+/** Request body → an upstream we can call: id means a saved one (empty = default), form fields override it (empty key = keep the stored one). */
+async function providerFromBody(b) {
+  const id = str(b.id).trim()
+  const cur = id ? await db.getProvider(id) : (b.base_url ? null : await db.activeProvider())
+  if (id && !cur) return null
+  const base_url = String(b.base_url || cur?.base_url || '').trim().replace(/\/+$/, '')
+  if (!base_url) return null
+  const def = cur && (await db.activeProvider())?.id === cur.id
+  const inUse = cur && (await db.listAgents())
+    .find(a => a.model && (a.provider_id ? a.provider_id === cur.id : def))?.model
+  return {
+    base_url, api_key: b.api_key || cur?.api_key || '',
+    protocol: normProtocol(b.protocol ?? cur?.protocol), context_tokens: 128_000,
+    inUse: inUse || cur?.model || '',
+  }
+}
+
+// ---------- HTTP ----------
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' }
+
+function authed(req, url) {
+  if (!CFG.token) return true                       // no guard when only listening locally
+  if (url.searchParams.get('k') === CFG.token) return true
+  return (req.headers.cookie ?? '').includes(`ma_token=${CFG.token}`)
+}
+
+const readBody = async req => {
+  let b = ''
+  for await (const c of req) b += c
+  if (!b) return {}
+  let v
+  try { v = JSON.parse(b) } catch { throw new Say('body.notJson') }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Say('body.notObject')
+  return v
+}
+const str = v => (typeof v === 'string' ? v : '')
+
+/** Agent field validation. On PATCH only the fields sent are checked. */
+async function checkAgent(b, selfId = null) {
+  const out = {}
+  if (b.name !== undefined || !selfId) {
+    const name = str(b.name).trim()
+    if (!name) throw new Say('agent.nameEmpty')
+    if (name.length > 40) throw new Say('agent.nameLong')
+    // Group logs identify people by name: duplicate names make two agents take each other's words as their own,
+    // and one named like the user marker (or "User", as the model sees it) would take the human's words as its own
+    if (name.toLowerCase() === USER_SPEAKER.toLowerCase()) throw new Say('agent.nameReserved', { name })
+    const clash = (await db.listAgents()).find(a => a.id !== selfId && a.name.toLowerCase() === name.toLowerCase())
+    if (clash) throw new Say('agent.exists', { name: clash.name })
+    out.name = name
+  }
+  if (b.persona !== undefined || !selfId) {
+    const persona = str(b.persona).trim()
+    if (!persona) throw new Say('agent.personaEmpty')
+    out.persona = persona
+  }
+  if (b.description !== undefined) out.description = str(b.description).trim().slice(0, 200)
+  if (b.color !== undefined) {
+    if (!/^#[0-9a-fA-F]{6}$/.test(str(b.color))) throw new Say('agent.color')
+    out.color = b.color
+  }
+  if (b.order !== undefined) {
+    if (!Number.isInteger(b.order)) throw new Say('agent.order')
+    out.ord = b.order
+  }
+  // Empty = follow the default upstream / use the upstream's own model
+  if (b.provider_id !== undefined) {
+    const pid = str(b.provider_id).trim()
+    if (pid && !await db.getProvider(pid)) throw new Say('err.noProvider')
+    out.provider_id = pid
+  }
+  if (b.model !== undefined || !selfId) {
+    const model = str(b.model).trim()
+    if (!model) throw new Say('agent.modelRequired')
+    if (model.length > 200) throw new Say('agent.modelLong')
+    out.model = model
+  }
+  return out
+}
+
+/** Group field validation: members must be real agents, deduplicated, at least two. */
+async function checkGroup(b, cur = null) {
+  const out = {}
+  if (b.name !== undefined || !cur) {
+    const name = str(b.name).trim()
+    if (!name) throw new Say('group.nameRequired')
+    out.name = name.slice(0, 40)
+  }
+  if (b.members !== undefined || !cur) {
+    if (!Array.isArray(b.members) || b.members.some(m => typeof m !== 'string')) throw new Say('group.membersArray')
+    const known = new Set((await db.listAgents()).map(a => a.id))
+    const members = [...new Set(b.members)].filter(m => known.has(m))
+    if (members.length < 2) throw new Say('group.tooFew')
+    out.members = members
+  }
+  // The lead must be in the group. If members changed and the lead was removed, fall back to "not set"
+  const members = out.members ?? cur?.members ?? []
+  if (b.lead !== undefined) {
+    const lead = str(b.lead).trim()
+    if (lead && !members.includes(lead)) throw new Say('group.leadNotMember')
+    out.lead = lead || null
+  } else if (cur?.lead && !members.includes(cur.lead)) out.lead = null
+  return out
+}
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://x')
+  const lang = langOf(req, url)
+  const t = (key, vars) => tr(lang, key, vars)
+  const send = (code, body, type = 'application/json; charset=utf-8') =>
+    { res.writeHead(code, { 'content-type': type }); res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body)) }
+
+  // The health check skips auth: compose / k8s probes have no token, and blocking them leaves the container
+  // unhealthy forever — a lying health status costs more than no health check.
+  // It only returns {ok:true} and leaks no data.
+  if (url.pathname === '/healthz') {
+    try { await db.pool.query('select 1'); return send(200, { ok: true }) }
+    catch (e) { return send(503, { ok: false, error: String(e.message ?? e) }) }
+  }
+  if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
+  if (CFG.token && url.searchParams.get('k') === CFG.token)
+    res.setHeader('set-cookie', `ma_token=${CFG.token}; Path=/; Max-Age=2592000; SameSite=Lax`)
+
+  try {
+    if (url.pathname === '/api/conversations') return send(200, await listConversations(lang))
+
+    // Direct chat history: the frontend wants {role, content, at}
+    const dm = url.pathname.match(/^\/api\/dm\/([a-z0-9-]+)$/)
+    if (dm && req.method === 'GET')
+      return send(200, (await db.recent('dm', dm[1], FETCH_MAX))
+        .map(m => ({ role: m.role, content: m.content, at: m.at })))
+    if (dm && req.method === 'DELETE') { await db.clearMessages('dm', dm[1]); return send(200, { ok: true }) }
+
+    if (url.pathname === '/api/bots' && req.method === 'GET') return send(200, await loadBots(lang))
+
+    if (url.pathname === '/api/bots' && req.method === 'POST') {
+      const b = await readBody(req)
+      const { name, description = '', persona, provider_id = '', model } = await checkAgent(b)
+      const id = str(b.id)
+      // The id is an internal identifier (container name, mount directory); people see the name.
+      // Chinese names can't produce a valid slug, which is fine — just generate one; don't bother the user about it.
+      let slug = id.trim() || name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) slug = 'agent-' + Math.random().toString(36).slice(2, 8)
+      if (await db.getAgent(slug)) return send(409, { error: t('agent.idExists', { id: slug }) })
+      const n = (await db.listAgents()).length
+      await db.upsertAgent({ id: slug, name, description, persona, provider_id, model, ord: n + 1, color: db.nextColor(n) })
+      return send(200, { id: slug })
+    }
+
+    const bm = url.pathname.match(/^\/api\/bots\/([a-z0-9-]+)$/)
+    if (bm && req.method === 'PATCH') {
+      const cur = await db.getAgent(bm[1])
+      if (!cur) return send(404, { error: t('err.noAgent') })
+      const patch = await checkAgent(await readBody(req), cur.id)
+      await db.upsertAgent({ ...cur, ...patch })
+      // Group logs identify people by name. Without syncing a rename, what he said in groups would become "someone else's"
+      if (patch.name && patch.name !== cur.name) await db.renameSpeaker(cur.name, patch.name)
+      return send(200, { ok: true })
+    }
+    if (bm && req.method === 'DELETE') {
+      if (!await db.getAgent(bm[1])) return send(404, { error: t('err.noAgent') })
+      await db.deleteAgent(bm[1])
+      // Delete the container too — an ownerless container only wastes memory,
+      // and his work is still in workspace/agents/<id>/ (a directory on the host)
+      await removeContainer(bm[1]).catch(() => {})
+      return send(200, { ok: true })
+    }
+
+    const mm = url.pathname.match(/^\/api\/memory\/(agent|group)\/([\w-]+)$/)
+    if (mm) {
+      const [, kind, id] = mm
+      const exists = kind === 'agent'
+        ? (await db.listAgents()).some(a => a.id === id)
+        : (await db.listGroups()).some(g => g.id === id)
+      if (!exists) return send(404, { error: t(kind === 'agent' ? 'err.noAgent' : 'err.noGroup') })
+      if (req.method === 'GET') return send(200, { text: await db.getMemory(kind, id) })
+      if (req.method === 'PUT') { await db.setMemory(kind, id, str((await readBody(req)).text)); return send(200, { ok: true }) }
+    }
+
+    // ---- Model upstreams ----
+    if (url.pathname === '/api/providers' && req.method === 'GET')
+      return send(200, (await db.listProviders()).map(p => safeProvider(p, lang)))
+
+    if (url.pathname === '/api/providers' && req.method === 'POST') {
+      const b = await readBody(req)
+      const base = String(b.base_url ?? '').trim().replace(/\/+$/, '')
+      if (!b.name?.trim() || !base)
+        return send(400, { error: t('provider.nameUrl') })
+      if (!/^https?:\/\//.test(base)) return send(400, { error: t('provider.urlScheme') })
+      if (b.protocol !== undefined && !PROTOCOLS.includes(b.protocol))
+        return send(400, { error: t('provider.protocol', { list: PROTOCOLS.join(' / ') }) })
+      const first = !(await db.listProviders()).length
+      const row = await saveProviderWithContext({
+        id: 'p' + Date.now().toString(36), name: b.name.trim(), base_url: base,
+        api_key: b.api_key ?? '', model: '', is_default: first,
+        protocol: normProtocol(b.protocol),
+      }, { auto: b.auto_context !== false, tokens: b.context_tokens })
+      return send(200, safeProvider(row, lang))
+    }
+
+    const pm = url.pathname.match(/^\/api\/providers\/([\w-]+)$/)
+    if (pm && req.method === 'PATCH') {
+      const cur = await db.getProvider(pm[1])
+      if (!cur) return send(404, { error: t('err.noProvider') })
+      const b = await readBody(req)
+      if (b.protocol !== undefined && !PROTOCOLS.includes(b.protocol))
+        return send(400, { error: t('provider.protocol', { list: PROTOCOLS.join(' / ') }) })
+      const row = await saveProviderWithContext({
+        ...cur,
+        name: b.name?.trim() || cur.name,
+        base_url: (b.base_url?.trim().replace(/\/+$/, '')) || cur.base_url,
+        protocol: b.protocol ? normProtocol(b.protocol) : cur.protocol,
+        // Empty key = leave the old one. Otherwise every rename would mean pasting the key again.
+        api_key: b.api_key ? b.api_key : cur.api_key,
+      }, { auto: b.auto_context ?? cur.auto_context, tokens: b.context_tokens ?? cur.context_tokens })
+      return send(200, safeProvider(row, lang))
+    }
+    if (pm && req.method === 'DELETE') {
+      const users = await db.agentsUsingProvider(pm[1])
+      if (users.length) return send(409, { error: t('provider.inUse', { names: users.join(lang === 'en' ? ', ' : '、') }) })
+      const list = await db.listProviders()
+      if (list.length <= 1) return send(400, { error: t('provider.last') })
+      await db.deleteProvider(pm[1])
+      if (!(await db.listProviders()).some(p => p.is_default))
+        await db.makeDefault((await db.listProviders())[0].id)
+      return send(200, { ok: true })
+    }
+    const pd = url.pathname.match(/^\/api\/providers\/([\w-]+)\/default$/)
+    if (pd && req.method === 'POST') {
+      if (!await db.getProvider(pd[1])) return send(404, { error: t('err.noProvider') })
+      await db.makeDefault(pd[1])
+      return send(200, { ok: true })
+    }
+    // Which models an upstream has: the model dropdown in the agent editor and "Test connection" in the upstream form both rely on it.
+    // Send an id (or nothing = the default upstream) to ask a saved one; send form fields to ask one not yet saved.
+    if (url.pathname === '/api/providers/models' && req.method === 'POST') {
+      const p = await providerFromBody(await readBody(req))
+      if (!p) return send(404, { error: t('err.noProvider') })
+      const models = await listModels(p)
+      return models
+        ? send(200, { models, suggested: models.includes(p.inUse) ? p.inUse : '' })
+        : send(200, { models: [], error: t('provider.noModels') })
+    }
+    // Really call the upstream once: whether it connects and whether the key is right is known here,
+    // not half an hour later as "some agent won't talk"
+    if (url.pathname === '/api/providers/test' && req.method === 'POST') {
+      const b = await readBody(req)
+      const p = await providerFromBody(b)
+      if (!p) return send(404, { error: t('err.noProvider') })
+      const t0 = Date.now()
+      // Upstreams no longer carry a model. What we try, in order: the one the caller gave, the one an agent using this upstream picked,
+      // the one old data stored on the upstream, the first one /models lists (lists often contain models this endpoint can't serve, so it's last)
+      const models = await listModels(p)
+      p.model = str(b.model).trim() || p.inUse || models?.[0] || ''
+      if (!p.model) return send(200, { ok: false, ms: Date.now() - t0, error: t('provider.testNoModels') })
+      try {
+        let got = ''
+        await callModel(p, [{ role: 'user', content: 'Reply with one word: OK' }], d => { got += d }, { bare: true })
+        // Connected but not a single character back must be said too — that's usually a bad relay channel,
+        // and reporting it as "connected" would send people debugging elsewhere with an upstream that doesn't work
+        return got.trim()
+          ? send(200, { ok: true, ms: Date.now() - t0, reply: got.slice(0, 80), model: p.model, models: models?.length ?? 0 })
+          : send(200, { ok: false, ms: Date.now() - t0, error: t('provider.testEmpty') })
+      } catch (e) {
+        return send(200, { ok: false, ms: Date.now() - t0, error: errorText(e, lang).slice(0, 300) })
+      }
+    }
+
+    if (url.pathname === '/api/chat' && req.method === 'POST') {
+      // target: {type:'agent'|'group', id}. botIds is the old field, kept for compatibility.
+      const { target, botIds = [], text = '' } = await readBody(req)
+      const all = await loadBots()
+      let bots, groupId = null
+      if (target?.type === 'group') {
+        const g = (await db.listGroups()).find(x => x.id === target.id)
+        if (!g) return send(404, { error: t('err.noGroup') })
+        groupId = g.id
+        bots = all.filter(b => g.members.includes(b.id))
+        if (bots.length < 2) return send(400, { error: t('group.tooSmall', { name: g.name, n: bots.length }) })
+      } else if (target?.type === 'agent') {
+        bots = all.filter(b => b.id === target.id)
+      } else {
+        bots = all.filter(b => botIds.includes(b.id))
+      }
+      if (!bots?.length || !text.trim()) return send(400, { error: t('chat.needTarget') })
+
+      // Resolve everyone's upstream first: if one is missing, say so before opening the stream, not halfway through a group relay
+      const providers = new Map()
+      try { for (const b of bots) providers.set(b.id, await providerFor(b)) }
+      catch (e) { return send(400, { error: errorText(e, lang) }) }
+
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
+      const emit = (ev, d) => { if (!res.destroyed) res.write(`event: ${ev}\ndata: ${JSON.stringify(d)}\n\n`) }
+      // The client closed the page / lost the network: stop. Otherwise a group relay would keep spending
+      // 6 people × 12 steps of upstream calls and keep running commands in containers with nobody watching.
+      const ac = new AbortController()
+      res.on('close', () => { if (!res.writableEnded) ac.abort() })
+
+      await converse(bots, groupId, providers, text, emit, ac.signal, lang)
+      emit('done', {})
+      return res.end()
+    }
+
+    // Groups: an entity with a name and members
+    if (url.pathname === '/api/groups' && req.method === 'GET') return send(200, await db.listGroups())
+
+    if (url.pathname === '/api/groups' && req.method === 'POST') {
+      const { name, members, lead } = await checkGroup(await readBody(req))
+      return send(200, await db.saveGroup({ id: `g${Date.now().toString(36)}`, name, members, lead }))
+    }
+
+    const gm = url.pathname.match(/^\/api\/groups\/([\w-]+)$/)
+    if (gm && req.method === 'PATCH') {          // rename / add or remove members
+      const g = (await db.listGroups()).find(x => x.id === gm[1])
+      if (!g) return send(404, { error: t('err.noGroup') })
+      const patch = await checkGroup(await readBody(req), g)
+      return send(200, await db.saveGroup({ ...g, ...patch }))
+    }
+    if (gm && req.method === 'DELETE') {         // disband; files in the shared drive are left alone
+      await db.deleteGroup(gm[1])
+      return send(200, { ok: true })
+    }
+    // Export / import a conversation's chat history. The format is defined here; an exported file imports back as-is.
+    const xm = url.pathname.match(/^\/api\/(export|import)\/(dm|group)\/([\w-]+)$/)
+    if (xm) {
+      const [, op, scope, id] = xm
+      const conv = scope === 'dm' ? await db.getAgent(id) : (await db.listGroups()).find(g => g.id === id)
+      if (!conv) return send(404, { error: t(scope === 'dm' ? 'err.noAgent' : 'err.noGroup') })
+      if (op === 'export' && req.method === 'GET') {
+        const messages = await db.recent(scope, id, 1_000_000)
+        return send(200, { format: 'multi-agent-chat', version: 1, kind: scope === 'dm' ? 'agent' : 'group',
+          id, name: conv.name, exported_at: new Date().toISOString(),
+          messages: messages.map(m => ({ role: m.role, speaker: m.speaker, content: m.content, at: new Date(m.at).toISOString() })) })
+      }
+      if (op === 'import' && req.method === 'POST') {
+        const b = await readBody(req)
+        const doc = b.doc ?? b
+        if (doc.format !== 'multi-agent-chat' || !Array.isArray(doc.messages))
+          return send(400, { error: t('import.badFile') })
+        const rows = []
+        for (const m of doc.messages) {
+          if (!m || !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')
+            return send(400, { error: t('import.badRow', { n: rows.length + 1 }) })
+          const ts = m.at == null ? NaN : new Date(m.at).getTime()      // accepts an ISO string or milliseconds
+          const at = Number.isNaN(ts) ? null : new Date(ts).toISOString()
+          rows.push({ role: m.role, speaker: str(m.speaker) || (m.role === 'user' ? USER_SPEAKER : conv.name),
+            content: m.content, at })
+        }
+        await db.importMessages(scope, id, rows, { replace: b.replace === true })
+        return send(200, { imported: rows.length })
+      }
+    }
+
+    const gr = url.pathname.match(/^\/api\/groups\/([\w-]+)\/messages$/)
+    if (gr && req.method === 'GET')
+      return send(200, (await db.recent('group', gr[1], FETCH_MAX))
+        .map(m => ({ speaker: m.speaker, text: m.content, at: m.at })))
+    if (gr && req.method === 'DELETE') { await db.clearMessages('group', gr[1]); return send(200, { ok: true }) }
+
+    // Static files
+    const p = url.pathname === '/' ? '/index.html' : url.pathname
+    const file = join(WEB, p.replace(/\.\./g, ''))
+    if (!existsSync(file) || !statSync(file).isFile()) return send(404, 'not found', 'text/plain')
+    return send(200, await readFile(file, 'utf8'), MIME[extname(file)] ?? 'application/octet-stream')
+  } catch (e) {
+    if (e instanceof Say && e.status < 500) return send(e.status, { error: e.text(lang) })
+    if (e.status === 400) return send(400, { error: e.message })
+    console.error(e)
+    return send(500, { error: errorText(e, lang) })
+  }
+})
+
+// ---------- Startup ----------
+if (!env.DATABASE_URL) {
+  console.error(`DATABASE_URL is missing.
+
+Start a complete setup (with its own PostgreSQL):
+    ./start.sh
+or point it at an existing database:
+    DATABASE_URL=postgres://user:pass@host:5432/multiagent node web/server.mjs`)
+  process.exit(1)
+}
+
+// No auth + listening publicly = a (possibly shell-capable) backend exposed on the internet.
+// That combination can only be a misconfiguration, so refuse to start rather than print a warning nobody reads.
+if (!CFG.token && !['127.0.0.1', 'localhost', '::1'].includes(CFG.host)) {
+  console.error(`Refusing to start: BIND_HOST=${CFG.host} listens publicly, but ACCESS_TOKEN is not set.
+Set one in .env (./start.sh generates it), or change BIND_HOST back to 127.0.0.1.`)
+  process.exit(1)
+}
+
+await db.connect()
+await db.migrate()
+const s = await db.seed(ROOT)
+if (s.seeded) console.log(`First start, imported from files: ${s.agents} agents, ${s.groups} groups, ${s.messages} messages`)
+if (await db.seedProviderFromEnv(env)) console.log('Created the default upstream from .env (change it later in the UI ⚙)')
+{ const n = await db.fillAgentModels(); if (n) console.log(`${n} agent(s) took over the model name from their upstream`) }
+
+await mkdir(join(WORKROOT, 'agents'), { recursive: true })
+await mkdir(join(WORKROOT, 'groups'), { recursive: true })
+
+// Keep idle keep-alive connections for 65 seconds (Node's default is 5). Connections in a client's pool
+// outlive the server's, so the next request lands on a socket that's already been closed.
+server.keepAliveTimeout = 65_000
+server.headersTimeout = 66_000
+
+server.listen(CFG.port, CFG.host, () => {
+  console.log(`Multi-Agent  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)
+  if (!CFG.token) console.log('(ACCESS_TOKEN not set; only listening on 127.0.0.1)')
+  if (!CFG.tools) console.log('(AGENT_TOOLS is off; agents can only talk, not act)')
+})

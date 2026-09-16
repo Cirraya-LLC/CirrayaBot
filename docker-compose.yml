@@ -1,0 +1,61 @@
+# One command brings up everything: PostgreSQL + Multi-Agent.
+#   ./start.sh            the first time (generates .env and the access token)
+#   docker compose up -d  afterwards
+#
+# podman: ./start.sh detects it and uses podman compose; it also points DOCKER_SOCK at
+# podman's socket, so the docker client in the container still works.
+name: multi-agent
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: multiagent
+      POSTGRES_DB: multiagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./start.sh first to generate .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # the app starts faster than the db; without waiting for readiness the first start can't connect
+      test: ["CMD-SHELL", "pg_isready -U multiagent -d multiagent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # Published to localhost only by default. For access from other machines set BIND_ADDR=0.0.0.0
+    # in .env — ACCESS_TOKEN is then the only door, and with AGENT_TOOLS=on there is a shell behind it.
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${WEB_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://multiagent:${POSTGRES_PASSWORD}@db:5432/multiagent
+      ACCESS_TOKEN: ${ACCESS_TOKEN:?run ./start.sh first to generate .env}
+      AGENT_TOOLS: ${AGENT_TOOLS:-off}
+      AGENT_IMAGE: ${AGENT_IMAGE:-multi-agent-worker:1}
+      AGENT_MEMORY: ${AGENT_MEMORY:-2g}
+      AGENT_CPUS: ${AGENT_CPUS:-2}
+      AGENT_EXEC_TIMEOUT: ${AGENT_EXEC_TIMEOUT:-120}
+      # change it when running a second deployment on the same machine, or both fight over the same container names
+      AGENT_PREFIX: ${AGENT_PREFIX:-ma}
+      # ⚠️ Agent containers are SIBLINGS, not children: the left side of -v must be a real host path.
+      # Written as /app/workspace they would mount an empty directory, with no error at all.
+      WORKSPACE_HOST_PATH: ${WORKSPACE_HOST_PATH:?run ./start.sh first to generate .env}
+      # used only to create the first upstream when the database has none; afterwards the UI is authoritative
+      BOT_LLM_BASE_URL: ${BOT_LLM_BASE_URL:-}
+      BOT_LLM_API_KEY: ${BOT_LLM_API_KEY:-}
+      BOT_LLM_MODEL: ${BOT_LLM_MODEL:-}
+      BOT_LLM_PROTOCOL: ${BOT_LLM_PROTOCOL:-}
+      BOT_LLM_NAME: ${BOT_LLM_NAME:-}
+      BOT_LLM_CONTEXT: ${BOT_LLM_CONTEXT:-}
+    volumes:
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${WORKSPACE_HOST_PATH}:/app/workspace
+
+volumes:
+  pgdata:

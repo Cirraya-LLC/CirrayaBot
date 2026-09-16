@@ -1,0 +1,13 @@
+node_modules/
+.dsh/
+*.log
+.env
+.web-credentials
+workspace/*
+!workspace/README.md
+.dsh-sessions/
+/data/
+.env.bak-*
+app/build/
+app/.dart_tool/
+app/pubspec.lock
