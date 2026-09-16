@@ -1,0 +1,59 @@
+/// Strings for the state area (workbench controller and API errors):
+/// key -> ['English', '简体', '繁體'].
+library;
+
+const Map<String, List<String>> stateStrings = {
+  // API failures
+  'api.unreachable': ["Can't reach the server", '连不上服务器', '連不上伺服器'],
+  'api.unreachableDetail': ["Can't reach the server: {detail}", '连不上服务器：{detail}', '連不上伺服器：{detail}'],
+  'api.unauthorized': [
+    'The access token is wrong, or the server has a new one',
+    '访问令牌不对，或者服务端换了一个',
+    '存取權杖不對，或者伺服器換了一個',
+  ],
+  'api.server': ['Server error', '服务器出错', '伺服器出錯'],
+  'api.serverDetail': ['Server error: {detail}', '服务器出错：{detail}', '伺服器出錯：{detail}'],
+  'api.badUrl': [
+    'The server address is malformed — it should look like http://192.168.1.10:8080',
+    '服务器地址格式不对，要像 http://192.168.1.10:8080 这样',
+    '伺服器位址格式不對，要像 http://192.168.1.10:8080 這樣',
+  ],
+  'api.tls': [
+    'TLS handshake failed (if the server is plain http, don\'t write https): {detail}',
+    'TLS 握手失败（服务器是 http 的话，地址别写成 https）：{detail}',
+    'TLS 交握失敗（伺服器是 http 的話，位址別寫成 https）：{detail}',
+  ],
+  'api.notJson': [
+    "The server didn't answer JSON — the address or port may point at another service",
+    '服务器回的不是 JSON —— 地址或端口可能指到了别的服务',
+    '伺服器回的不是 JSON —— 位址或連接埠可能指到了別的服務',
+  ],
+  'api.badShape': [
+    "The server's answer has the wrong shape — the address may point at another service",
+    '服务器回的格式不对 —— 地址可能指到了别的服务',
+    '伺服器回的格式不對 —— 位址可能指到了別的服務',
+  ],
+  'api.notJsonFile': ['This file is not JSON', '这个文件不是 JSON', '這個檔案不是 JSON'],
+  'api.silent': [
+    'Nothing from the server for 5 minutes — stopping this turn',
+    '5 分钟没收到服务器的任何动静，这一轮先停下',
+    '5 分鐘沒收到伺服器的任何動靜，這一輪先停下',
+  ],
+
+  // Transcript notes
+  'state.retry': ['{name} retrying: {reason}', '{name} 重试一次：{reason}', '{name} 重試一次：{reason}'],
+  'state.trimmed': [
+    'Context was full — dropped the earliest {n} messages',
+    '上下文放不下，省掉了最早的 {n} 条',
+    '上下文放不下，省略了最早的 {n} 則',
+  ],
+  'state.noResult': [
+    '(no result came back for this command)',
+    '（没有收到这条命令的结果）',
+    '（沒有收到這條指令的結果）',
+  ],
+
+  // Tool card labels
+  'tool.read': ['read {path}', '读 {path}', '讀 {path}'],
+  'tool.write': ['write {path}', '写 {path}', '寫 {path}'],
+};

@@ -1,0 +1,26 @@
+name: multi_agent
+description: "Multi-Agent desktop client — your AI colleagues, on Windows and macOS."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.9.0
+
+# Dependencies are deliberately almost empty. The client has no local state —
+# conversations, Agents, groups and memory all live in the server's PostgreSQL;
+# this is a view. HTTP is dart:io's HttpClient, settings are one JSON file,
+# state is a ChangeNotifier.
+# The one exception is file_selector (official Flutter): importing/exporting
+# needs the system open/save dialogs, which is native code on each platform.
+dependencies:
+  file_selector: ^1.1.0
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

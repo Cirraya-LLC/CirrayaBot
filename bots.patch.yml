@@ -1,0 +1,27 @@
+# Multi-Agent: wire bots/ up as a Bot roster, running on dsh's web profile.
+#
+# Why web and not headless: agentPresets.mount() has exactly one call site in the codebase
+# (host/apiproxy), so presets are only mounted when agents are created through Host/API.
+# headless calls ctx.agents.create() directly and the roster takes no part (CLAUDE.md 2.9.2).
+#
+# The web profile's host layer already disables 17 tool-* rows, so all tools come from the
+# preset — a Bot's no-go zones hold naturally here, with no patching like headless.patch.yml.
+
+- id: agent-presets
+  config:
+    default: chief
+    # roots CANNOT be set here — the launcher overwrites it unconditionally; see run.sh.
+    # Bots are discovered by being copied into the shipped root.
+    includeUserRoot: false
+
+# Model upstream. apiKeyEnv is the NAME of an environment variable, not the key — keys stay out of files and git.
+- id: llm-deepseek
+  config:
+    baseURL: !!js process.env.BOT_LLM_BASE_URL
+    apiKeyEnv: BOT_LLM_API_KEY
+    thinking: disabled
+
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: !!js process.env.BOT_LLM_MODEL
