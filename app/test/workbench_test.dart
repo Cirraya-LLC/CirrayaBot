@@ -88,8 +88,8 @@ void main() {
     await server.close(force: true);
   });
 
-  // Someone on another client writes into the open conversation while nobody
-  // types here: the next poll has to show it, without clicking away and back.
+  // A scheduled task writes into the open conversation while nobody types:
+  // the next poll has to show it, without the user clicking away and back.
   test('poll redraws the open conversation when something new landed in it', () async {
     var at = 1, history = <Map<String, Object?>>[{'role': 'user', 'content': 'old'}];
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -99,6 +99,7 @@ void main() {
         '/api/conversations' => jsonEncode([{'kind': 'agent', 'id': 'a', 'name': 'A', 'members': ['a'], 'at': at}]),
         '/api/bots' => jsonEncode([{'id': 'a', 'name': 'A', 'persona': 'x'}]),
         '/api/dm/a' => jsonEncode(history),
+        '/api/routines' => '[]',
         '/api/memory/agent/a' => '{"text":""}',
         _ => '{}',
       });
@@ -109,18 +110,18 @@ void main() {
     await bench.open(bench.conversations.first);
     expect((bench.entries.single as Said).text, 'old');
 
-    history = [...history, {'role': 'assistant', 'content': 'new reply'}];
+    history = [...history, {'role': 'assistant', 'content': 'routine result'}];
     at = 2;
     await bench.poll();
     expect(bench.entries.length, 2);
-    expect((bench.entries.last as Said).text, 'new reply');
+    expect((bench.entries.last as Said).text, 'routine result');
 
     // Mid-reply the transcript is being drawn live; a poll must leave it alone.
     history = [{'role': 'user', 'content': 'must not appear'}];
     at = 3;
     bench.busy = true;
     await bench.poll();
-    expect((bench.entries.last as Said).text, 'new reply');
+    expect((bench.entries.last as Said).text, 'routine result');
     bench.dispose();
     await server.close(force: true);
   });

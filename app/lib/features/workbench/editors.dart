@@ -2,6 +2,8 @@
 /// does, over the same endpoints.
 library;
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../../data/api.dart';
@@ -447,3 +449,318 @@ Future<bool> _confirm(BuildContext context, String title, String body) async =>
       ),
     ) ??
     false;
+
+// ── scheduled tasks ──────────────────────────────────────────────────────
+
+/// The machine's IANA time zone, which Dart does not expose. macOS and Linux
+/// keep it as the target of /etc/localtime; elsewhere (Windows) fall back to a
+/// fixed-offset zone — right until the next daylight-saving switch, which is
+/// why an existing task keeps the zone it was created with.
+String localTimeZone() {
+  try {
+    final target = File('/etc/localtime').resolveSymbolicLinksSync();
+    final i = target.indexOf('zoneinfo/');
+    if (i >= 0) return target.substring(i + 'zoneinfo/'.length);
+  } catch (_) {}
+  final off = DateTime.now().timeZoneOffset;
+  if (off.inMinutes % 60 == 0) {
+    final h = off.inHours;
+    // Etc/GMT signs are inverted: UTC+8 is Etc/GMT-8.
+    return h == 0 ? 'UTC' : 'Etc/GMT${h > 0 ? '-' : '+'}${h.abs()}';
+  }
+  return 'UTC';
+}
+
+String _two(int n) => n.toString().padLeft(2, '0');
+
+String _clock(DateTime d) => '${_two(d.hour)}:${_two(d.minute)}';
+
+/// "Weekdays 09:00", "Every 2 h", "9/21 09:00, once" — the same wording as the web page.
+String scheduleText(Routine r) {
+  final tz = r.tz.isNotEmpty && r.tz != localTimeZone() ? tr('ed.tzSuffix', {'tz': r.tz}) : '';
+  if (r.kind == 'interval') {
+    return r.everyMinutes % 60 == 0
+        ? tr('ed.everyHours', {'n': r.everyMinutes ~/ 60})
+        : tr('ed.everyMinutes', {'n': r.everyMinutes});
+  }
+  if (r.kind == 'once') {
+    final d = DateTime.fromMillisecondsSinceEpoch(r.runAt ?? 0);
+    return tr('ed.onceAt', {'date': '${d.month}/${d.day}', 'time': _clock(d)});
+  }
+  final w = r.weekdays.join(',');
+  final days = r.weekdays.isEmpty
+      ? tr('ed.everyDay')
+      : w == '1,2,3,4,5'
+      ? tr('ed.weekdays')
+      : w == '0,6'
+      ? tr('ed.weekends')
+      : tr('ed.everyWeek', {'days': r.weekdays.map((d) => tr('ed.wd$d')).join(tr('wb.listSep'))});
+  return '$days ${r.atTime}$tz';
+}
+
+/// When it runs next, in local time: "Today 09:00", "Mon 09:00", "9/30 09:00".
+String nextRunText(Routine r) {
+  if (!r.enabled || r.nextRunAt == null) return '';
+  final d = DateTime.fromMillisecondsSinceEpoch(r.nextRunAt!);
+  final now = DateTime.now();
+  final days = DateTime(d.year, d.month, d.day).difference(DateTime(now.year, now.month, now.day)).inDays;
+  final day = days == 0
+      ? tr('ed.today')
+      : days == 1
+      ? tr('ed.tomorrow')
+      : days < 7
+      ? tr('wb.wd${d.weekday % 7}')
+      : '${d.month}/${d.day}';
+  return tr('ed.next', {'when': '$day ${_clock(d)}'});
+}
+
+/// [routine] null = create one for [target].
+Future<void> showRoutineEditor(BuildContext context, Workbench bench, Conversation target, {Routine? routine}) =>
+    showDialog<void>(
+      context: context,
+      builder: (_) => _RoutineEditor(bench: bench, target: target, routine: routine),
+    );
+
+class _RoutineEditor extends StatefulWidget {
+  const _RoutineEditor({required this.bench, required this.target, this.routine});
+  final Workbench bench;
+  final Conversation target;
+  final Routine? routine;
+
+  @override
+  State<_RoutineEditor> createState() => _RoutineEditorState();
+}
+
+class _RoutineEditorState extends State<_RoutineEditor> {
+  late final _name = TextEditingController(text: widget.routine?.name ?? '');
+  late final _prompt = TextEditingController(text: widget.routine?.prompt ?? '');
+  late final _every = TextEditingController(text: '${widget.routine?.everyMinutes ?? 60}');
+  late String _kind = widget.routine?.kind ?? 'daily';
+  late TimeOfDay _time = _parseTime(widget.routine?.atTime);
+  late final Set<int> _weekdays = {...?widget.routine?.weekdays};
+  late DateTime _at = widget.routine?.runAt != null
+      ? DateTime.fromMillisecondsSinceEpoch(widget.routine!.runAt!)
+      : DateTime.now().add(const Duration(hours: 1));
+  late bool _enabled = widget.routine?.enabled ?? true;
+  String _error = '';
+  bool _busy = false;
+
+  static TimeOfDay _parseTime(String? s) {
+    final m = RegExp(r'^(\d\d):(\d\d)$').firstMatch(s ?? '');
+    return m == null
+        ? const TimeOfDay(hour: 9, minute: 0)
+        : TimeOfDay(hour: int.parse(m[1]!), minute: int.parse(m[2]!));
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _prompt.dispose();
+    _every.dispose();
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() job) async {
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    try {
+      await job();
+      await widget.bench.loadRoutines();
+      if (mounted) Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _save() {
+    final r = widget.routine;
+    final body = <String, Object?>{
+      'name': _name.text.trim(),
+      'prompt': _prompt.text.trim(),
+      'target_kind': widget.target.kind,
+      'target_id': widget.target.id,
+      'kind': _kind,
+      'at_time': '${_two(_time.hour)}:${_two(_time.minute)}',
+      'weekdays': (_weekdays.toList()..sort()),
+      'every_minutes': int.tryParse(_every.text.trim()) ?? 0,
+      'run_at': _at.millisecondsSinceEpoch,
+      'tz': (r?.tz.isNotEmpty ?? false) ? r!.tz : localTimeZone(),
+      'enabled': _enabled,
+    };
+    return _run(() => widget.bench.api.saveRoutine(body, id: r?.id));
+  }
+
+  Future<void> _delete() async {
+    final r = widget.routine!;
+    if (!await _confirm(context, tr('ed.deleteRoutineQ', {'name': r.name}), tr('ed.deleteRoutineBody'))) return;
+    await _run(() => widget.bench.api.deleteRoutine(r.id));
+  }
+
+  Future<void> _pickTime() async {
+    final t = await showTimePicker(context: context, initialTime: _time);
+    if (t != null) setState(() => _time = t);
+  }
+
+  Future<void> _pickMoment() async {
+    final day = await showDatePicker(
+      context: context,
+      initialDate: _at,
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 366)),
+    );
+    if (day == null || !mounted) return;
+    final t = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(_at));
+    if (t == null) return;
+    setState(() => _at = DateTime(day.year, day.month, day.day, t.hour, t.minute));
+  }
+
+  Widget _schedule() => switch (_kind) {
+    'interval' => Row(
+      children: [
+        SizedBox(
+          width: 120,
+          child: TextField(
+            controller: _every,
+            decoration: InputDecoration(labelText: tr('ed.intervalLabel')),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(tr('ed.min5'), style: const TextStyle(fontSize: 12, color: C.dim)),
+      ],
+    ),
+    'once' => Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        onPressed: _pickMoment,
+        icon: const Icon(Icons.event_outlined, size: 16),
+        label: Text('${_at.year}/${_at.month}/${_at.day} ${_clock(_at)}'),
+      ),
+    ),
+    _ => Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextButton.icon(
+          onPressed: _pickTime,
+          icon: const Icon(Icons.schedule, size: 16),
+          label: Text('${_two(_time.hour)}:${_two(_time.minute)}'),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (final d in const [1, 2, 3, 4, 5, 6, 0])
+              FilterChip(
+                label: Text(tr('wb.wd$d'), style: const TextStyle(fontSize: 12)),
+                selected: _weekdays.contains(d),
+                // The checkmark widens the chip, the row re-wraps and the buttons
+                // below jump away from the pointer.
+                showCheckmark: false,
+                onSelected: (on) => setState(() => on ? _weekdays.add(d) : _weekdays.remove(d)),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(tr('ed.noneEveryDay'), style: const TextStyle(fontSize: 11, color: C.dim2)),
+      ],
+    ),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final r = widget.routine;
+    final last = r?.lastRunAt == null
+        ? (r == null ? '' : tr('ed.neverRun'))
+        : tr('ed.lastRun', {
+            'at': DateTime.fromMillisecondsSinceEpoch(r!.lastRunAt!).toString().substring(0, 16),
+            'result': r.lastStatus == 'failed' ? tr('ed.failed', {'err': r.lastError}) : tr('ed.succeeded'),
+          });
+    return AlertDialog(
+      title: Text(
+        r == null ? tr('wb.newRoutine') : tr('ed.editTitle', {'name': r.name}),
+        style: const TextStyle(fontSize: 16),
+      ),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _name,
+                autofocus: r == null,
+                decoration: InputDecoration(hintText: tr('ed.routineNameHint')),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _prompt,
+                minLines: 4,
+                maxLines: 10,
+                decoration: InputDecoration(hintText: tr('ed.promptHint')),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                tr('ed.firesInto', {'name': widget.target.name}) +
+                    (widget.target.isGroup ? tr('ed.firesGroup') : '') +
+                    tr('ed.costs'),
+                style: const TextStyle(fontSize: 11.5, color: C.dim2),
+              ),
+              const SizedBox(height: 12),
+              SegmentedButton<String>(
+                segments: [
+                  for (final (v, k) in const [
+                    ('daily', 'ed.kindDaily'),
+                    ('interval', 'ed.kindInterval'),
+                    ('once', 'ed.kindOnce'),
+                  ])
+                    ButtonSegment(
+                      value: v,
+                      label: Text(tr(k), style: const TextStyle(fontSize: 12)),
+                    ),
+                ],
+                selected: {_kind},
+                showSelectedIcon: false,
+                onSelectionChanged: (v) => setState(() => _kind = v.first),
+              ),
+              const SizedBox(height: 12),
+              _schedule(),
+              const SizedBox(height: 6),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(tr('ed.enabled'), style: const TextStyle(fontSize: 13)),
+                value: _enabled,
+                onChanged: (v) => setState(() => _enabled = v),
+              ),
+              if (last.isNotEmpty) Text(last, style: const TextStyle(fontSize: 11.5, color: C.dim)),
+              if (_error.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(_error, style: const TextStyle(fontSize: 12, color: C.code)),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        if (r != null) ...[
+          TextButton(
+            onPressed: _busy ? null : _delete,
+            style: TextButton.styleFrom(foregroundColor: C.code),
+            child: Text(tr('common.delete')),
+          ),
+          TextButton(
+            onPressed: _busy || r.running ? null : () => _run(() => widget.bench.api.runRoutine(r.id)),
+            child: Text(tr('ed.runNow')),
+          ),
+        ],
+        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: Text(tr('common.cancel'))),
+        FilledButton(onPressed: _busy ? null : _save, child: Text(tr(r == null ? 'ed.create' : 'common.save'))),
+      ],
+    );
+  }
+}

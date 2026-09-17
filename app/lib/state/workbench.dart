@@ -47,13 +47,14 @@ class Note extends Entry {
 
 class Workbench extends ChangeNotifier {
   Workbench(Settings settings) : api = Api(settings) {
-    // Two people can have the same server open, so look again every so often:
-    // left-list previews, and the open conversation's history when something
-    // new landed in it.
+    // Scheduled tasks write into conversations while nobody is typing, so look
+    // again every so often: left-list previews, task states, and the open
+    // conversation's history when something new landed in it.
     _poller = Timer.periodic(const Duration(seconds: 15), (_) => poll());
   }
 
   late final Timer _poller;
+  List<Routine> routines = const [];
 
   final Api api;
 
@@ -138,8 +139,10 @@ class Workbench extends ChangeNotifier {
     entries.clear();
     memory = '';
     memoryFor = null;
+    routines = const [];
     notifyListeners();
     unawaited(_loadMemory(c, ticket));
+    unawaited(loadRoutines());
     await _drawHistory(c, ticket);
   }
 
@@ -167,6 +170,19 @@ class Workbench extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> loadRoutines() async {
+    final c = current;
+    if (c == null) return;
+    try {
+      final list = await api.routines(c);
+      if (current?.id != c.id) return;
+      routines = list;
+      notifyListeners();
+    } on ApiException catch (_) {
+      // Best effort, like memory: the panel keeps what it had.
+    }
+  }
+
   /// One look at the server. Skipped while a reply is streaming — that
   /// transcript is being drawn live and a redraw would wipe the tool cards.
   Future<void> poll() async {
@@ -176,6 +192,7 @@ class Workbench extends ChangeNotifier {
     await refresh();
     final c = current;
     if (c == null || busy || ticket != _shown) return;
+    unawaited(loadRoutines());
     if (c.at != before) await _drawHistory(c, ticket);
   }
 

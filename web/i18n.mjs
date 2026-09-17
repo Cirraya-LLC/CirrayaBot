@@ -3,8 +3,8 @@
 // text is replaced from `vars`.
 //
 // The language comes from the request (`X-Lang` header, or `?lang=` where a
-// header cannot be set). Anything that runs without a request (startup)
-// speaks English.
+// header cannot be set — <img>, WebSocket). Anything that runs without a
+// request (routines, startup) speaks English.
 //
 // Self-test: node web/i18n.mjs
 
@@ -13,8 +13,8 @@ import { coreStrings } from './strings/core.mjs'
 
 export const LANGS = ['en', 'zh-Hans', 'zh-Hant']
 
-// server.mjs owns strings/server.mjs; the smaller modules (db, model,
-// protocols) own strings/core.mjs. Keys are prefixed by area.
+// server.mjs owns strings/server.mjs; the smaller modules (schedule, db,
+// model, protocols) own strings/core.mjs. Keys are prefixed by area.
 const M = { ...serverStrings, ...coreStrings }
 
 /** Pick the request's language; unknown or missing means English. */

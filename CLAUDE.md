@@ -1110,12 +1110,57 @@ dropdown)" (「模型上游不应该带model model是要自己选择的（提供
   they used to sit in two adjacent Rows and looked like one bar. Now one `Wrap(spacing: 8)`, with the
   status text on its own line
 
+## 2.21 Scheduled tasks (2026-09-19)
+
+The boss: "scheduled tasks, a skill library, browser operation and so on — we definitely need all of
+these" (「定时任务 技能库 浏览器操作等等这些肯定都要啊」), and chose option A (build on our own loop,
+don't switch to dsh), in the order scheduled tasks → browser → skill library.
+
+**dsh's `schedule` is no use**: it hangs off a single session, disappears when the session ends, and has
+a 5-minute minimum. We need something attached to an Agent / group that survives restarts.
+
+- **When it fires = someone sent a message in that conversation.** Sending a message from the UI and
+  scheduled tasks both go through `converse()` (server.mjs); two implementations would eventually diverge.
+  The message sent is prefixed with a line like "〔Scheduled task "name" sent automatically; nobody is
+  watching live. Write up the result clearly when done.〕", so the Agent knows nobody is watching live
+  and the result must be complete. For a group task, if you want someone specific to take it first, @
+  him in the prompt
+- Table `routines`; three frequencies `interval` (≥5 minutes) / `daily` (HH:MM + weekdays, empty = every
+  day) / `once` (disables itself after running).
+  **The next-run computation is in `web/schedule.mjs` and uses the task's own IANA time zone, not the
+  server's**; the DST switch hour gets two corrections; `node web/schedule.mjs` is the self-test
+  (including two New York DST cases)
+- The scheduler ticks every 20 seconds (`tickRoutines`). **Write next_run_at first, then start running**
+  — the other way round, a process dying halfway would rerun it; runs missed during downtime are caught up
+  only once after startup. The same task never overlaps itself (`routineRunning`, single process, in
+  memory)
+- **Automatically paused after 5 consecutive failures**, with the reason in `last_error`; re-enabling
+  resets the failure count. After a run, **re-read the row before writing the status** — someone may
+  have edited it during those minutes
+- "Run once now" doesn't change next_run_at (it mustn't move tomorrow's 9am run); clicking again while
+  it's running returns 409
+- Deleting an Agent / group deletes its tasks too
+- **The UI checks every 15 seconds** (the web's `setInterval`, the client's `Workbench.poll`): left panel
+  previews, task status, and it repaints the history when the current conversation has new messages.
+  **It doesn't touch anything while you're sending (busy)** — a streaming reply is being drawn on screen
+  and a repaint would wipe the tool cards. `test/workbench_test.dart` pins both
+- The client can't get an IANA time zone (Dart doesn't have it): macOS/Linux read the link target of
+  `/etc/localtime`, Windows falls back to `Etc/GMT±N` (an hour off after a DST switch). Editing an
+  existing task keeps its own time zone
+- The client's weekday FilterChips need `showCheckmark: false`: the checkmark widens them, wraps the
+  whole row, and moves the buttons below
+
+**Not done yet**: event triggers (Grok Bot has "a message arrives in some channel", "a GitHub event");
+letting Agents create tasks themselves (think it through first: one injection could make it run every 5
+minutes and spend money); a per-task spending cap.
+
 ## 3. What runs now
 
 ```bash
 ./start.sh                 # one command: PostgreSQL + service, prints the address with the token
 docker compose logs -f app
 node web/model.mjs         # self-test for context budgeting / window inference
+node web/schedule.mjs      # self-test for scheduled-task time computation
 node web/protocols.mjs     # self-test for translating the three protocols
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/
@@ -1133,8 +1178,8 @@ built-in web UI, **not part of the product**, kept only for the record.
 2. **Per-Agent spending cap** — the gap none of the five open-source options filled.
    The `messages` table is already there; what's missing is recording each round's token counts
 3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)
-4. Scheduled tasks, a skill library and browser control — the boss asked for all three
-   (「定时任务 技能库 浏览器操作等等这些肯定都要啊」), none of them built yet
+4. **Browser operation and a skill library** — the two the boss asked for next, after scheduled tasks
+   (2.21); plus event triggers for scheduled tasks
 
 ## 4. Maintaining this file (the boss, 2026-09-05: "from now on you should update CLAUDE.md yourself" (「你以后都应该自我更新 CLAUDE.md」))
 

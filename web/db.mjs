@@ -87,6 +87,29 @@ alter table groups add column if not exists lead text;
 -- The model is chosen per Agent; an upstream only says where to connect, with which key, in which protocol.
 -- providers.model is now only a migration source for old data (fillAgentModels); new upstreams store ''.
 alter table providers alter column model set default '';
+
+-- Routines: when due, it is as if someone sent a message in that conversation. Frequency semantics live in web/schedule.mjs.
+create table if not exists routines (
+  id            text primary key,
+  name          text not null,
+  target_kind   text not null check (target_kind in ('agent','group')),
+  target_id     text not null,
+  prompt        text not null,
+  kind          text not null check (kind in ('interval','daily','once')),
+  every_minutes int  not null default 0,
+  at_time       text not null default '',
+  weekdays      int[] not null default '{}',
+  run_at        timestamptz,
+  tz            text not null default 'Asia/Shanghai',
+  enabled       bool not null default true,
+  next_run_at   timestamptz,
+  last_run_at   timestamptz,
+  last_status   text not null default '',
+  last_error    text not null default '',
+  failures      int  not null default 0,
+  created_at    timestamptz not null default now()
+);
+create index if not exists routines_due_idx on routines (next_run_at) where enabled;
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -145,6 +168,7 @@ export async function deleteAgent(id) {
   await q(`delete from messages where scope = 'dm' and scope_id = $1`, [id])
   await q('delete from agents where id = $1', [id])
   await q('delete from settings where key = $1', [memKey('agent', id)])
+  await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
 }
 
 export const nextColor = n => COLORS[n % COLORS.length]
@@ -167,6 +191,7 @@ export async function deleteGroup(id) {
   await q(`delete from messages where scope = 'group' and scope_id = $1`, [id])
   await q('delete from groups where id = $1', [id])
   await q('delete from settings where key = $1', [memKey('group', id)])
+  await q(`delete from routines where target_kind = 'group' and target_id = $1`, [id])
 }
 
 // ---------- messages ----------
@@ -232,6 +257,40 @@ export async function setSetting(key, value) {
 export const memKey = (kind, id) => `memory:${kind}:${id}`
 export const getMemory = (kind, id) => getSetting(memKey(kind, id), '')
 export const setMemory = (kind, id, text) => setSetting(memKey(kind, id), text)
+
+// ---------- routines ----------
+export async function listRoutines({ kind, id } = {}) {
+  const { rows } = kind
+    ? await q('select * from routines where target_kind = $1 and target_id = $2 order by created_at', [kind, id])
+    : await q('select * from routines order by created_at')
+  return rows
+}
+
+export async function getRoutine(id) {
+  return (await q('select * from routines where id = $1', [id])).rows[0] ?? null
+}
+
+export async function saveRoutine(r) {
+  const cols = ['id', 'name', 'target_kind', 'target_id', 'prompt', 'kind', 'every_minutes', 'at_time',
+    'weekdays', 'run_at', 'tz', 'enabled', 'next_run_at', 'last_run_at', 'last_status', 'last_error', 'failures']
+  const ts = v => (v == null ? null : new Date(v))
+  const vals = cols.map(c => ['run_at', 'next_run_at', 'last_run_at'].includes(c) ? ts(r[c]) : r[c])
+  const { rows } = await q(`
+    insert into routines (${cols.join(',')}) values (${cols.map((_, i) => `$${i + 1}`).join(',')})
+    on conflict (id) do update set ${cols.slice(1).map(c => `${c} = excluded.${c}`).join(', ')}
+    returning *`, vals)
+  return rows[0]
+}
+
+export async function deleteRoutine(id) {
+  await q('delete from routines where id = $1', [id])
+}
+
+/** Routines that are due. Single-process deployment; the scheduler itself tracks whether one is running. */
+export async function dueRoutines() {
+  const { rows } = await q('select * from routines where enabled and next_run_at <= now() order by next_run_at')
+  return rows
+}
 
 // ---------- model upstreams ----------
 export async function listProviders() {
