@@ -8,6 +8,7 @@ import { env, ROOT } from './env.mjs'
 import * as db from './db.mjs'
 import { fitContext, listModels, probeContext } from './model.mjs'
 import { callUpstream, normProtocol, PROTOCOLS } from './protocols.mjs'
+import { checkSchedule, nextRun } from './schedule.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
@@ -405,7 +406,7 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
     const full = await runAgent(p,
       [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot)) },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang })
+      onDelta, onTool, { container, signal, lang })
     await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
     return full
   })
@@ -421,7 +422,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
         ? { role: 'assistant', content: e.content }                                   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang })
+    return runAgent(p, messages, onDelta, onTool, { container, signal, lang })
   })
 }
 
@@ -449,7 +450,8 @@ function findMention(text, peers) {
 
 /**
  * One conversation: a message comes in; in a direct chat that person replies, in a group the relay runs until nobody is @-ed.
- * Errors aren't thrown; they're reported via emit('error'), which the UI shows.
+ * Sending from the UI and a scheduled task firing both go through this one function — two implementations would drift apart.
+ * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
 async function converse(bots, groupId, providers, text, emit, signal, lang = 'en') {
   try {
@@ -500,6 +502,97 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
   } catch (e) {
     emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300) })
   }
+}
+
+// ---------- Scheduled tasks ----------
+// When one is due, it's treated as someone sending a message in that conversation, through exactly the same converse as the UI.
+// It spends money and runs commands in containers while nobody is watching, so: minimum interval 5 minutes (schedule.mjs),
+// it stops itself after 5 consecutive failures, and the same task never runs overlapping.
+
+/** Conversation target → who is in this conversation. A group short on members or a missing agent is explained here. */
+async function resolveTarget(kind, id) {
+  const all = await loadBots()
+  if (kind === 'group') {
+    const g = (await db.listGroups()).find(x => x.id === id)
+    if (!g) throw new Say('err.noGroup')
+    const bots = all.filter(b => g.members.includes(b.id))
+    if (bots.length < 2) throw new Say('group.tooSmall', { name: g.name, n: bots.length })
+    return { bots, groupId: g.id, name: g.name }
+  }
+  const bot = all.find(b => b.id === id)
+  if (!bot) throw new Say('err.noAgent')
+  return { bots: [bot], groupId: null, name: bot.name }
+}
+
+const MAX_ROUTINE_FAILURES = 5
+const routineRunning = new Set()
+
+const routineView = r => ({
+  ...r, running: routineRunning.has(r.id),
+})
+
+/** Run a task once. Never throws: the result is written back to the task's row, visible in the UI. */
+async function runRoutine(r) {
+  if (routineRunning.has(r.id)) return false
+  routineRunning.add(r.id)
+  const startedAt = Date.now()
+  let error = ''
+  try {
+    const { bots, groupId } = await resolveTarget(r.target_kind, r.target_id)
+    const providers = new Map()
+    for (const b of bots) providers.set(b.id, await providerFor(b))
+    // The opening line tells the agent this isn't a human talking live, so the result must be written out for when they come back
+    const text = `[Scheduled task "${r.name}", sent automatically — nobody is watching live. When you're done, write up the result clearly.]\n${r.prompt}`
+    await converse(bots, groupId, providers, text,
+      (ev, d) => { if (ev === 'error' && !error) error = d.message }, new AbortController().signal)
+  } catch (e) {
+    error = errorText(e, 'en').slice(0, 300)
+  } finally {
+    routineRunning.delete(r.id)
+  }
+  // Re-read it: someone may have edited it during these minutes (changed the time, paused it); those edits must not be overwritten here
+  const cur = await db.getRoutine(r.id)
+  if (!cur) return true
+  const failures = error ? cur.failures + 1 : 0
+  const tripped = failures >= MAX_ROUTINE_FAILURES
+  await db.saveRoutine({ ...cur, last_run_at: startedAt, last_status: error ? 'failed' : 'ok',
+    last_error: tripped ? tr('en', 'routine.tripped', { n: failures, error }) : error,
+    failures, enabled: cur.enabled && !tripped })
+  if (error) console.log(`Scheduled task "${r.name}" failed: ${error}`)
+  return true
+}
+
+/** One tick of the scheduler. Write the next run time before starting — otherwise a process dying midway would rerun it after restart. */
+async function tickRoutines() {
+  for (const r of await db.dueRoutines()) {
+    if (routineRunning.has(r.id)) continue
+    const next = nextRun(r, Date.now())
+    await db.saveRoutine({ ...r, next_run_at: next, enabled: next != null })
+    runRoutine(r)
+  }
+}
+
+// A validation error from schedule.mjs: pass Say through, turn anything else into a 400.
+const asBadRequest = e => (e instanceof Say ? e : Object.assign(new Error(e.message), { status: 400 }))
+
+/** Form → task fields. On PATCH, fields not sent keep their old values. */
+async function checkRoutine(b, cur = null) {
+  const name = str(b.name ?? cur?.name).trim()
+  if (!name) throw new Say('routine.nameRequired')
+  const prompt = str(b.prompt ?? cur?.prompt).trim()
+  if (!prompt) throw new Say('routine.promptRequired')
+  const target_kind = b.target_kind ?? cur?.target_kind
+  const target_id = str(b.target_id ?? cur?.target_id)
+  if (!['agent', 'group'].includes(target_kind)) throw new Say('routine.target')
+  await resolveTarget(target_kind, target_id)
+  let sched
+  try {
+    sched = checkSchedule(cur ? { kind: cur.kind, every_minutes: cur.every_minutes, at_time: cur.at_time,
+      weekdays: cur.weekdays, run_at: cur.run_at, tz: cur.tz, ...b } : b)
+  } catch (e) { throw asBadRequest(e) }
+  const enabled = b.enabled ?? cur?.enabled ?? true
+  if (typeof enabled !== 'boolean') throw new Say('routine.enabled')
+  return { name: name.slice(0, 60), prompt: prompt.slice(0, 4000), target_kind, target_id, ...sched, enabled }
 }
 
 // ---------- Upstreams ----------
@@ -731,6 +824,38 @@ const server = createServer(async (req, res) => {
       if (req.method === 'PUT') { await db.setMemory(kind, id, str((await readBody(req)).text)); return send(200, { ok: true }) }
     }
 
+    // ---- Scheduled tasks ----
+    if (url.pathname === '/api/routines' && req.method === 'GET') {
+      const kind = url.searchParams.get('kind'), id = url.searchParams.get('id')
+      return send(200, (await db.listRoutines(kind ? { kind, id } : {})).map(routineView))
+    }
+    if (url.pathname === '/api/routines' && req.method === 'POST') {
+      const r = await checkRoutine(await readBody(req))
+      const row = await db.saveRoutine({ id: 'r' + Date.now().toString(36), ...r,
+        next_run_at: r.enabled ? nextRun(r) : null, last_status: '', last_error: '', failures: 0 })
+      return send(200, routineView(row))
+    }
+    const rm = url.pathname.match(/^\/api\/routines\/([\w-]+)(\/run)?$/)
+    if (rm) {
+      const cur = await db.getRoutine(rm[1])
+      if (!cur) return send(404, { error: t('err.noRoutine') })
+      if (rm[2] && req.method === 'POST') {
+        // A manual run doesn't change the next run time: "try it now" shouldn't move tomorrow's 9 a.m. run
+        if (routineRunning.has(cur.id)) return send(409, { error: t('routine.running') })
+        runRoutine(cur)
+        return send(202, routineView({ ...cur, running: true }))
+      }
+      if (!rm[2] && req.method === 'PATCH') {
+        const r = await checkRoutine(await readBody(req), cur)
+        // Reset the failure count when re-enabling, otherwise a single failure pauses it again
+        const revived = r.enabled && !cur.enabled
+        const row = await db.saveRoutine({ ...cur, ...r, next_run_at: r.enabled ? nextRun(r) : null,
+          failures: revived ? 0 : cur.failures, last_error: revived ? '' : cur.last_error })
+        return send(200, routineView(row))
+      }
+      if (!rm[2] && req.method === 'DELETE') { await db.deleteRoutine(cur.id); return send(200, { ok: true }) }
+    }
+
     // ---- Model upstreams ----
     if (url.pathname === '/api/providers' && req.method === 'GET')
       return send(200, (await db.listProviders()).map(p => safeProvider(p, lang)))
@@ -957,6 +1082,9 @@ await mkdir(join(WORKROOT, 'groups'), { recursive: true })
 // outlive the server's, so the next request lands on a socket that's already been closed.
 server.keepAliveTimeout = 65_000
 server.headersTimeout = 66_000
+// Scheduled tasks: runs missed while down are made up only once after startup (next_run_at in the past → due on this tick)
+setInterval(() => tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e)), 20_000)
+tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))
 
 server.listen(CFG.port, CFG.host, () => {
   console.log(`Multi-Agent  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)

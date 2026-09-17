@@ -102,6 +102,71 @@ class Message {
   final int at;
 }
 
+/// A scheduled task: at its time the server posts [prompt] into the target
+/// conversation as if someone typed it. Schedule semantics live server-side
+/// (web/schedule.mjs); the client only renders them.
+class Routine {
+  const Routine({
+    required this.id,
+    required this.name,
+    required this.targetKind,
+    required this.targetId,
+    required this.prompt,
+    required this.kind,
+    required this.everyMinutes,
+    required this.atTime,
+    required this.weekdays,
+    required this.runAt,
+    required this.tz,
+    required this.enabled,
+    required this.nextRunAt,
+    required this.lastRunAt,
+    required this.lastStatus,
+    required this.lastError,
+    required this.running,
+  });
+
+  final String id;
+  final String name;
+  final String targetKind;
+  final String targetId;
+  final String prompt;
+
+  /// `daily` / `interval` / `once`.
+  final String kind;
+  final int everyMinutes;
+  final String atTime;
+  final List<int> weekdays;
+  final int? runAt;
+  final String tz;
+  final bool enabled;
+  final int? nextRunAt;
+  final int? lastRunAt;
+  final String lastStatus;
+  final String lastError;
+  final bool running;
+
+  static Routine fromJson(Map<String, Object?> j) => Routine(
+    id: (j['id'] as String?) ?? '',
+    name: (j['name'] as String?) ?? '',
+    targetKind: (j['target_kind'] as String?) ?? 'agent',
+    targetId: (j['target_id'] as String?) ?? '',
+    prompt: (j['prompt'] as String?) ?? '',
+    kind: (j['kind'] as String?) ?? 'daily',
+    everyMinutes: (j['every_minutes'] as num?)?.toInt() ?? 0,
+    atTime: (j['at_time'] as String?) ?? '',
+    weekdays: [for (final d in (j['weekdays'] as List?) ?? const []) if (d is num) d.toInt()],
+    runAt: (j['run_at'] as num?)?.toInt(),
+    tz: (j['tz'] as String?) ?? '',
+    enabled: (j['enabled'] as bool?) ?? true,
+    nextRunAt: (j['next_run_at'] as num?)?.toInt(),
+    lastRunAt: (j['last_run_at'] as num?)?.toInt(),
+    lastStatus: (j['last_status'] as String?) ?? '',
+    lastError: (j['last_error'] as String?) ?? '',
+    running: (j['running'] as bool?) ?? false,
+  );
+}
+
 class Provider {
   const Provider({
     required this.id,
@@ -180,8 +245,8 @@ class Api {
 
   void close() => _client.close(force: true);
 
-  /// Every URL carries `lang=` too, so a request that cannot set the header
-  /// still gets its answer in the right language.
+  /// Every URL carries `lang=` too, so the server answers in it even where a
+  /// header cannot be set.
   Uri _uri(String path) {
     final u = Uri.parse('${settings.baseUrl}$path');
     return u.replace(queryParameters: {
@@ -370,6 +435,18 @@ class Api {
     final j = id == null ? await _map('POST', '/api/providers', body) : await _map('PATCH', '/api/providers/$id', body);
     return Provider.fromJson(j);
   }
+
+  Future<List<Routine>> routines(Conversation c) async {
+    final j = await _list('/api/routines?kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}');
+    return j.map((e) => Routine.fromJson(e as Map<String, Object?>)).toList();
+  }
+
+  Future<Routine> saveRoutine(Map<String, Object?> body, {String? id}) async => Routine.fromJson(
+    id == null ? await _map('POST', '/api/routines', body) : await _map('PATCH', '/api/routines/$id', body),
+  );
+
+  Future<void> deleteRoutine(String id) => _json('DELETE', '/api/routines/$id');
+  Future<void> runRoutine(String id) => _json('POST', '/api/routines/$id/run');
 
   Future<void> deleteProvider(String id) => _json('DELETE', '/api/providers/$id');
   Future<void> makeDefaultProvider(String id) => _json('POST', '/api/providers/$id/default');

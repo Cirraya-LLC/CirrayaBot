@@ -89,6 +89,7 @@ async function openConv(c) {
   $('#in').placeholder = t(c.kind === 'group' ? 'comp.toGroup' : 'comp.toAgent', { name: c.name })
   renderMembers(c)
   loadMemory(c)
+  loadRoutines()
 
   if (!await drawHistory(c, ticket)) return
   renderConvs(); $('#in').focus(); $('#send').disabled = busy
@@ -578,14 +579,102 @@ $('#xfile').onchange = async () => {
   await reloadAndReopen()
 }
 
-// Two people can have the same server open, so look again every so often: left previews,
-// and the open conversation's history when something new landed in it.
-// Not while busy — a reply is streaming and a redraw would wipe the tool cards.
+// ═══ Scheduled tasks ═══
+// Weekday names from Intl; 2024-01-07 was a Sunday, so index 0 = Sunday
+const WD = [0, 1, 2, 3, 4, 5, 6].map(d => new Date(2024, 0, 7 + d).toLocaleDateString(lang, { weekday:'short' }))
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone
+let RTS = []
+function schedText(r) {
+  const tz = r.tz && r.tz !== TZ ? t('r.tz', { tz: r.tz }) : ''
+  if (r.kind === 'interval') return r.every_minutes % 60 === 0 ? t('r.everyHours', { n: r.every_minutes / 60 }) : t('r.everyMinutes', { n: r.every_minutes })
+  if (r.kind === 'once') return t('r.onceAt', { when: new Date(r.run_at).toLocaleString(lang, { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) }) + tz
+  const d = r.weekdays ?? []
+  const days = !d.length ? t('r.daily') : d.join() === '1,2,3,4,5' ? t('r.weekdays') : d.join() === '0,6' ? t('r.weekends') : t('r.weekly', { days: listJoin(d.map(x => WD[x])) })
+  return `${days} ${r.at_time}${tz}`
+}
+function rtState(r) {
+  if (r.running) return `<span class="st run">${esc(t('r.running'))}</span>`
+  if (r.last_status === 'failed') return `<span class="st bad" title="${esc(r.last_error)}">${esc(t('r.lastFailed'))}</span>`
+  if (!r.enabled) return `<span class="st">${esc(t('r.paused'))}</span>`
+  return ''
+}
+async function loadRoutines() {
+  const c = cur; if (!c) return
+  const list = await fetch(api(`/api/routines?kind=${c.kind}&id=${c.id}`)).then(r => r.json()).catch(() => [])
+  if (cur !== c) return
+  RTS = list
+  const box = $('#routines'); box.innerHTML = ''
+  for (const r of list) {
+    const el = document.createElement('div')
+    el.className = 'rt' + (r.enabled ? '' : ' off')
+    const next = r.enabled && r.next_run_at ? t('r.next', { when: when(r.next_run_at) + (new Date(r.next_run_at).toDateString() === new Date().toDateString() ? '' : ' ' + hm(new Date(r.next_run_at))) }) : ''
+    el.innerHTML = `<b>${esc(r.name)} ${rtState(r)}</b><small>${esc(schedText(r))}${next}</small>`
+    el.onclick = () => editRoutine(r)
+    box.appendChild(el)
+  }
+}
+
+let rEditing = null
+$('#rwd').innerHTML = [1, 2, 3, 4, 5, 6, 0].map(d => `<label><input type="checkbox" value="${d}">${esc(WD[d])}</label>`).join('')
+const showKind = () => document.querySelectorAll('#rsched>div').forEach(d => { d.hidden = d.dataset.k !== $('#rkind').value })
+$('#rkind').onchange = showKind
+const localInput = ms => { const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000); return d.toISOString().slice(0, 16) }
+
+function editRoutine(r) {
+  if (!cur) return
+  rEditing = r
+  const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id)
+  $('#rtitle').textContent = r ? t('common.editNamed', { name: r.name }) : t('r.new')
+  $('#rwho').textContent = t('r.who', { name: c?.name ?? '' }) + (cur.kind === 'group' ? t('r.whoGroup') : '') + t('r.whoCost')
+  $('#rname').value = r?.name ?? ''
+  $('#rprompt').value = r?.prompt ?? ''
+  $('#rkind').value = r?.kind ?? 'daily'
+  $('#rtime').value = r?.at_time || '09:00'
+  document.querySelectorAll('#rwd input').forEach(i => { i.checked = (r?.weekdays ?? []).includes(+i.value) })
+  $('#revery').value = r?.every_minutes || 60
+  $('#rat').value = localInput(r?.run_at ?? Date.now() + 3600_000)
+  $('#ron').checked = r?.enabled ?? true
+  $('#rstat').textContent = !r ? '' : r.last_run_at
+    ? t('r.lastRun', { time: new Date(r.last_run_at).toLocaleString(lang), result: r.last_status === 'failed' ? t('r.failedWith', { err: r.last_error }) : t('r.ok') })
+    : t('r.never')
+  $('#rdel').style.display = $('#rrun').style.display = r ? '' : 'none'
+  showKind()
+  $('#rdlg').showModal()
+}
+$('#addrt').onclick = () => editRoutine(null)
+$('#rcancel').onclick = () => $('#rdlg').close()
+$('#rsave').onclick = async () => {
+  const body = { name: $('#rname').value.trim(), prompt: $('#rprompt').value.trim(), kind: $('#rkind').value,
+    target_kind: cur.kind, target_id: cur.id, tz: rEditing?.tz || TZ, enabled: $('#ron').checked,
+    at_time: $('#rtime').value, every_minutes: Number($('#revery').value),
+    weekdays: [...document.querySelectorAll('#rwd input:checked')].map(i => +i.value),
+    run_at: $('#rat').value ? new Date($('#rat').value).getTime() : null }
+  const r = rEditing
+    ? await fetch(api(`/api/routines/${rEditing.id}`), { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
+    : await fetch(api('/api/routines'), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
+  if (!r.ok) { alert(await errText(r)); return }
+  $('#rdlg').close(); loadRoutines()
+}
+$('#rdel').onclick = async () => {
+  if (!rEditing || !confirm(t('r.confirmDelete', { name: rEditing.name }))) return
+  await fetch(api(`/api/routines/${rEditing.id}`), { method:'DELETE' })
+  $('#rdlg').close(); loadRoutines()
+}
+$('#rrun').onclick = async () => {
+  if (!rEditing) return
+  const r = await fetch(api(`/api/routines/${rEditing.id}/run`), { method:'POST' })
+  if (!r.ok) { alert(await errText(r)); return }
+  $('#rdlg').close(); loadRoutines()
+}
+
+// Scheduled tasks write into conversations unattended, so poll: left previews, task status,
+// and redraw the open conversation on new messages. Not while busy — a reply is streaming.
 setInterval(async () => {
   if (busy || document.hidden || $('dialog[open]')) return
   const before = cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)?.at
   CONVS = await fetch(api('/api/conversations')).then(r => r.json()).catch(() => CONVS)
   renderConvs()
+  loadRoutines()
   const now = cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)
   if (now && now.at !== before && !busy) drawHistory(now, shown)
 }, 15_000)

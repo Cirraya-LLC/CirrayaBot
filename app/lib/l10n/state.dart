@@ -34,6 +34,12 @@ const Map<String, List<String>> stateStrings = {
     '伺服器回的格式不對 —— 位址可能指到了別的服務',
   ],
   'api.notJsonFile': ['This file is not JSON', '这个文件不是 JSON', '這個檔案不是 JSON'],
+  'api.streamFailed': [
+    "Couldn't connect to the live view ({code})",
+    '实时画面连不上（{code}）',
+    '即時畫面連不上（{code}）',
+  ],
+  'api.exportFailed': ['Export failed ({code})', '导出失败（{code}）', '匯出失敗（{code}）'],
   'api.silent': [
     'Nothing from the server for 5 minutes — stopping this turn',
     '5 分钟没收到服务器的任何动静，这一轮先停下',

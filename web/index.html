@@ -137,6 +137,21 @@
         cursor:pointer;width:100%}
   .addm:hover{color:var(--ink)}
   .addm b{width:26px;height:26px;border-radius:50%;background:#2f2f37;display:grid;place-items:center;font-size:14px}
+  /* Scheduled tasks */
+  .s2h.sub{border-top:1px solid var(--line);margin-top:8px;padding-top:14px}
+  .rt{display:flex;flex-direction:column;gap:2px;padding:7px 18px;cursor:pointer}
+  .rt:hover{background:#212127}
+  .rt b{font-size:13px;font-weight:500;display:flex;gap:6px;align-items:center}
+  .rt small{color:var(--dim2);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rt .st{font-size:10.5px;padding:1px 6px;border-radius:5px;background:#2a2a31;color:var(--dim);font-weight:400}
+  .rt .st.bad{background:#3a2226;color:#e06c75}
+  .rt .st.run{background:#1e2d45;color:#8fb6ff}
+  .rt.off b{color:var(--dim)}
+  #rsched>div{margin-bottom:10px}
+  .wd{display:flex;gap:6px;flex-wrap:wrap}
+  .wd label{display:flex;gap:4px;align-items:center;font-size:12.5px;background:#151519;border:1px solid var(--line);
+            border-radius:7px;padding:4px 8px;cursor:pointer}
+  .wd input{accent-color:var(--accent)}
   .rhint{color:var(--dim2);font-size:11.5px;line-height:1.6;display:block;margin:-2px 0 8px}
   .s2mem{border-top:1px solid var(--line);margin-top:auto;padding:14px 18px;display:flex;
          flex-direction:column;gap:8px}
@@ -171,7 +186,7 @@
 
   /* Model providers */
   /* Scroll the list, not the whole dialog, so the action buttons stay in view */
-  #plist,#klist{max-height:32vh;overflow-y:auto;margin:-4px -4px 0}
+  #plist{max-height:32vh;overflow-y:auto;margin:-4px -4px 0}
   .pitem{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:9px;cursor:pointer;
          border:1px solid transparent}
   .pitem:hover{background:#26262c}
@@ -237,6 +252,9 @@
   <div class="s2h" data-i18n="s2.members"></div>
   <div id="members"></div>
   <button class="addm" id="addmem"><b>＋</b> <span data-i18n="s2.addMember"></span></button>
+  <div class="s2h sub" data-i18n="s2.routines"></div>
+  <div id="routines"></div>
+  <button class="addm" id="addrt"><b>＋</b> <span data-i18n="s2.addRoutine"></span></button>
   <div class="s2mem">
     <small id="memtitle" data-i18n="mem.title"></small>
     <textarea id="mem" data-i18n-placeholder="mem.agentPh"></textarea>
@@ -245,6 +263,32 @@
       <input type="file" id="xfile" accept="application/json,.json" hidden></div>
   </div>
 </div>
+
+<dialog id="rdlg">
+  <h4 id="rtitle" data-i18n="r.new"></h4>
+  <input type="text" id="rname" data-i18n-placeholder="r.namePh" autocomplete="off">
+  <textarea id="rprompt" data-i18n-placeholder="r.promptPh"></textarea>
+  <small class="rhint" id="rwho"></small>
+  <select id="rkind">
+    <option value="daily" data-i18n="r.kindDaily"></option>
+    <option value="interval" data-i18n="r.kindInterval"></option>
+    <option value="once" data-i18n="r.kindOnce"></option>
+  </select>
+  <div id="rsched">
+    <div data-k="daily"><input type="time" id="rtime" value="09:00" style="width:140px">
+      <div class="wd" id="rwd"></div></div>
+    <div data-k="interval"><input type="number" id="revery" min="5" step="5" value="60" style="width:140px"> <span data-i18n="r.everyUnit"></span></div>
+    <div data-k="once"><input type="datetime-local" id="rat"></div>
+  </div>
+  <label class="pick"><input type="checkbox" id="ron" checked> <span data-i18n="r.enabled"></span></label>
+  <small class="rhint" id="rstat"></small>
+  <div class="acts">
+    <button class="btn" style="margin-right:auto;color:#e06c75" id="rdel" data-i18n="common.delete"></button>
+    <button class="btn" id="rrun" data-i18n="r.runNow"></button>
+    <button class="btn" id="rcancel" data-i18n="common.cancel"></button>
+    <button class="btn pri" id="rsave" data-i18n="common.save"></button>
+  </div>
+</dialog>
 
 <dialog id="gdlg">
   <h4 id="gtitle" data-i18n="g.new"></h4>

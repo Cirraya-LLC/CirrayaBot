@@ -641,6 +641,56 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     );
   }
 
+  Widget _routineTile(Conversation c, Routine r) {
+    final (label, color, bg) = r.running
+        ? (tr('wb.running'), const Color(0xFF8FB6FF), const Color(0xFF1E2D45))
+        : r.lastStatus == 'failed'
+        ? (tr('wb.lastFailed'), C.code, const Color(0xFF3A2226))
+        : !r.enabled
+        ? (tr('wb.paused'), C.dim, const Color(0xFF2A2A31))
+        : ('', C.dim, Colors.transparent);
+    final sub = [scheduleText(r), nextRunText(r)].where((s) => s.isNotEmpty).join(' · ');
+    return InkWell(
+      onTap: () => showRoutineEditor(context, bench, c, routine: r),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    r.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 13, color: r.enabled ? C.ink : C.dim),
+                  ),
+                ),
+                if (label.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: r.lastStatus == 'failed' ? r.lastError : '',
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(5)),
+                      child: Text(label, style: TextStyle(fontSize: 10.5, color: color)),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            Text(
+              sub,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11.5, color: C.dim2),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── right ─────────────────────────────────────────────────────────────
   Widget _right() {
     final c = bench.current;
@@ -707,6 +757,22 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       ],
                     ),
                   ),
+                if (c != null) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.routines'))),
+                  for (final r in bench.routines) _routineTile(c, r),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 2, 8, 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () => showRoutineEditor(context, bench, c),
+                        icon: const Icon(Icons.add, size: 15),
+                        label: Text(tr('wb.newRoutine'), style: const TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),

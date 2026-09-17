@@ -42,10 +42,15 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.working': ["They're working…", '他们正在干活…', '他們正在工作…'],
   'wb.sendTo': ['Message {name}', '发给 {name}', '傳給 {name}'],
   'wb.pickFirst': ['Pick a conversation to start talking', '选一个会话再说话', '選一個對話再說話'],
+  'wb.running': ['Running', '运行中', '執行中'],
+  'wb.lastFailed': ['Last run failed', '上次失败', '上次失敗'],
+  'wb.paused': ['Paused', '已暂停', '已暫停'],
   'wb.members': ['Members', '成员', '成員'],
   'wb.editGroup': ['Edit group', '编辑群', '編輯群組'],
   'wb.editAgent': ['Edit Agent', '编辑 Agent', '編輯 Agent'],
   'wb.lead': ['Lead', '负责人', '負責人'],
+  'wb.routines': ['Scheduled tasks', '定时任务', '排程任務'],
+  'wb.newRoutine': ['New scheduled task', '新建定时任务', '新增排程任務'],
   'wb.memory': ['Memory', '记忆', '記憶'],
   'wb.groupMemory': [
     "{name}'s group memory — everyone in the group reads it",
@@ -68,4 +73,12 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.exportChat': ['Export chat', '导出记录', '匯出紀錄'],
   'wb.you': ['You', '你', '你'],
   'wb.ran': ['{name} ran', '{name} 执行', '{name} 執行'],
+  // Weekday names, index 0 = Sunday (JS / server convention).
+  'wb.wd0': ['Sun', '周日', '週日'],
+  'wb.wd1': ['Mon', '周一', '週一'],
+  'wb.wd2': ['Tue', '周二', '週二'],
+  'wb.wd3': ['Wed', '周三', '週三'],
+  'wb.wd4': ['Thu', '周四', '週四'],
+  'wb.wd5': ['Fri', '周五', '週五'],
+  'wb.wd6': ['Sat', '周六', '週六'],
 };

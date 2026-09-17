@@ -14,6 +14,8 @@ const Map<String, List<String>> commonStrings = {
   'common.edit': ['Edit', '编辑', '編輯'],
   'common.add': ['Add', '添加', '新增'],
   'common.import': ['Import', '导入', '匯入'],
+  'common.export': ['Export', '导出', '匯出'],
+  'common.refresh': ['Refresh', '刷新', '重新整理'],
   'common.back': ['Back', '返回', '返回'],
   'common.yes': ['Yes', '是', '是'],
   'common.no': ['No', '否', '否'],

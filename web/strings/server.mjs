@@ -15,6 +15,7 @@ export const serverStrings = {
   // Not found
   'err.noAgent':    ['No such agent', '没有这个 Agent', '沒有這個 Agent'],
   'err.noGroup':    ['No such group', '没有这个群', '沒有這個群組'],
+  'err.noRoutine':  ['No such scheduled task', '没有这个定时任务', '沒有這個排程任務'],
   'err.noProvider': ['No such upstream', '没有这个上游', '沒有這個上游'],
 
   'auth.needToken': ['An access token is required: add ?k=<your ACCESS_TOKEN> to the URL',
@@ -55,6 +56,15 @@ export const serverStrings = {
   'group.membersArray':  ['members must be an array of agent ids', 'members 要是 Agent id 的数组', 'members 必須是 Agent id 的陣列'],
   'group.tooFew':        ['A group needs at least two members — a group of one is a direct chat', '群至少要两个成员 —— 一个人的群就是私聊', '群組至少要兩位成員——一個人的群組就是私訊'],
   'group.leadNotMember': ['The lead must be a member of this group', '负责人要是这个群里的成员', '負責人必須是這個群組的成員'],
+
+  // Scheduled tasks
+  'routine.nameRequired':   ['The task needs a name', '任务要有个名字', '任務需要一個名稱'],
+  'routine.promptRequired': ['Say clearly what it should do', '要写清楚让他做什么', '請寫清楚要他做什麼'],
+  'routine.target':         ['The target must be an agent or a group', '发给谁：要是一个 Agent 或一个群', '發給誰：必須是一個 Agent 或一個群組'],
+  'routine.enabled':        ['enabled must be true or false', 'enabled 要是 true / false', 'enabled 必須是 true / false'],
+  'routine.running':        ['It is running now; wait for this run to finish', '它正在跑，等这次跑完', '它正在執行，請等這次跑完'],
+  'routine.tripped':        ['Failed {n} times in a row; paused automatically. Last error: {error}',
+    '连续失败 {n} 次，已自动暂停。最后一次：{error}', '連續失敗 {n} 次，已自動暫停。最後一次：{error}'],
 
   // Upstreams
   'provider.none':      ['No model upstream configured yet — click "Model upstreams" at the bottom left and add one (name / endpoint / key)',
