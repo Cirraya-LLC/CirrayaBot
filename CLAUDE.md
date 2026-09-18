@@ -1154,6 +1154,118 @@ a 5-minute minimum. We need something attached to an Agent / group that survives
 letting Agents create tasks themselves (think it through first: one injection could make it run every 5
 minutes and spend money); a per-task spending cap.
 
+## 2.22 Browser (2026-09-19)
+
+**dsh has no browser** (its `web` only does search and fetching pages). Approach: one chromium + one
+long-running daemon inside each Agent's container.
+
+- **Image `multi-agent-worker:2`** (`deploy/agent.Dockerfile`): the distro's `chromium` + `pip install
+  playwright` (only as a driver; no `playwright install`, which downloads from its own CDN) +
+  `fonts-noto-cjk` (without it, Chinese in screenshots is all boxes).
+  **The image grew from 237 MB to 1.18 GB**: chromium 374 MB, playwright's node driver 132 MB, fonts 93 MB
+- **The daemon `deploy/browserd.py` isn't in the image**: it's pushed into the container before each
+  browser use (`BROWSERD_UP`), and if the content changed the old one is killed and restarted. Changing
+  it doesn't need an image rebuild. It only listens on 127.0.0.1:9230 inside the container; the server
+  reaches it via `docker exec ... curl`. Single-threaded (Playwright's sync API can't cross threads).
+  **It's long-running because page state lives in the browser process**; the login state lands in
+  `/work/.browser`, so it survives container rebuilds
+- **Don't kill the old one with `pkill -f browserd`** (the script's own command line contains that word,
+  2.9.5); use a pid file
+- **When the image changes, old containers must be rebuilt**: `ensureContainer` now also compares
+  `{{.Config.Image}}`, and if it doesn't match deletes and restarts (`/work` is on the host and isn't
+  lost; what's lost is whatever he apt-installed himself)
+- One `browser` tool, actions open / read / click / type / press / scroll / back / screenshot / eval.
+  **`read` numbers the clickable and fillable elements, and click / type use the number** — CSS selectors
+  are what the model most easily makes up, while the number is something it just saw with its own eyes.
+  `type`'s `text` is the content to type; the element is located only by index / selector
+- **Screenshots really go into the model**: internal messages have an extra `images` (data URLs), and
+  `protocols.mjs` translates per protocol (chat's image_url array / responses' input_image / messages'
+  base64 image block), with three cases in the self-test. Chat's tool message only takes text, so the
+  screenshot follows in a user message; **only the latest one is kept per round** (the whole history is
+  resent every step, and ten old images cost money every step). Images are never stored in the database
+- **Models that don't accept images**: when a request with an image is rejected with a 4xx, the image is
+  removed and later screenshots become a text notice, and the round continues (`dropImages` +
+  `ctx.noImages`). Verified with a fake upstream (400 on seeing image_url)
+- Screenshots are also sent to the UI with the `tool` event and shown directly in the tool card on web
+  and client (only in this stream; gone when the conversation is reopened)
+- Verified (real machine): gpt-6-astra read a random number and the heading colour from a screenshot
+  (not from read, so the criterion is trustworthy); read → type #1 → click #2 → read computed the right
+  result on a local form
+
+### 2.22.1 A person watching the Agent's browser and taking over (2026-09-19)
+
+The boss: "the client can also directly show the AGENT's browser, and you can help operate it; show it
+in the right panel as a live thumbnail, click it and it takes over the whole app window, and then you
+can go back to the original app view" (「客户端里也可以直接显示出AGENT的浏览器 也可以协助操作 显示在右侧缩略实时 点击过后就是占据整个软件的界面
+然后也可以回到原始的软件界面」), followed by "and ideally streaming output first" (「最好还要支持流式输出优先」).
+
+- **"Browser" in the right panel**: a DM shows this Agent's; a group lists only the members with a browser
+  open. Clicking = full screen (in the client a new route, on the web an overlay), with an address bar,
+  back and reload; **wherever you click on the picture gets clicked in his browser** (`click_xy`, scaled
+  to 1280×800), wheel scrolls, and a row below types (`type_raw`, into the current focus) plus
+  Enter/Tab/⌫/Esc. Back returns to the original view.
+  **The person and the Agent use the same browser**: once the person logs in, he can carry on using it;
+  the tool description was also changed to "when you hit a login/CAPTCHA, ask the user to open your
+  browser on the right and take over"
+- **Streaming first**: the picture is Chromium's own screencast (CDP `Page.startScreencast`, frames only
+  when the page changes), pushed by the daemon as MJPEG (multipart/x-mixed-replace), and the server's
+  `GET /api/browser/:id/stream` relays it as-is. The web's `<img>` plays it natively; the client splits
+  frames by content-length in `lib/data/mjpeg.dart` (tested, including "the image happens to contain
+  --frame"). **Only if the stream can't connect does it fall back to polling screenshots** (`/shot`), and
+  during polling it keeps retrying the stream
+- **So the daemon became asyncio** (one stream stays open while clicks also need handling — a
+  single-threaded blocking one can't do it); actions are still serialised under one lock. When nobody is
+  watching the screencast is stopped (every frame costs encoding)
+- **Watching doesn't start a browser**: `/stream` and `/shot` return 204 when he has no browser open;
+  only a real human action (`/act`) starts one
+- **Doesn't take the withAgent lock**: a person must be able to watch while the Agent is working
+- ⚠️ **Killing the `docker exec` client doesn't kill the curl inside the container**: nobody reads its
+  output, and once heartbeats fill the pipe it hangs forever, while the daemon keeps encoding frames for
+  it (two were found lingering). Now the in-container pid is written to a file when the stream starts,
+  and when the viewer leaves it's killed with `docker exec kill`
+- ⚠️ **While Chrome plays MJPEG, the `<img>`'s naturalWidth stays 0**, so it can't be used to tell whether
+  there's a picture; only onerror can
+- Models often fill unused parameters with 0 (`"index":0`); numbering starts at 1, and 0 is treated as
+  not given
+
+### 2.22.2 Direct operation (2026-09-19)
+
+The boss: "can it work like operating the browser directly, rather than these screenshots and a
+separate input box" (「能不能做到像直接操作浏览器一样 而不是这样截图和单独的输入框」). The picture was
+already a stream; what was missing was input: one HTTP request per action (no hover, no dragging), and
+typing needed a separate input box. Now:
+
+- **One WebSocket input channel** `/api/browser/:id/input`: mouse move (the client coalesces every 30 ms) /
+  down / up (with button, count for double-click) / wheel, keys keydown / keyup, typed text as text.
+  **Node's stdlib has no WebSocket server**, so server.mjs has a hand-written handshake + masked frame
+  decoding + close/ping (`server.on('upgrade')`, authenticated like HTTP via ?k= / cookie).
+  Events go through a server-side allowlist (`cleanInput`), then through an always-open
+  `docker exec -i ... bash -c 'exec 3<>/dev/tcp/127.0.0.1/9231; exec cat >&3'` into the daemon's second
+  port (one JSON per line, `Browser.input`), not queued behind the Agent's action lock
+- **Closing the connection must send a close frame first** (`0x88 0x00`); disconnecting directly shows
+  the client "connection error"
+- **Keyboard**: click on the picture and focus lands on an invisible input box — **input methods only
+  type into real input boxes**, so Chinese relies on it; typed characters are sent as `text`
+  (`insert_text`), non-character keys (Enter/arrows/Backspace/Tab/Esc) and Ctrl/⌘ + letter are sent as
+  keys, with ⌘ mapped to Control (his browser is on Linux). **These keys aren't intercepted while an
+  input method is composing**; at that time they belong to the input method
+- ⚠️ **In Flutter, clearing a hidden input box on every character received makes characters repeat**
+  (when typing fast: `typed--directlly`): the platform's input state still holds the old text and sends
+  it again. Now only the newly added part is sent, and it's cleared after 0.8 seconds without typing.
+  The web's textarea doesn't have this problem
+- ⚠️ **The same FocusNode can't be attached to two widgets**: the outer Focus that receives keys uses its
+  own node (`canRequestFocus:false`); keys bubble up from the hidden input box to it first, and then to
+  the app's own shortcuts
+- Verified (real machine): on both client and web, clicking an input box directly and typing, backspace,
+  25 fast characters without repeats, Ctrl+A select all and delete, dragging a slider (to 61), hover
+  triggering mouseenter, Chinese (the web simulated IME commit with insertText; the client sent text
+  directly over the WebSocket).
+  **A real input method on a Mac can't be verified on this machine** (xdotool has no input method)
+
+**Not done yet**: MCP integration (the approach dsh recommends); downloading files; multiple tabs (when
+a new tab opens the stream follows it, but other tabs aren't visible); bringing his clipboard contents
+back to the local clipboard; the remote cursor shape (currently always the normal arrow).
+
 ## 3. What runs now
 
 ```bash
@@ -1161,7 +1273,7 @@ minutes and spend money); a per-task spending cap.
 docker compose logs -f app
 node web/model.mjs         # self-test for context budgeting / window inference
 node web/schedule.mjs      # self-test for scheduled-task time computation
-node web/protocols.mjs     # self-test for translating the three protocols
+node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/
 
@@ -1178,8 +1290,9 @@ built-in web UI, **not part of the product**, kept only for the record.
 2. **Per-Agent spending cap** — the gap none of the five open-source options filled.
    The `messages` table is already there; what's missing is recording each round's token counts
 3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)
-4. **Browser operation and a skill library** — the two the boss asked for next, after scheduled tasks
-   (2.21); plus event triggers for scheduled tasks
+4. **The skill library** — the third of the three the boss asked for in 2.21, still to build.
+   Then event triggers for scheduled tasks and the browser via MCP (v1 of scheduled tasks 2.21 and
+   browser 2.22 are done)
 
 ## 4. Maintaining this file (the boss, 2026-09-05: "from now on you should update CLAUDE.md yourself" (「你以后都应该自我更新 CLAUDE.md」))
 

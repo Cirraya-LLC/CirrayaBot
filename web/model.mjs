@@ -19,7 +19,8 @@ export function estimateTokens(text) {
 }
 
 const msgTokens = m => estimateTokens(m.content ?? '') +
-  estimateTokens(JSON.stringify(m.tool_calls ?? '')) + 8   // 8 ≈ role and separator overhead
+  estimateTokens(JSON.stringify(m.tool_calls ?? '')) + 8 +  // 8 ≈ role and separator overhead
+  (m.images?.length ?? 0) * 1600                           // roughly one 1280×800 screenshot; estimate high
 
 /**
  * Keep messages from the end backwards while they fit.

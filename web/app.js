@@ -5,12 +5,16 @@ const K = new URLSearchParams(location.search).get('k')
 const api = p => K ? `${p}${p.includes('?') ? '&' : '?'}k=${K}` : p
 // Every request carries the UI language so the server answers errors in it
 const fetch = (url, o = {}) => window.fetch(url, { ...o, headers: { ...o.headers, 'X-Lang': lang } })
+// URLs that can't carry headers (<img> streams, WebSocket) get it as a query param
+const withLang = u => `${u}${u.includes('?') ? '&' : '?'}lang=${encodeURIComponent(lang)}`
 
 applyDom()
+$('#bwimg').alt = t('bw.alt')
 $('#lang').innerHTML = Object.entries(LANG_NAMES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')
 $('#lang').value = lang
 $('#lang').onchange = e => setLang(e.target.value)
 const listJoin = xs => xs.join(t('common.sep'))
+const quote = s => t('common.quote', { s })
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
 
 let BOTS = [], CONVS = [], cur = null, busy = false, filter = ''
@@ -90,6 +94,7 @@ async function openConv(c) {
   renderMembers(c)
   loadMemory(c)
   loadRoutines()
+  loadBrowsers()
 
   if (!await drawHistory(c, ticket)) return
   renderConvs(); $('#in').focus(); $('#send').disabled = busy
@@ -280,11 +285,19 @@ async function send() {
             bubs.delete(d.botId)
             const label = d.name === 'bash' ? d.args.command
               : d.name === 'read_file' ? t('tool.read', { path: d.args.path })
-              : d.name === 'write_file' ? t('tool.write', { path: d.args.path }) : d.name
+              : d.name === 'write_file' ? t('tool.write', { path: d.args.path })
+              : d.name === 'browser' ? browserLabel(d.args) : d.name
             tools.set(key, toolLine(d.botId, label))
           } else {
             const el = tools.get(key)
-            if (el) { el.classList.remove('run'); el.querySelector('pre').textContent = d.output ?? '' }
+            if (el) {
+              el.classList.remove('run'); el.querySelector('pre').textContent = d.output ?? ''
+              if (d.image?.startsWith('data:image/')) {
+                const img = document.createElement('img'); img.src = d.image; img.alt = t('tool.screenshot')
+                img.onclick = () => window.open().document.write(`<img src="${d.image}" style="max-width:100%">`)
+                el.appendChild(img)
+              }
+            }
           }
         }
       }
@@ -578,6 +591,136 @@ $('#xfile').onchange = async () => {
   if (!r.ok) { alert(await errText(r)); return }
   await reloadAndReopen()
 }
+
+// Browser actions in plain words: "Open example.com" reads better than {"action":"open",...}
+function browserLabel(a) {
+  const target = a.index != null ? `#${a.index}` : a.text ? quote(a.text) : ''
+  const label = {
+    open: () => t('ba.open', { url: a.url ?? '' }), read: () => t('ba.read'), screenshot: () => t('tool.screenshot'),
+    back: () => t('ba.back'), click: () => t('ba.click', { target }),
+    type: () => t('ba.type', { index: a.index ?? '?', text: quote(a.text ?? '') }) + (a.submit ? t('ba.enter') : ''),
+    press: () => t('ba.press', { key: a.key ?? '' }), scroll: () => t('ba.scroll'), eval: () => t('ba.eval'),
+  }[a.action]
+  return t('ba.prefix') + (label ? label() : a.action)
+}
+
+// ═══ Agent browser: watch + take over ═══
+// The view is MJPEG from Chromium's screencast, which <img> plays natively. With no browser open the
+// server answers 204 and the image fails; retry every few seconds (it shows up once they open one).
+const bwStream = id => withLang(api(`/api/browser/${id}/stream`)) + `&t=${Date.now()}`
+let bwTimers = []
+function loadBrowsers() {
+  bwTimers.forEach(clearTimeout); bwTimers = []
+  const box = $('#bws'); box.innerHTML = ''
+  const c = cur; if (!c) return
+  // cur is only {kind,id}; members live on the conversation-list entry
+  const ids = c.kind === 'group' ? (CONVS.find(x => x.kind === 'group' && x.id === c.id)?.members ?? []) : [c.id]
+  for (const id of ids) {
+    const b = bot(id); if (!b) continue
+    const el = document.createElement('div')
+    const show = () => {
+      el.className = 'bw'
+      el.innerHTML = `<img alt="${esc(t('bw.altNamed', { name: b.name }))}"><small>${c.kind === 'group' ? esc(b.name) + ' · ' : ''}${esc(t('bw.takeOver'))}</small>`
+      const img = el.querySelector('img')
+      img.onerror = () => { if (cur !== c) return; off(); bwTimers.push(setTimeout(show, 5000)) }
+      img.src = bwStream(id)
+      el.onclick = () => openBrowser(b)
+    }
+    const off = () => {
+      if (c.kind === 'group') { el.className = ''; el.innerHTML = ''; return }   // in groups, only list open browsers
+      el.className = 'bwoff'; el.innerHTML = `${esc(t('bw.notOpen'))} <button class="btn">${esc(t('bw.open'))}</button>`
+      el.querySelector('button').onclick = e => { e.stopPropagation(); openBrowser(b) }
+    }
+    show(); box.appendChild(el)
+  }
+}
+
+// ⚠️ Chrome keeps naturalWidth at 0 while playing MJPEG, so it can't tell "is there a picture".
+// Only onerror (no browser → 204) means reconnect.
+// Full screen: direct control. Mouse move/down/up/wheel, keys and typed text all go over one
+// WebSocket; the picture comes from the stream.
+// Keyboard: clicking the view focuses an invisible textarea — IMEs only type into real inputs —
+// and committed text is taken from it and sent; non-text keys (Enter, arrows, Backspace, Ctrl/⌘ combos) go as key events.
+let bwBot = null, bwOff = false, bwWs = null, bwComposing = false
+const bwNoteDefault = () => bwBot ? t('bw.note', { name: bwBot.name }) : ''
+function openBrowser(b) {
+  bwBot = b; bwOff = false
+  $('#bwname').textContent = t('bw.altNamed', { name: b.name })
+  $('#bwnote').textContent = bwNoteDefault()
+  $('#bwimg').src = bwStream(b.id)
+  $('#bwimg').onerror = () => { bwOff = true; $('#bwnote').textContent = t('bw.offNote') }
+  $('#bwfull').hidden = false
+  bwConnect()
+}
+function bwConnect() {
+  if (!bwBot || bwWs) return
+  const u = new URL(withLang(api(`/api/browser/${bwBot.id}/input`)), location.href)
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
+  const ws = new WebSocket(u); bwWs = ws
+  ws.onclose = () => { if (bwWs === ws) bwWs = null }
+}
+function closeBrowser() {
+  $('#bwfull').hidden = true; $('#bwimg').removeAttribute('src')   // stop the stream so frames don't keep arriving in the background
+  bwWs?.close(); bwWs = null
+  bwBot = null; loadBrowsers()
+}
+function bwSend(e) {
+  if (bwWs?.readyState === 1) bwWs.send(JSON.stringify(e))
+  else if (e.t === 'down') bwAct({ action:'click_xy', x:e.x, y:e.y })     // no channel: at least clicks still work
+}
+async function bwAct(action) {
+  if (!bwBot) return
+  const r = await fetch(api(`/api/browser/${bwBot.id}/act`), { method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify(action) }).then(r => r.json()).catch(e => ({ ok:false, error:String(e) }))
+  if (!r.ok) { $('#bwnote').textContent = r.error; return }
+  if (r.url && document.activeElement !== $('#bwurl')) $('#bwurl').value = r.url
+  // went from closed to open: stream and input channel exist only now, reconnect
+  if (bwOff) { bwOff = false; $('#bwimg').src = bwStream(bwBot.id); $('#bwnote').textContent = bwNoteDefault() }
+  bwConnect()
+}
+$('#bwback').onclick = closeBrowser
+$('#bwnav').onclick = () => bwAct({ action:'back' })
+$('#bwreload').onclick = () => bwAct({ action:'reload' })
+$('#bwurl').onkeydown = e => { if (e.key === 'Enter' && e.target.value.trim()) bwAct({ action:'open', url:e.target.value.trim() }) }
+
+// Mouse
+const bwAt = e => { const r = $('#bwimg').getBoundingClientRect()
+  return { x: Math.max(0, Math.min(1280, (e.clientX - r.left) / r.width * 1280)), y: Math.max(0, Math.min(800, (e.clientY - r.top) / r.height * 800)) } }
+const bwBtn = b => ['left', 'middle', 'right'][b] ?? 'left'
+let bwMoveT = null, bwMoveE = null
+$('#bwimg').onmousemove = e => { bwMoveE = e; bwMoveT ??= setTimeout(() => { bwMoveT = null; bwSend({ t:'move', ...bwAt(bwMoveE) }) }, 30) }
+$('#bwimg').onmousedown = e => {
+  e.preventDefault()
+  bwSend({ t:'down', ...bwAt(e), button:bwBtn(e.button), count:e.detail || 1 })
+  $('#bwime').focus()                       // clicking into the page hands it the keyboard
+}
+$('#bwimg').onmouseup = e => bwSend({ t:'up', ...bwAt(e), button:bwBtn(e.button), count:e.detail || 1 })
+$('#bwimg').oncontextmenu = e => e.preventDefault()
+$('#bwimg').onwheel = e => { e.preventDefault(); bwSend({ t:'wheel', ...bwAt(e), dx:e.deltaX, dy:e.deltaY }) }
+
+// Keyboard
+const BW_KEYS = new Set(['Enter', 'Backspace', 'Delete', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  'Home', 'End', 'PageUp', 'PageDown', 'Shift', 'Control', 'Alt'])
+const bwKeyName = e => {
+  if (e.key === 'Meta') return 'Control'                          // ⌘ is Ctrl in their (Linux) browser
+  if (BW_KEYS.has(e.key)) return e.key
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.length === 1) return e.key.toLowerCase()   // shortcut
+  return null                                                     // plain typing: left to the textarea / IME
+}
+const ime = $('#bwime')
+ime.onfocus = () => $('#bwbox').classList.add('typing')
+ime.onblur = () => $('#bwbox').classList.remove('typing')
+ime.onkeydown = e => {
+  if (e.isComposing || bwComposing) return                        // while the IME composes, Enter/Backspace belong to it
+  const k = bwKeyName(e); if (!k) return
+  e.preventDefault(); bwSend({ t:'keydown', key:k })
+}
+ime.onkeyup = e => { if (bwComposing) return; const k = bwKeyName(e); if (k) { e.preventDefault(); bwSend({ t:'keyup', key:k }) } }
+ime.addEventListener('compositionstart', () => { bwComposing = true })
+ime.addEventListener('compositionend', () => { bwComposing = false; bwFlushIme() })
+ime.addEventListener('input', () => { if (!bwComposing) bwFlushIme() })
+function bwFlushIme() { if (ime.value) { bwSend({ t:'text', text:ime.value }); ime.value = '' } }
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#bwfull').hidden && document.activeElement !== ime && document.activeElement?.tagName !== 'INPUT') closeBrowser() })
 
 // ═══ Scheduled tasks ═══
 // Weekday names from Intl; 2024-01-07 was a Sunday, so index 0 = Sunday

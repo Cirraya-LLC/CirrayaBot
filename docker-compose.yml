@@ -37,7 +37,7 @@ services:
       DATABASE_URL: postgres://multiagent:${POSTGRES_PASSWORD}@db:5432/multiagent
       ACCESS_TOKEN: ${ACCESS_TOKEN:?run ./start.sh first to generate .env}
       AGENT_TOOLS: ${AGENT_TOOLS:-off}
-      AGENT_IMAGE: ${AGENT_IMAGE:-multi-agent-worker:1}
+      AGENT_IMAGE: ${AGENT_IMAGE:-multi-agent-worker:2}
       AGENT_MEMORY: ${AGENT_MEMORY:-2g}
       AGENT_CPUS: ${AGENT_CPUS:-2}
       AGENT_EXEC_TIMEOUT: ${AGENT_EXEC_TIMEOUT:-120}

@@ -8,6 +8,7 @@ library;
 
 import 'package:flutter/widgets.dart';
 
+import 'l10n/browser.dart';
 import 'l10n/common.dart';
 import 'l10n/editors.dart';
 import 'l10n/settings.dart';
@@ -33,6 +34,7 @@ final List<Map<String, List<String>>> stringTables = [
   workbenchStrings,
   editorStrings,
   settingsStrings,
+  browserStrings,
   stateStrings,
 ];
 

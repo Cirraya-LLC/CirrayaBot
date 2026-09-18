@@ -34,12 +34,13 @@ const Map<String, List<String>> stateStrings = {
     '伺服器回的格式不對 —— 位址可能指到了別的服務',
   ],
   'api.notJsonFile': ['This file is not JSON', '这个文件不是 JSON', '這個檔案不是 JSON'],
+  'api.shotFailed': ['Screenshot failed ({code})', '截图失败（{code}）', '截圖失敗（{code}）'],
   'api.streamFailed': [
     "Couldn't connect to the live view ({code})",
     '实时画面连不上（{code}）',
     '即時畫面連不上（{code}）',
   ],
-  'api.exportFailed': ['Export failed ({code})', '导出失败（{code}）', '匯出失敗（{code}）'],
+  'api.browserRefused': ["The browser didn't do it", '浏览器没有照做', '瀏覽器沒有照做'],
   'api.silent': [
     'Nothing from the server for 5 minutes — stopping this turn',
     '5 分钟没收到服务器的任何动静，这一轮先停下',
@@ -62,4 +63,16 @@ const Map<String, List<String>> stateStrings = {
   // Tool card labels
   'tool.read': ['read {path}', '读 {path}', '讀 {path}'],
   'tool.write': ['write {path}', '写 {path}', '寫 {path}'],
+  'tool.browser': ['Browser · {what}', '浏览器 · {what}', '瀏覽器 · {what}'],
+  'tool.b.open': ['open {url}', '打开 {url}', '開啟 {url}'],
+  'tool.b.read': ['read page', '读页面', '讀頁面'],
+  'tool.b.screenshot': ['screenshot', '截图', '截圖'],
+  'tool.b.back': ['back', '后退', '上一頁'],
+  'tool.b.click': ['click {target}', '点 {target}', '點 {target}'],
+  'tool.b.type': ['type “{text}” into #{index}', '在 #{index} 填「{text}」', '在 #{index} 填「{text}」'],
+  'tool.b.enter': [' + Enter', ' 回车', ' Enter'],
+  'tool.b.press': ['press {key}', '按 {key}', '按 {key}'],
+  'tool.b.scroll': ['scroll', '滚动', '捲動'],
+  'tool.b.eval': ['run JS', '执行 JS', '執行 JS'],
+  'tool.b.quoted': ['“{text}”', '「{text}」', '「{text}」'],
 };

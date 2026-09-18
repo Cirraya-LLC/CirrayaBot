@@ -6,6 +6,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
@@ -38,6 +39,10 @@ class Ran extends Entry {
   final String label;
   String output = '';
   bool running = true;
+
+  /// A browser screenshot, when the tool took one. Only lives for this reply —
+  /// history stores text, so reopening the conversation shows the card without it.
+  Uint8List? image;
 }
 
 class Note extends Entry {
@@ -299,7 +304,8 @@ class Workbench extends ChangeNotifier {
               final card = pending.remove(key);
               card
                 ?..running = false
-                ..output = (ev.data['output'] as String?) ?? '';
+                ..output = (ev.data['output'] as String?) ?? ''
+                ..image = _decodeImage(ev.data['image']);
             }
           case 'done':
             break;
@@ -332,8 +338,40 @@ class Workbench extends ChangeNotifier {
     'bash' => '${args['command'] ?? ''}',
     'read_file' => tr('tool.read', {'path': args['path'] ?? ''}),
     'write_file' => tr('tool.write', {'path': args['path'] ?? ''}),
+    'browser' => tr('tool.browser', {'what': _browserLabel(args)}),
     _ => '$tool',
   };
+
+  static Uint8List? _decodeImage(Object? v) {
+    if (v is! String || !v.startsWith('data:image/')) return null;
+    final comma = v.indexOf(',');
+    try {
+      return base64Decode(v.substring(comma + 1));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Same wording as the web page: "open example.com" beats a JSON blob.
+  static String _browserLabel(Map args) {
+    final target = args['index'] != null
+        ? '#${args['index']}'
+        : (args['text'] != null ? tr('tool.b.quoted', {'text': args['text']}) : '');
+    return switch (args['action']) {
+      'open' => tr('tool.b.open', {'url': args['url'] ?? ''}),
+      'read' => tr('tool.b.read'),
+      'screenshot' => tr('tool.b.screenshot'),
+      'back' => tr('tool.b.back'),
+      'click' => tr('tool.b.click', {'target': target}),
+      'type' =>
+        tr('tool.b.type', {'index': args['index'] ?? '?', 'text': args['text'] ?? ''}) +
+            (args['submit'] == true ? tr('tool.b.enter') : ''),
+      'press' => tr('tool.b.press', {'key': args['key'] ?? ''}),
+      'scroll' => tr('tool.b.scroll'),
+      'eval' => tr('tool.b.eval'),
+      final other => '$other',
+    };
+  }
 
   @override
   void dispose() {

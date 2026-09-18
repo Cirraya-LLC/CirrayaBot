@@ -9,8 +9,10 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../l10n.dart';
+import 'mjpeg.dart';
 import 'settings.dart';
 import 'sse.dart';
 
@@ -245,8 +247,8 @@ class Api {
 
   void close() => _client.close(force: true);
 
-  /// Every URL carries `lang=` too, so the server answers in it even where a
-  /// header cannot be set.
+  /// Every URL carries `lang=` too: the browser stream, screenshot and input
+  /// socket cannot always send headers, and the server answers in it.
   Uri _uri(String path) {
     final u = Uri.parse('${settings.baseUrl}$path');
     return u.replace(queryParameters: {
@@ -434,6 +436,50 @@ class Api {
   Future<Provider> saveProvider(Map<String, Object?> body, {String? id}) async {
     final j = id == null ? await _map('POST', '/api/providers', body) : await _map('PATCH', '/api/providers/$id', body);
     return Provider.fromJson(j);
+  }
+
+  /// The Agent's browser as it is right now. null = he has not opened one
+  /// (looking never starts it — only acting does).
+  Future<({Uint8List image, String url, String title})?> browserShot(String agentId) async {
+    final res = await _send('GET', '/api/browser/${Uri.encodeComponent(agentId)}/shot');
+    final bytes = await res.fold<BytesBuilder>(BytesBuilder(copy: false), (b, d) => b..add(d));
+    if (res.statusCode == 204) return null;
+    if (res.statusCode >= 400) throw ApiException(ApiFailure.server, tr('api.shotFailed', {'code': res.statusCode}));
+    String header(String n) => Uri.decodeComponent(res.headers.value(n) ?? '');
+    return (image: bytes.takeBytes(), url: header('x-page-url'), title: header('x-page-title'));
+  }
+
+  /// The Agent's browser as a live stream (Chromium's screencast, relayed as
+  /// MJPEG): a frame each time the page changes. Ends at once, with no frames,
+  /// when he has no browser open — callers fall back to [browserShot].
+  Stream<({Uint8List image, String url, String title})> browserStream(String agentId) async* {
+    final res = await _send('GET', '/api/browser/${Uri.encodeComponent(agentId)}/stream');
+    if (res.statusCode != 200) {
+      await res.drain<void>();
+      if (res.statusCode == 204) return;
+      throw ApiException(ApiFailure.server, tr('api.streamFailed', {'code': res.statusCode}));
+    }
+    final parser = MjpegParser();
+    await for (final chunk in res) {
+      for (final f in parser.add(chunk)) {
+        yield (image: f.image, url: f.header('x-page-url'), title: f.header('x-page-title'));
+      }
+    }
+  }
+
+  /// The live input channel into the Agent's browser: one JSON event per
+  /// message (mouse move/down/up/wheel, keydown/keyup/press, text).
+  Future<WebSocket> browserInput(String agentId) {
+    final u = _uri('/api/browser/${Uri.encodeComponent(agentId)}/input');
+    return WebSocket.connect(u.replace(scheme: u.scheme == 'https' ? 'wss' : 'ws').toString())
+        .timeout(const Duration(seconds: 20));
+  }
+
+  /// A person acting in the Agent's browser: open, back, reload, click_xy,
+  /// type_raw, press, wheel. Starts the browser if it is not running.
+  Future<void> browserAct(String agentId, Map<String, Object?> action) async {
+    final j = await _map('POST', '/api/browser/${Uri.encodeComponent(agentId)}/act', action);
+    if (j['ok'] != true) throw ApiException(ApiFailure.server, (j['error'] as String?) ?? tr('api.browserRefused'));
   }
 
   Future<List<Routine>> routines(Conversation c) async {

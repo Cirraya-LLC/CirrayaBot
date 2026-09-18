@@ -15,12 +15,12 @@ const M = {
   'common.delete': ['Delete', '删除', '刪除'],
   'common.close': ['Close', '关闭', '關閉'],
   'common.new': ['＋ New', '＋ 新的', '＋ 新增'],
-  'common.export': ['Export', '导出', '匯出'],
   'common.import': ['Import', '导入', '匯入'],
   'common.edit': ['Edit', '编辑', '編輯'],
   'common.editNamed': ['Edit “{name}”', '编辑「{name}」', '編輯「{name}」'],
   'common.saving': ['Saving…', '保存中…', '儲存中…'],
   'common.sep': [', ', '、', '、'],
+  'common.quote': ['“{s}”', '「{s}」', '「{s}」'],
   'common.language': ['Language', '语言', '語言'],
   'err.backend': ['Cannot reach the backend: {msg}', '连不上后端：{msg}', '無法連線到後端：{msg}'],
 
@@ -50,14 +50,28 @@ const M = {
   'tool.exec': ['ran', '执行', '執行'],
   'tool.read': ['Read {path}', '读 {path}', '讀取 {path}'],
   'tool.write': ['Write {path}', '写 {path}', '寫入 {path}'],
+  'tool.screenshot': ['Screenshot', '截图', '螢幕截圖'],
   'note.retry': ['{name} retrying: {reason}', '{name} 重试一次：{reason}', '{name} 重試一次：{reason}'],
   'note.trim': ['Context was too long; dropped the {n} oldest messages', '上下文放不下，省掉了最早的 {n} 条', '上下文放不下，省略了最早的 {n} 則'],
+
+  // browser actions
+  'ba.prefix': ['Browser · ', '浏览器 · ', '瀏覽器 · '],
+  'ba.open': ['Open {url}', '打开 {url}', '開啟 {url}'],
+  'ba.read': ['Read page', '读页面', '讀取頁面'],
+  'ba.back': ['Back', '后退', '上一頁'],
+  'ba.click': ['Click {target}', '点 {target}', '點擊 {target}'],
+  'ba.type': ['Type {text} into #{index}', '在 #{index} 填{text}', '在 #{index} 輸入{text}'],
+  'ba.enter': [' + Enter', ' 回车', ' Enter'],
+  'ba.press': ['Press {key}', '按 {key}', '按 {key}'],
+  'ba.scroll': ['Scroll', '滚动', '捲動'],
+  'ba.eval': ['Run JS', '执行 JS', '執行 JS'],
 
   // right column
   's2.members': ['Members', '成员', '成員'],
   's2.addMember': ['Add member', '添加成员', '新增成員'],
   's2.lead': ['Lead', '负责人', '負責人'],
   's2.remove': ['Remove', '移出', '移出'],
+  's2.browser': ['Browser', '浏览器', '瀏覽器'],
   's2.routines': ['Scheduled tasks', '定时任务', '排程任務'],
   's2.addRoutine': ['New scheduled task', '新建定时任务', '新增排程任務'],
   's2.exportChat': ['Export chat', '导出聊天记录', '匯出聊天紀錄'],
@@ -128,6 +142,19 @@ const M = {
   'p.ctxShort': ['context {n} tokens', '上下文 {n} tokens', '上下文 {n} tokens'],
   'p.confirmDelete': ['Delete provider “{name}”?', '删掉上游「{name}」？', '刪除上游「{name}」？'],
   'p.first': ['Configure a model provider first so Agents can talk.', '先配一个模型上游，Agent 才能说话。', '請先設定一個模型上游，Agent 才能說話。'],
+
+  // browser takeover
+  'bw.back': ['← Back', '← 返回', '← 返回'],
+  'bw.urlPh': ['URL, press Enter to open', '网址，回车打开', '網址，按 Enter 開啟'],
+  'bw.nav': ['Back', '后退', '上一頁'],
+  'bw.reload': ['Reload', '刷新', '重新整理'],
+  'bw.alt': ['Browser view', '浏览器画面', '瀏覽器畫面'],
+  'bw.altNamed': ['{name}’s browser', '{name} 的浏览器', '{name} 的瀏覽器'],
+  'bw.takeOver': ['Open to take over', '点开接手', '點開接手'],
+  'bw.notOpen': ['Their browser isn’t open yet', '他还没打开浏览器', '他還沒開啟瀏覽器'],
+  'bw.open': ['Open', '打开', '開啟'],
+  'bw.note': ['Click the view to hand the keyboard to the browser · you and {name} share the same browser', '点一下画面，键盘就交给浏览器 · 你和 {name} 用的是同一个浏览器', '點一下畫面，鍵盤就交給瀏覽器 · 你和 {name} 使用同一個瀏覽器'],
+  'bw.offNote': ['Their browser isn’t open yet — enter a URL above to open it; they’ll use it too.', '他还没打开浏览器 —— 在上面输入网址打开，他之后也会用这个。', '他還沒開啟瀏覽器 —— 在上方輸入網址開啟，他之後也會使用這個。'],
 
   // scheduled tasks
   'r.new': ['New scheduled task', '新建定时任务', '新增排程任務'],

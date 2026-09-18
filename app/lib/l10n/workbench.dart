@@ -49,6 +49,7 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.editGroup': ['Edit group', '编辑群', '編輯群組'],
   'wb.editAgent': ['Edit Agent', '编辑 Agent', '編輯 Agent'],
   'wb.lead': ['Lead', '负责人', '負責人'],
+  'wb.browser': ['Browser', '浏览器', '瀏覽器'],
   'wb.routines': ['Scheduled tasks', '定时任务', '排程任務'],
   'wb.newRoutine': ['New scheduled task', '新建定时任务', '新增排程任務'],
   'wb.memory': ['Memory', '记忆', '記憶'],
