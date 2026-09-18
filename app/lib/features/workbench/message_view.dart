@@ -293,6 +293,16 @@ class _ToolCard extends StatelessWidget {
                 const SizedBox(width: 11, height: 11, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.dim)),
             ],
           ),
+          if (ran.image != null) ...[
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.memory(ran.image!, gaplessPlayback: true),
+              ),
+            ),
+          ],
           if (ran.output.isNotEmpty) ...[
             const SizedBox(height: 8),
             SelectableText(

@@ -29,11 +29,31 @@ const toolsFor = (protocol, tools) => {
   return tools
 }
 
+// Images: internal messages may carry `images` (an array of data: URLs), only on user messages
+// (browser screenshots). Each protocol puts images somewhere different; all translated here.
+// Images are never stored in the database.
+
+/** Chat Completions: a user message with images gets an array `content` */
+export function toChatMessages(messages) {
+  return messages.map(({ images, ...m }) => images?.length
+    ? { ...m, content: [{ type: 'text', text: String(m.content || ' ') },
+        ...images.map(url => ({ type: 'image_url', image_url: { url } }))] }
+    : m)
+}
+
+/** data:image/jpeg;base64,xxx → an Anthropic image block */
+const anthropicImage = url => {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(url)
+  return m ? { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } } : null
+}
+
 export function toResponsesInput(messages) {
   const input = []
   for (const m of messages) {
     if (m.role === 'tool') { input.push({ type: 'function_call_output', call_id: m.tool_call_id, output: String(m.content ?? '') }); continue }
-    if (m.content) input.push({ role: m.role, content: String(m.content) })
+    if (m.images?.length) input.push({ role: m.role, content: [{ type: 'input_text', text: String(m.content || ' ') },
+      ...m.images.map(image_url => ({ type: 'input_image', image_url }))] })
+    else if (m.content) input.push({ role: m.role, content: String(m.content) })
     for (const tc of m.tool_calls ?? [])
       input.push({ type: 'function_call', call_id: tc.id, name: tc.function.name, arguments: tc.function.arguments || '{}' })
   }
@@ -61,6 +81,7 @@ export function toAnthropic(messages) {
       continue
     }
     const blocks = m.content ? [{ type: 'text', text: String(m.content) }] : []
+    for (const img of m.images ?? []) { const b = anthropicImage(img); if (b) blocks.push(b) }
     for (const tc of m.tool_calls ?? []) {
       let input = {}
       try { input = JSON.parse(tc.function.arguments || '{}') } catch {}
@@ -95,7 +116,7 @@ function buildRequest(p, messages, tools) {
   }
   return {
     url: `${base}/chat/completions`, headers: bearer,
-    body: { model: p.model, messages, stream: true, ...tools?.length ? { tools, tool_choice: 'auto' } : {} },
+    body: { model: p.model, messages: toChatMessages(messages), stream: true, ...tools?.length ? { tools, tool_choice: 'auto' } : {} },
   }
 }
 
@@ -235,5 +256,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   let threw = false
   try { responsesFrame({ type: 'response.failed', response: { error: { message: 'x' } } }, st, () => {}) } catch (e) { threw = e.upstream === true }
   a(threw, 'responses failure frame must throw')
+  // Image translation for all three
+  const img = 'data:image/jpeg;base64,QUJD'
+  const withImg = [{ role: 'user', content: 'screenshot', images: [img] }]
+  const ch = toChatMessages(withImg)[0]
+  a(Array.isArray(ch.content) && ch.content[1].image_url.url === img && !('images' in ch), 'chat: image goes into the content array, images field not sent')
+  a(toChatMessages([{ role: 'user', content: 'x' }])[0].content === 'x', 'chat: messages without images unchanged')
+  const rs = toResponsesInput(withImg)[0]
+  a(rs.content[1].type === 'input_image' && rs.content[1].image_url === img, 'responses: input_image')
+  const am = toAnthropic(withImg).messages[0].content
+  a(am[1].type === 'image' && am[1].source.media_type === 'image/jpeg' && am[1].source.data === 'QUJD', 'messages: base64 image block')
   console.log('protocols.mjs self-test passed')
 }

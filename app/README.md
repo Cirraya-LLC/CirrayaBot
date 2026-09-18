@@ -26,7 +26,7 @@ macOS needs signing and notarization before you can give it to others (`codesign
 
 ```bash
 flutter analyze .     # must be clean
-flutter test          # must be green
+flutter test          # 22 tests
 flutter run -d linux  # runs right here on this machine
 ```
 

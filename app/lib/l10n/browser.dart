@@ -1,0 +1,27 @@
+/// Strings for the browser area: key -> ['English', '简体', '繁體'].
+library;
+
+const Map<String, List<String>> browserStrings = {
+  'br.notOpen': ["Their browser isn't open yet", '他还没打开浏览器', '他還沒打開瀏覽器'],
+  'br.open': ['Open', '打开', '開啟'],
+  'br.takeOver': ["Open to take over {name}'s browser", '点开接手 {name} 的浏览器', '點開接手 {name} 的瀏覽器'],
+  'br.title': ["{name}'s browser", '{name} 的浏览器', '{name} 的瀏覽器'],
+  'br.back': ['Back', '后退', '上一頁'],
+  'br.addressHint': ['URL, Enter to open', '网址，回车打开', '網址，按 Enter 開啟'],
+  'br.notOpenLong': [
+    "Their browser isn't open yet — type a URL above to open it; they'll use it afterwards too.",
+    '他还没打开浏览器 —— 在上面输入网址打开，他之后也会用这个。',
+    '他還沒打開瀏覽器 —— 在上面輸入網址開啟，他之後也會用這個。',
+  ],
+  'br.connecting': ['Connecting…', '连接中…', '連線中…'],
+  'br.noDirect': ['Direct control unavailable — clicks only', '直接操作连不上，只能点击', '無法直接操作，只能點擊'],
+  'br.typing': [
+    'Keyboard goes to the browser: typing and Ctrl/⌘ shortcuts reach the page; click the address bar to take it back',
+    '键盘已交给浏览器：直接打字、Ctrl/⌘ 快捷键都进他的页面；点上面的网址栏收回',
+    '鍵盤已交給瀏覽器：直接打字、Ctrl/⌘ 快速鍵都會進他的頁面；點上面的網址列收回',
+  ],
+  'br.clickToType': ['Click the picture to hand the keyboard to the browser', '点一下画面，键盘就交给浏览器', '點一下畫面，鍵盤就交給瀏覽器'],
+  'br.live': ['Live view', '实时画面', '即時畫面'],
+  'br.polling': ['Screenshot refresh', '截图刷新', '截圖更新'],
+  'br.shared': ['You and {name} share the same browser', '你和 {name} 用的是同一个浏览器', '你和 {name} 用的是同一個瀏覽器'],
+};

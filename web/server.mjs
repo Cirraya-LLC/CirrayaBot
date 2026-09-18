@@ -15,6 +15,7 @@ import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 const WEB = join(ROOT, 'web')
 const WORKROOT = join(ROOT, 'workspace')
@@ -39,7 +40,7 @@ const toBot = (r, lang = 'en') => ({
   order: r.ord, color: r.color, provider_id: r.provider_id ?? '', model: r.model ?? '',
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
-  tools: (CFG.tools ? ['shell', 'files', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
+  tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
 })
 const loadBots = async (lang = 'en') => (await db.listAgents()).map(r => toBot(r, lang))
 
@@ -102,7 +103,8 @@ You have your own machine (a container) with working directory /work; only you c
 You are root — install and write whatever you like; it stays on your own machine.${peers?.length ? `
 In group chats there is a ./group directory: the group's shared drive, visible to everyone in the group —
 to hand something to a colleague, \`cp x group/\`; what colleagues give you is there too.` : ''}
-Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).`)
+Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).
+You also have your own browser (the browser tool): open pages, click buttons, fill forms, take screenshots to see the page.`)
   if (peers?.length) {
     parts.push(`
 
@@ -255,7 +257,7 @@ async function ensureContainer(botId, groupId) {
       console.log(`${botId}'s container is still mounted on the old path ${mounted}; recreating on ${work} (old files stay where they are)`)
       await cliRun(['rm', '-f', name], null, 60_000)
     } else if (mounted && image !== IMAGE) {
-      // The image was upgraded: old containers don't switch images by themselves.
+      // The image was upgraded (e.g. a browser was added): old containers don't switch images by themselves.
       // /work is on the host, so recreating only loses what he apt-installed himself
       console.log(`${botId}'s container is still on the old image ${image}; recreating on ${IMAGE} (files in /work are kept)`)
       await cliRun(['rm', '-f', name], null, 60_000)
@@ -293,6 +295,23 @@ async function removeContainer(botId) {
 
 const TOOL_SPECS = [
   { type: 'function', function: {
+    name: 'browser',
+    description: 'Drive the browser on your own machine. It is stateful: open pages, half-filled forms and logins all persist (logins survive container restarts too). ' +
+      'Workflow: open a URL → read the page text, which also numbers the elements you can click or fill → click / type by number → screenshot to see what the page looks like. ' +
+      'If you only need data, prefer calling the API with curl; use the browser when you need to log in, click buttons, fill forms or see how a page looks. ' +
+      'When you hit a CAPTCHA, a password or two-factor prompt, stop and ask the user to open your browser on the right side of the UI and do it themselves (they can see your browser and click and type in it directly); ' +
+      'continue once they tell you they are done — don\'t guess and don\'t make things up.',
+    parameters: { type: 'object', required: ['action'], properties: {
+      action: { type: 'string', enum: ['open', 'read', 'click', 'type', 'press', 'scroll', 'back', 'screenshot', 'eval'] },
+      url: { type: 'string', description: 'For open' },
+      index: { type: 'integer', description: 'For click / type: the element number listed by read' },
+      text: { type: 'string', description: 'For type: the text to enter; for click you may also give the text on the button' },
+      submit: { type: 'boolean', description: 'Press Enter after type' },
+      key: { type: 'string', description: 'For press, e.g. Enter, Tab, Escape' },
+      dy: { type: 'integer', description: 'For scroll: positive scrolls down, default 600' },
+      js: { type: 'string', description: 'For eval: a JS expression to run in the page; its value is returned to you' },
+      full_page: { type: 'boolean', description: 'For screenshot: capture the whole page, not just the current viewport' } } } } },
+  { type: 'function', function: {
     name: 'bash',
     description: 'Run a shell command in the working directory; returns stdout / stderr / exit code. Use it for inspecting, building, testing, installing and running.',
     parameters: { type: 'object', required: ['command'], properties: {
@@ -311,10 +330,78 @@ const TOOL_SPECS = [
 
 const clip = (t, max = OUT_MAX) => t.length > max ? `${t.slice(0, max)}\n… (truncated, ${t.length} characters in total)` : t
 
+// The browser daemon (deploy/browserd.py) isn't in the image: it's pushed into the container before each use and
+// swapped and restarted when its content changes. So changing it needs no image rebuild, and there's no
+// "this agent's container is still running the old version".
+const BROWSERD = await readFile(join(ROOT, 'deploy', 'browserd.py'), 'utf8')
+// ⚠️ Can't use pkill -f browserd: this script's own command line contains that word, so it would kill itself (2.9.5)
+const BROWSERD_UP = `
+cat > /tmp/browserd.new
+if ! cmp -s /tmp/browserd.new /opt/browserd.py; then
+  mv /tmp/browserd.new /opt/browserd.py
+  if [ -f /tmp/browserd.pid ]; then kill "$(cat /tmp/browserd.pid)" 2>/dev/null; sleep 1; fi
+  rm -f /tmp/browserd.pid
+fi
+curl -sf http://127.0.0.1:9230/ >/dev/null && exit 0
+command -v chromium >/dev/null || { echo "this machine's image has no browser (old image)"; exit 3; }
+setsid nohup python3 /opt/browserd.py >/tmp/browserd.log 2>&1 </dev/null &
+echo $! > /tmp/browserd.pid
+for i in $(seq 60); do curl -sf http://127.0.0.1:9230/ >/dev/null && exit 0; sleep 0.5; done
+tail -n 20 /tmp/browserd.log; exit 1
+`
+
+// ── A human watching / taking over an agent's browser ──
+// Watching (screenshots) only works when his browser is already open: just looking shouldn't start chromium for him.
+// Taking over (actions) starts it when needed — the human has to log in first so the agent can carry on.
+// Doesn't take the withAgent lock: the human must be able to watch while the agent works; locking would mean waiting until he's done.
+const HUMAN_ACTIONS = ['open', 'back', 'reload', 'click_xy', 'type_raw', 'press', 'wheel']
+
+async function browserAlive(c) {
+  return (await cliRun(['exec', c, 'curl', '-sf', 'http://127.0.0.1:9230/'], null, 10_000)).code === 0
+}
+
+async function browserPost(c, args, lang = 'en') {
+  const r = await cliRun(['exec', '-i', c, 'curl', '-s', '--max-time', '60', '-X', 'POST',
+    '-H', 'content-type: application/json', '--data-binary', '@-', 'http://127.0.0.1:9230/'], JSON.stringify(args), 70_000)
+  try { return JSON.parse(r.out) } catch { return { ok: false, error: tr(lang, 'browser.noResponse', { detail: (r.err || r.out).trim().slice(0, 200) }) } }
+}
+
+async function humanBrowserAct(botId, args, lang) {
+  if (!CFG.tools) throw new Say('browser.toolsOff')
+  if (!HUMAN_ACTIONS.includes(args.action)) throw new Say('browser.badAction', { action: args.action })
+  const c = cname(botId)
+  if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
+    await withAgent(botId, () => ensureContainer(botId, null))
+  // Always go through BROWSERD_UP: start it if it isn't running, swap in new daemon code if it changed (the human actions were added later)
+  const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
+  if (up.code !== 0) return { ok: false, error: tr(lang, 'browser.cantStart', { detail: (up.out + up.err).trim().slice(-300) }) }
+  return browserPost(c, args, lang)
+}
+
+/** Run one browser action. Screenshots return {text, image}; everything else returns text. */
+async function runBrowser(c, args, ctx) {
+  const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
+  if (up.code !== 0) return `The browser would not start: ${(up.out + up.err).trim().slice(-600)}`
+  const r = await execIn(c, ['-i', c, 'curl', '-s', '--max-time', '90', '-X', 'POST',
+    '-H', 'content-type: application/json', '--data-binary', '@-', 'http://127.0.0.1:9230/'], JSON.stringify(args))
+  let j
+  try { j = JSON.parse(r.out) } catch { return `The browser did not respond: ${(r.err || r.out).trim().slice(0, 300)}` }
+  if (!j.ok) return `Browser error: ${j.error}`
+  const head = `Page: ${j.title || '(no title)'}  ${j.url}`
+  if (j.image) return ctx.noImages
+    ? `${head}\nScreenshot taken, but the current model can't see images — use action=read to read the page text.`
+    : { text: `${head}\nThe screenshot is attached to the next message.`, image: `data:image/jpeg;base64,${j.image}` }
+  if (args.action === 'read')
+    return clip(`${head}\n\n--- Page text ---\n${j.text}\n\n--- Interactive elements (use the number for click / type) ---\n${j.elements.join('\n')}`, 20_000)
+  if (args.action === 'eval') return clip(`${head}\n${j.result}`)
+  return `${head}\nDone. Use read or screenshot to see the result.`
+}
+
 // The file tools all run inside the container, so path semantics are uniform (/work in the container, not a host path).
 // write_file goes over stdin instead of building a command line — quotes, newlines and $ in the content can't break anything.
 async function runTool(name, args, ctx) {
   const c = ctx.container
+  if (name === 'browser') return runBrowser(c, args, ctx)
   if (name === 'bash') {
     const { code, out, err } = await execIn(c, ['-w', '/work', c, 'bash', '-lc', args.command])
     const killed = code === 124 ? `\n(over ${EXEC_TIMEOUT / 1000}s — we stopped waiting; the command may still be running in the container)` : ''
@@ -368,10 +455,18 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       if (wait) await new Promise(t => setTimeout(t, wait))
       try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal }); break }
       catch (e) {
+        // Rejected with a 4xx while carrying a screenshot: most likely this model doesn't accept images. Drop them and carry on,
+        // and stop sending screenshots afterwards — otherwise a model that can't see images fails the whole turn on the browser
+        if (isUpstreamError(e) && upstreamStatus(e) >= 400 && upstreamStatus(e) < 500 && dropImages(messages)) {
+          ctx.noImages = true
+          onTool?.({ phase: 'retry', reason: tr(lang, 'chat.noImages') })
+          r = null; break
+        }
         if (ctx.signal?.aborted || !isUpstreamError(e) || wait === 6000) throw e
         onTool?.({ phase: 'retry', reason: errorText(e, lang).slice(0, 120) })
       }
     }
+    if (!r) { step--; continue }
     const { content, calls } = r
     if (content) text = content
     if (!calls.length) return text
@@ -381,17 +476,34 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       content: content || null,
       tool_calls: calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } })),
     })
+    let shot = null
     for (const c of calls) {
       if (ctx.signal?.aborted) throw new Say('chat.aborted')
       let args = {}
       try { args = JSON.parse(c.args || '{}') } catch { args = {} }
       onTool?.({ phase: 'run', name: c.name, args })
-      const out = await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
-      onTool?.({ phase: 'done', name: c.name, args, output: out })
+      const res = await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
+      const out = typeof res === 'string' ? res : res.text
+      if (res?.image) shot = res.image
+      // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored
+      onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {} })
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
+    }
+    // A screenshot can't go into a tool result (Chat protocol tool messages only take text), so it follows as a user message.
+    // Keep only the newest one: ten screenshots in a turn would each be paid for at every step, and the old ones are useless
+    if (shot) {
+      dropImages(messages, '(a screenshot was here; it has been replaced by a newer one)')
+      messages.push({ role: 'user', content: '(this is the page captured by the browser screenshot just now)', images: [shot] })
     }
   }
   return text || '(hit the tool-use limit; stopping here for now)'
+}
+
+/** Strip every screenshot from the history (in place). Returns true if at least one was removed. */
+function dropImages(messages, note = '(a screenshot was here; the current model can\'t see images, so it was removed)') {
+  let n = 0
+  for (const m of messages) if (m.images) { delete m.images; m.content = `${m.content ?? ''}\n${note}`; n++ }
+  return n > 0
 }
 
 // One-on-one
@@ -406,7 +518,7 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
     const full = await runAgent(p,
       [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot)) },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, lang })
+      onDelta, onTool, { container, signal, bot, lang })
     await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
     return full
   })
@@ -422,7 +534,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
         ? { role: 'assistant', content: e.content }                                   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, lang })
+    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang })
   })
 }
 
@@ -824,6 +936,43 @@ const server = createServer(async (req, res) => {
       if (req.method === 'PUT') { await db.setMemory(kind, id, str((await readBody(req)).text)); return send(200, { ok: true }) }
     }
 
+    // ---- An agent's browser: a human watching, a human taking over ----
+    const bw = url.pathname.match(/^\/api\/browser\/([a-z0-9-]+)\/(shot|act|stream)$/)
+    if (bw) {
+      if (!await db.getAgent(bw[1])) return send(404, { error: t('err.noAgent') })
+      const c = cname(bw[1])
+      // Live view: relay the daemon's MJPEG as-is (Chromium screencast; a frame only when the page changes).
+      // Screenshot polling (shot) stays as the fallback: for when the stream drops or the daemon is still an old version
+      if (bw[2] === 'stream' && req.method === 'GET') {
+        if (!CFG.tools || !await browserAlive(c)) { res.writeHead(204); return res.end() }
+        // Upgrade the daemon to the streaming version while we're at it (a no-op if unchanged)
+        await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
+        // ⚠️ Killing the docker exec client does NOT kill the curl inside the container: nobody reads its output any more,
+        // the heartbeat fills the pipe and it hangs forever while the daemon keeps encoding frames for it. So record its pid in the container and kill it ourselves on the way out
+        const pidFile = `/tmp/stream-${process.pid}-${Date.now().toString(36)}.pid`
+        const child = spawn(CLI, ['exec', c, 'sh', '-c', `echo $$ > ${pidFile}; exec curl -sN http://127.0.0.1:9230/stream`],
+          { stdio: ['ignore', 'pipe', 'ignore'] })
+        res.writeHead(200, { 'content-type': 'multipart/x-mixed-replace; boundary=frame', 'cache-control': 'no-store' })
+        child.stdout.pipe(res)
+        res.on('close', () => {
+          child.kill('SIGKILL')
+          cliRun(['exec', c, 'sh', '-c', `kill $(cat ${pidFile}) 2>/dev/null; rm -f ${pidFile}`], null, 10_000)
+        })
+        child.on('close', () => res.end())
+        return
+      }
+      if (bw[2] === 'shot' && req.method === 'GET') {
+        // Not open → 204: the UI shows "he hasn't opened a browser yet"
+        if (!CFG.tools || !await browserAlive(c)) { res.writeHead(204); return res.end() }
+        const j = await browserPost(c, { action: 'screenshot' }, lang)
+        if (!j.ok || !j.image) return send(502, { error: j.error ?? t('browser.noShot') })
+        res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store',
+          'x-page-url': encodeURIComponent(j.url ?? ''), 'x-page-title': encodeURIComponent(j.title ?? '') })
+        return res.end(Buffer.from(j.image, 'base64'))
+      }
+      if (bw[2] === 'act' && req.method === 'POST') return send(200, await humanBrowserAct(bw[1], await readBody(req), lang))
+    }
+
     // ---- Scheduled tasks ----
     if (url.pathname === '/api/routines' && req.method === 'GET') {
       const kind = url.searchParams.get('kind'), id = url.searchParams.get('id')
@@ -1082,6 +1231,96 @@ await mkdir(join(WORKROOT, 'groups'), { recursive: true })
 // outlive the server's, so the next request lands on a socket that's already been closed.
 server.keepAliveTimeout = 65_000
 server.headersTimeout = 66_000
+// ---------- A human driving an agent's browser directly: a WebSocket input channel ----------
+// Mouse move/down/up/wheel, keys, typed text — one message per event, passed as-is to the input port of the daemon in the container
+// (9231, one JSON per line). With one HTTP request per event, dragging, hovering and typing couldn't keep up.
+// Node's standard library has no WebSocket server, so only the small part we need is here: handshake, unmasking client frames, close, ping.
+const INPUT_TYPES = new Set(['move', 'down', 'up', 'wheel', 'keydown', 'keyup', 'press', 'text'])
+
+function cleanInput(raw) {
+  let e
+  try { e = JSON.parse(raw) } catch { return null }
+  if (!e || !INPUT_TYPES.has(e.t)) return null
+  const num = v => (Number.isFinite(Number(v)) ? Number(v) : 0)
+  const out = { t: e.t, x: num(e.x), y: num(e.y) }
+  if (e.t === 'wheel') { out.dx = num(e.dx); out.dy = num(e.dy) }
+  if (e.t === 'down' || e.t === 'up') {
+    out.button = ['left', 'right', 'middle'].includes(e.button) ? e.button : 'left'
+    out.count = Math.min(3, Math.max(1, num(e.count) || 1))
+  }
+  if (['keydown', 'keyup', 'press'].includes(e.t)) {
+    if (typeof e.key !== 'string' || !e.key || e.key.length > 40) return null
+    out.key = e.key
+  }
+  if (e.t === 'text') {
+    if (typeof e.text !== 'string' || !e.text) return null
+    out.text = e.text.slice(0, 4000)
+  }
+  return JSON.stringify(out)
+}
+
+server.on('upgrade', async (req, socket) => {
+  const url = new URL(req.url, 'http://x')
+  const m = url.pathname.match(/^\/api\/browser\/([a-z0-9-]+)\/input$/)
+  const refuse = code => socket.end(`HTTP/1.1 ${code}\r\nconnection: close\r\n\r\n`)
+  socket.on('error', () => {})
+  if (!m || !req.headers['sec-websocket-key']) return refuse('404 Not Found')
+  if (!authed(req, url)) return refuse('401 Unauthorized')
+  if (!CFG.tools || !await db.getAgent(m[1])) return refuse('404 Not Found')
+  const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`)
+
+  // The channel connects in the background; events arriving before that are queued, not dropped
+  const c = cname(m[1]), pending = []
+  let child = null, closed = false
+  const pidFile = `/tmp/input-${process.pid}-${Date.now().toString(36)}.pid`
+  const send = line => { if (child) child.stdin.write(line + '\n'); else pending.push(line) }
+  const close = () => {
+    if (closed) return
+    closed = true
+    // Send a close frame before disconnecting: a bare disconnect shows up on the client as a "connection error"
+    try { socket.end(Buffer.from([0x88, 0])) } catch {}
+    if (child) { child.stdin.end(); child.kill('SIGKILL') }
+    // Same as the stream: killing the docker exec client doesn't kill the process in the container
+    cliRun(['exec', c, 'sh', '-c', `kill $(cat ${pidFile}) 2>/dev/null; rm -f ${pidFile}`], null, 10_000)
+  }
+  ;(async () => {
+    if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
+      await withAgent(m[1], () => ensureContainer(m[1], null))
+    const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
+    if (up.code !== 0 || closed) return close()
+    // After exec, cat keeps bash's pid, so $$ is the one to kill
+    child = spawn(CLI, ['exec', '-i', c, 'bash', '-c', `echo $$ > ${pidFile}; exec 3<>/dev/tcp/127.0.0.1/9231; exec cat >&3`],
+      { stdio: ['pipe', 'ignore', 'ignore'] })
+    child.on('close', close)
+    child.stdin.on('error', () => {})
+    for (const line of pending.splice(0)) child.stdin.write(line + '\n')
+  })().catch(close)
+
+  let buf = Buffer.alloc(0)
+  socket.on('data', d => {
+    buf = Buffer.concat([buf, d])
+    for (;;) {
+      if (buf.length < 2) return
+      const op = buf[0] & 0x0f, masked = buf[1] & 0x80
+      let len = buf[1] & 0x7f, off = 2
+      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4 }
+      else if (len === 127) { if (buf.length < 10) return; len = Number(buf.readBigUInt64BE(2)); off = 10 }
+      if (len > 1 << 20) return close()                     // no input event is 1 MB
+      const mask = masked ? buf.subarray(off, off + 4) : null
+      if (masked) off += 4
+      if (buf.length < off + len) return
+      const payload = Buffer.from(buf.subarray(off, off + len))
+      if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]
+      buf = buf.subarray(off + len)
+      if (op === 8) return close()
+      if (op === 9) { socket.write(Buffer.concat([Buffer.from([0x8a, payload.length]), payload])); continue }
+      if (op === 1) { const line = cleanInput(payload.toString()); if (line) send(line) }
+    }
+  })
+  socket.on('close', close)
+})
+
 // Scheduled tasks: runs missed while down are made up only once after startup (next_run_at in the past → due on this tick)
 setInterval(() => tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e)), 20_000)
 tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))

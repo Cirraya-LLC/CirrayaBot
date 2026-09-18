@@ -14,6 +14,7 @@ import 'package:flutter/services.dart';
 
 import '../../data/api.dart';
 import '../../l10n.dart';
+import 'browser_view.dart';
 import 'editors.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
@@ -757,6 +758,20 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       ],
                     ),
                   ),
+                if (c != null) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.browser'))),
+                  // Keyed by agent: switching conversations must not show the
+                  // previous Agent's page for a moment.
+                  for (final id in ids)
+                    BrowserThumb(
+                      key: ValueKey('browser-$id'),
+                      api: bench.api,
+                      agentId: id,
+                      name: bench.agentById(id)?.name ?? id,
+                      hideWhenOff: c.isGroup,
+                    ),
+                ],
                 if (c != null) ...[
                   const Divider(height: 22),
                   Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.routines'))),

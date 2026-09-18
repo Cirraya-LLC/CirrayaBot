@@ -3,6 +3,7 @@ export const serverStrings = {
   // Capability tags on an agent card
   'bot.tool.shell':    ['shell', 'shell', 'shell'],
   'bot.tool.files':    ['read/write files', '读写文件', '讀寫檔案'],
+  'bot.tool.browser':  ['browser', '浏览器', '瀏覽器'],
   'bot.tool.sandbox':  ['own sandbox', '自己的沙箱', '自己的沙箱'],
   'bot.tool.chatOnly': ['chat only', '只能对话', '只能對話'],
 
@@ -28,8 +29,16 @@ export const serverStrings = {
   'container.buildFailed': ['Failed to build {image}: {detail}', '构建 {image} 失败：{detail}', '建置 {image} 失敗：{detail}'],
   'container.startFailed': ['Could not start the container for {id}: {detail}', '起不了 {id} 的容器：{detail}', '無法啟動 {id} 的容器：{detail}'],
 
+  // Browser (human side)
+  'browser.toolsOff':   ['Tools are off (AGENT_TOOLS), so agents have no browser', '工具没开（AGENT_TOOLS），Agent 没有浏览器', '工具未開啟（AGENT_TOOLS），Agent 沒有瀏覽器'],
+  'browser.badAction':  ['Unsupported action {action}', '不支持的动作 {action}', '不支援的動作 {action}'],
+  'browser.cantStart':  ['The browser would not start: {detail}', '浏览器起不来：{detail}', '瀏覽器無法啟動：{detail}'],
+  'browser.noResponse': ['The browser did not respond: {detail}', '浏览器没有回应：{detail}', '瀏覽器沒有回應：{detail}'],
+  'browser.noShot':     ['Could not take a screenshot', '截不到图', '擷取不到畫面'],
+
   // Chat stream
   'chat.needTarget':  ['Pick an agent or a group, and do not send an empty message', '要选一个 Agent 或一个群，并且不能发空消息', '請選一個 Agent 或一個群組，而且不能傳送空白訊息'],
+  'chat.noImages':    ['This model does not accept images; screenshots are now sent as text', '这个模型不收图片，截图改成文字', '這個模型不接受圖片，截圖改成文字'],
   'chat.aborted':     ['Conversation aborted', '对话已中止', '對話已中止'],
   'chat.spokenEnough': ['{name} has already spoken {n} times; stopping here', '{name} 已经说了 {n} 轮，停在这里', '{name} 已經說了 {n} 輪，停在這裡'],
   'chat.relayLimit':  ['Reached the limit of {max} handoffs; {name} will not pick this one up — you can keep going in the group',
