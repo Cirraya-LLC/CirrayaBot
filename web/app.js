@@ -94,6 +94,7 @@ async function openConv(c) {
   renderMembers(c)
   loadMemory(c)
   loadRoutines()
+  loadBotSkills()
   loadBrowsers()
 
   if (!await drawHistory(c, ticket)) return
@@ -721,6 +722,99 @@ ime.addEventListener('compositionend', () => { bwComposing = false; bwFlushIme()
 ime.addEventListener('input', () => { if (!bwComposing) bwFlushIme() })
 function bwFlushIme() { if (ime.value) { bwSend({ t:'text', text:ime.value }); ime.value = '' } }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#bwfull').hidden && document.activeElement !== ime && document.activeElement?.tagName !== 'INPUT') closeBrowser() })
+
+// ═══ Skill library ═══
+let SKILLS = [], kEditing = null
+async function loadSkills() {
+  SKILLS = await fetch(api('/api/skills')).then(r => r.json()).catch(() => [])
+}
+// Source: human-written is unmarked; Agent-saved is marked, since skills change how they work later
+const skillSource = k => k.source?.startsWith('agent:') ? t('k.selfSaved', { name: bot(k.source.slice(6))?.name ?? k.source.slice(6) }) : ''
+function renderSkills() {
+  const box = $('#klist'); box.innerHTML = ''
+  if (!SKILLS.length) { box.innerHTML = `<div style="padding:10px 2px;color:var(--dim2);font-size:12.5px">${esc(t('k.empty'))}</div>`; return }
+  for (const k of SKILLS) {
+    const el = document.createElement('div')
+    el.className = 'pitem' + (kEditing?.id === k.id ? ' on' : '')
+    const who = listJoin(k.agents.map(id => bot(id)?.name ?? id)) || t('k.nobody')
+    const src = skillSource(k)
+    el.innerHTML = `<div class="pn"><b>${esc(k.name)}${src ? ` <span class="st" style="font-size:10.5px;font-weight:400;color:var(--dim)">· ${esc(src)}</span>` : ''}</b>
+      <small>${esc(k.description)} · ${esc(who)}</small></div>`
+    el.onclick = () => fillSkill(k)
+    box.appendChild(el)
+  }
+}
+function fillSkill(k, preselect = []) {
+  kEditing = k
+  $('#ktitle').textContent = k ? t('common.editNamed', { name: k.name }) : t('k.write')
+  $('#kname').value = k?.name ?? ''
+  $('#kdesc').value = k?.description ?? ''
+  $('#kbody').value = k?.body ?? ''
+  const on = new Set(k?.agents ?? preselect)
+  $('#kagents').innerHTML = BOTS.map(b => `<label><input type="checkbox" value="${esc(b.id)}" ${on.has(b.id) ? 'checked' : ''}>${esc(b.name)}</label>`).join('')
+  const src = k && skillSource(k)
+  $('#ksrc').textContent = src ? t('k.srcNote', { src }) : ''
+  $('#kdel').style.display = $('#kexp').style.display = k ? '' : 'none'
+  renderSkills()
+}
+async function openSkills(k = null, preselect = []) {
+  await loadSkills()
+  fillSkill(k ? SKILLS.find(x => x.id === k.id) ?? null : null, preselect)
+  $('#kdlg').showModal()
+}
+const skillBody = () => ({ name: $('#kname').value.trim(), description: $('#kdesc').value.trim(), body: $('#kbody').value,
+  agents: [...document.querySelectorAll('#kagents input:checked')].map(i => i.value) })
+$('#skills').onclick = () => openSkills()
+$('#knew').onclick = () => fillSkill(null)
+$('#kclose').onclick = () => { $('#kdlg').close(); loadBotSkills() }
+$('#ksave').onclick = async () => {
+  const r = kEditing
+    ? await fetch(api(`/api/skills/${kEditing.id}`), { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(skillBody()) })
+    : await fetch(api('/api/skills'), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(skillBody()) })
+  if (!r.ok) { alert(await errText(r)); return }
+  const k = await r.json(); await loadSkills(); fillSkill(SKILLS.find(x => x.id === k.id) ?? null)
+}
+$('#kdel').onclick = async () => {
+  if (!kEditing || !confirm(t('k.confirmDelete', { name: kEditing.name }))) return
+  await fetch(api(`/api/skills/${kEditing.id}`), { method:'DELETE' })
+  await loadSkills(); fillSkill(null)
+}
+$('#kexp').onclick = async () => {
+  if (!kEditing) return
+  const text = await fetch(api(`/api/skills/${kEditing.id}/export`)).then(r => r.text())
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/markdown' }))
+  a.download = `${kEditing.name}.SKILL.md`; a.click(); URL.revokeObjectURL(a.href)
+}
+$('#kimp').onclick = () => $('#kfile').click()
+$('#kfile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''
+  if (!f) return
+  const r = await fetch(api('/api/skills/import'), { method:'POST', headers:{'content-type':'application/json'},
+    // no name in the file: use the file name minus .md / .SKILL.md
+    body: JSON.stringify({ text: await f.text(), name: f.name.replace(/(\.SKILL)?\.md$/i, ''),
+      agents: [...document.querySelectorAll('#kagents input:checked')].map(i => i.value) }) })
+  if (!r.ok) { alert(await errText(r)); return }
+  const k = await r.json(); await loadSkills(); fillSkill(SKILLS.find(x => x.id === k.id) ?? null)
+}
+
+// Right column: this Agent's skills. Hidden in groups — skills belong to people, not groups
+async function loadBotSkills() {
+  const c = cur
+  $('#s2skills').style.display = c?.kind === 'agent' ? '' : 'none'
+  if (c?.kind !== 'agent') return
+  await loadSkills()
+  if (cur !== c) return
+  const box = $('#bskills'); box.innerHTML = ''
+  for (const k of SKILLS.filter(k => k.agents.includes(c.id))) {
+    const el = document.createElement('div'); el.className = 'rt'
+    const src = skillSource(k)
+    el.innerHTML = `<b>${esc(k.name)}${src ? ` <span class="st">${esc(src)}</span>` : ''}</b><small>${esc(k.description)}</small>`
+    el.onclick = () => openSkills(k)
+    box.appendChild(el)
+  }
+}
+$('#addsk').onclick = () => openSkills(null, cur ? [cur.id] : [])
 
 // ═══ Scheduled tasks ═══
 // Weekday names from Intl; 2024-01-07 was a Sunday, so index 0 = Sunday

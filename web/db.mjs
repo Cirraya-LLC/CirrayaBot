@@ -110,6 +110,20 @@ create table if not exists routines (
   created_at    timestamptz not null default now()
 );
 create index if not exists routines_due_idx on routines (next_run_at) where enabled;
+
+-- Skills: a "how to do this kind of job" note, same format as dsh / Claude Code SKILL.md (name + when to use + body).
+-- agents = who it is installed on. source = 'human' or 'agent:<id>' (saved by the Agent itself; the UI must mark it).
+create table if not exists skills (
+  id          text primary key,
+  name        text not null,
+  description text not null default '',
+  body        text not null,
+  agents      text[] not null default '{}',
+  source      text not null default 'human',
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create unique index if not exists skills_name_idx on skills (lower(name));
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -169,6 +183,7 @@ export async function deleteAgent(id) {
   await q('delete from agents where id = $1', [id])
   await q('delete from settings where key = $1', [memKey('agent', id)])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
+  await q(`update skills set agents = array_remove(agents, $1)`, [id])
 }
 
 export const nextColor = n => COLORS[n % COLORS.length]
@@ -257,6 +272,38 @@ export async function setSetting(key, value) {
 export const memKey = (kind, id) => `memory:${kind}:${id}`
 export const getMemory = (kind, id) => getSetting(memKey(kind, id), '')
 export const setMemory = (kind, id, text) => setSetting(memKey(kind, id), text)
+
+// ---------- skills ----------
+export async function listSkills() {
+  return (await q('select * from skills order by lower(name)')).rows
+}
+
+export async function getSkill(id) {
+  return (await q('select * from skills where id = $1', [id])).rows[0] ?? null
+}
+
+export async function skillByName(name) {
+  return (await q('select * from skills where lower(name) = lower($1)', [name])).rows[0] ?? null
+}
+
+/** The skills installed on an Agent */
+export async function skillsFor(agentId) {
+  return (await q('select * from skills where $1 = any(agents) order by lower(name)', [agentId])).rows
+}
+
+export async function saveSkill(k) {
+  const { rows } = await q(`
+    insert into skills (id, name, description, body, agents, source)
+    values ($1,$2,$3,$4,$5,$6)
+    on conflict (id) do update set name = excluded.name, description = excluded.description,
+      body = excluded.body, agents = excluded.agents, updated_at = now()
+    returning *`, [k.id, k.name, k.description ?? '', k.body, k.agents ?? [], k.source ?? 'human'])
+  return rows[0]
+}
+
+export async function deleteSkill(id) {
+  await q('delete from skills where id = $1', [id])
+}
 
 // ---------- routines ----------
 export async function listRoutines({ kind, id } = {}) {

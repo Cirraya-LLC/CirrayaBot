@@ -16,6 +16,7 @@ export const serverStrings = {
   // Not found
   'err.noAgent':    ['No such agent', '没有这个 Agent', '沒有這個 Agent'],
   'err.noGroup':    ['No such group', '没有这个群', '沒有這個群組'],
+  'err.noSkill':    ['No such skill', '没有这个技能', '沒有這個技能'],
   'err.noRoutine':  ['No such scheduled task', '没有这个定时任务', '沒有這個排程任務'],
   'err.noProvider': ['No such upstream', '没有这个上游', '沒有這個上游'],
 
@@ -65,6 +66,10 @@ export const serverStrings = {
   'group.membersArray':  ['members must be an array of agent ids', 'members 要是 Agent id 的数组', 'members 必須是 Agent id 的陣列'],
   'group.tooFew':        ['A group needs at least two members — a group of one is a direct chat', '群至少要两个成员 —— 一个人的群就是私聊', '群組至少要兩位成員——一個人的群組就是私訊'],
   'group.leadNotMember': ['The lead must be a member of this group', '负责人要是这个群里的成员', '負責人必須是這個群組的成員'],
+
+  // Skills
+  'skill.exists':      ['There is already a skill named "{name}"', '已经有一个叫「{name}」的技能了', '已經有一個叫「{name}」的技能了'],
+  'skill.agentsArray': ['agents must be an array of agent ids', 'agents 要是 Agent id 的数组', 'agents 必須是 Agent id 的陣列'],
 
   // Scheduled tasks
   'routine.nameRequired':   ['The task needs a name', '任务要有个名字', '任務需要一個名稱'],

@@ -9,6 +9,7 @@ import * as db from './db.mjs'
 import { fitContext, listModels, probeContext } from './model.mjs'
 import { callUpstream, normProtocol, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
+import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
@@ -90,7 +91,7 @@ async function groupRecallFor(bot) {
   return chunks.join('\n\n')
 }
 
-function systemFor(bot, memory, peers, box, recall, lead = null) {
+function systemFor(bot, memory, peers, box, recall, skills = [], lead = null) {
   const parts = [bot.persona]
   parts.push(`
 
@@ -137,6 +138,15 @@ Other rules:
 - When the matter is done and nobody needs to follow up, don't @ anyone — that is what stops the group chat.
 - People are watching you, so don't treat "I've done X" as a figure of speech: if you didn't do it, say so.`)
   }
+  if (skills.length) parts.push(box ? `
+
+--- Your skills ---
+These are the skills installed for you: the name and when to use it. When a task matches, first read the full procedure with read_skill, then follow it.
+${skills.map(k => `- ${k.name}: ${k.description}`).join('\n')}` : `
+
+--- Your skills ---
+When a task matches, follow the procedure below.
+${skills.map(k => `### ${k.name}\nWhen to use: ${k.description}\n\n${k.body}`).join('\n\n')}`)
   if (memory.own?.trim()) parts.push(`\n\n--- Your memory (maintained by humans, only you can read it) ---\n${memory.own.trim()}`)
   if (memory.group?.trim()) parts.push(`\n\n--- This group's memory (everyone in the group can read it; maintained by humans) ---\n${memory.group.trim()}`)
   if (recall?.trim()) parts.push(`
@@ -295,6 +305,19 @@ async function removeContainer(botId) {
 
 const TOOL_SPECS = [
   { type: 'function', function: {
+    name: 'read_skill',
+    description: 'Read the full procedure of a skill installed for you (the names are listed in the "Your skills" section of the system prompt). When a task matches, read first, then act.',
+    parameters: { type: 'object', required: ['name'], properties: {
+      name: { type: 'string', description: 'Skill name' } } } } },
+  { type: 'function', function: {
+    name: 'save_skill',
+    description: 'Save a procedure as a skill so similar tasks follow it later. Use it when the user asks you to "remember this process" or "save it as a skill", ' +
+      'or when you have just worked out a procedure you will need again and the user agrees to save it. It is installed only for you; a skill with the same name that you wrote yourself is updated.',
+    parameters: { type: 'object', required: ['name', 'description', 'body'], properties: {
+      name: { type: 'string', description: 'A short name, e.g. "weekly report"' },
+      description: { type: 'string', description: 'When to use it — this sentence is how you will recall it later, so describe the triggering situation clearly' },
+      body: { type: 'string', description: 'The full procedure (Markdown): steps, decision rules, expected output, what to ask a human first. Write it so someone else could follow it' } } } } },
+  { type: 'function', function: {
     name: 'browser',
     description: 'Drive the browser on your own machine. It is stateful: open pages, half-filled forms and logins all persist (logins survive container restarts too). ' +
       'Workflow: open a URL → read the page text, which also numbers the elements you can click or fill → click / type by number → screenshot to see what the page looks like. ' +
@@ -402,6 +425,13 @@ async function runBrowser(c, args, ctx) {
 async function runTool(name, args, ctx) {
   const c = ctx.container
   if (name === 'browser') return runBrowser(c, args, ctx)
+  if (name === 'read_skill') {
+    const mine = await db.skillsFor(ctx.bot.id)
+    const k = mine.find(x => x.name.toLowerCase() === String(args.name ?? '').trim().toLowerCase())
+    return k ? `# ${k.name}\nWhen to use: ${k.description}\n\n${k.body}`
+      : `You have no skill named "${args.name}". Installed for you: ${mine.map(x => x.name).join(', ') || '(none)'}`
+  }
+  if (name === 'save_skill') return saveSkillFromAgent(ctx.bot, args)
   if (name === 'bash') {
     const { code, out, err } = await execIn(c, ['-w', '/work', c, 'bash', '-lc', args.command])
     const killed = code === 124 ? `\n(over ${EXEC_TIMEOUT / 1000}s — we stopped waiting; the command may still be running in the container)` : ''
@@ -499,6 +529,23 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
   return text || '(hit the tool-use limit; stopping here for now)'
 }
 
+/**
+ * An agent saving a skill by itself. Installed only for itself, source recorded as agent:<id>, and flagged in the UI —
+ * skills change how it works from then on, and a web page it read could make it save one, so humans need to see it.
+ * It cannot overwrite a same-named skill written by someone else (a human or another agent).
+ */
+async function saveSkillFromAgent(bot, args) {
+  let k
+  try { k = checkSkill(args) } catch (e) { return `Not saved: ${errorText(e, 'en')}` }
+  const source = `agent:${bot.id}`
+  const cur = await db.skillByName(k.name)
+  if (cur && cur.source !== source)
+    return `There is already a skill named "${cur.name}" that you didn't write, so you can't change it. Pick another name, or ask the user to edit it in the skill library.`
+  await db.saveSkill({ id: cur?.id ?? 'k' + Date.now().toString(36), ...k, source,
+    agents: [...new Set([...(cur?.agents ?? []), bot.id])] })
+  return `${cur ? 'Updated' : 'Saved'} the skill "${k.name}", installed only for you. Next time you get a "${k.description}" kind of task, read_skill first, then do it.`
+}
+
 /** Strip every screenshot from the history (in place). Returns true if at least one was removed. */
 function dropImages(messages, note = '(a screenshot was here; the current model can\'t see images, so it was removed)') {
   let n = 0
@@ -516,7 +563,7 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
     const full = await runAgent(p,
-      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot)) },
+      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id)) },
        ...prior, { role: 'user', content: text }],
       onDelta, onTool, { container, signal, bot, lang })
     await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
@@ -528,7 +575,7 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
 function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang) {
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
-    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', lead) }]
+    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead) }]
     for (const e of await db.recent('group', groupId, FETCH_MAX)) {
       messages.push(e.speaker === bot.name
         ? { role: 'assistant', content: e.content }                                   // what he said himself
@@ -684,8 +731,19 @@ async function tickRoutines() {
   }
 }
 
-// A validation error from schedule.mjs: pass Say through, turn anything else into a 400.
+// A validation error from schedule.mjs / skill.mjs: pass Say through, turn anything else into a 400.
 const asBadRequest = e => (e instanceof Say ? e : Object.assign(new Error(e.message), { status: 400 }))
+
+/** The skill form: three fields + who it's installed for. The name can't clash with another skill (case-insensitive). */
+async function checkSkillBody(b, selfId = null) {
+  let k
+  try { k = checkSkill(b) } catch (e) { throw asBadRequest(e) }
+  const clash = await db.skillByName(k.name)
+  if (clash && clash.id !== selfId) throw new Say('skill.exists', { name: clash.name })
+  if (!Array.isArray(b.agents ?? []) || (b.agents ?? []).some(a => typeof a !== 'string')) throw new Say('skill.agentsArray')
+  const known = new Set((await db.listAgents()).map(a => a.id))
+  return { ...k, agents: [...new Set(b.agents ?? [])].filter(a => known.has(a)) }
+}
 
 /** Form → task fields. On PATCH, fields not sent keep their old values. */
 async function checkRoutine(b, cur = null) {
@@ -971,6 +1029,35 @@ const server = createServer(async (req, res) => {
         return res.end(Buffer.from(j.image, 'base64'))
       }
       if (bw[2] === 'act' && req.method === 'POST') return send(200, await humanBrowserAct(bw[1], await readBody(req), lang))
+    }
+
+    // ---- Skill library ----
+    if (url.pathname === '/api/skills' && req.method === 'GET') return send(200, await db.listSkills())
+    if (url.pathname === '/api/skills' && req.method === 'POST') {
+      const row = await checkSkillBody(await readBody(req))
+      return send(200, await db.saveSkill({ id: 'k' + Date.now().toString(36), ...row, source: 'human' }))
+    }
+    // Import a SKILL.md (the dsh / Claude Code skill format). If the file has no name, use the one the caller gave
+    if (url.pathname === '/api/skills/import' && req.method === 'POST') {
+      const b = await readBody(req)
+      const md = parseSkillMd(str(b.text))
+      const row = await checkSkillBody({ ...md, name: md.name || b.name, agents: b.agents ?? [] })
+      return send(200, await db.saveSkill({ id: 'k' + Date.now().toString(36), ...row, source: 'human' }))
+    }
+    const km = url.pathname.match(/^\/api\/skills\/([\w-]+)(\/export)?$/)
+    if (km) {
+      const cur = await db.getSkill(km[1])
+      if (!cur) return send(404, { error: t('err.noSkill') })
+      if (km[2] && req.method === 'GET') return send(200, toSkillMd(cur), 'text/markdown; charset=utf-8')
+      if (!km[2] && req.method === 'PATCH') {
+        const b = await readBody(req)
+        const row = await checkSkillBody({ name: b.name ?? cur.name, description: b.description ?? cur.description,
+          body: b.body ?? cur.body, agents: b.agents ?? cur.agents }, cur.id)
+        // A skill a human edited is the human's: the UI stops marking it "written by agent X", and the agent can no longer overwrite it with save_skill
+        const edited = b.body !== undefined || b.description !== undefined || b.name !== undefined
+        return send(200, await db.saveSkill({ ...cur, ...row, source: edited ? 'human' : cur.source }))
+      }
+      if (!km[2] && req.method === 'DELETE') { await db.deleteSkill(cur.id); return send(200, { ok: true }) }
     }
 
     // ---- Scheduled tasks ----
