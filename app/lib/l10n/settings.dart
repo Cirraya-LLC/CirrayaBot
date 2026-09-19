@@ -1,4 +1,4 @@
-/// Strings for the settings area (setup, providers):
+/// Strings for the settings area (setup, providers, skills):
 /// key -> ['English', '简体', '繁體'].
 library;
 
@@ -84,4 +84,60 @@ const Map<String, List<String>> settingsStrings = {
   'prov.new': ['+ New', '＋ 新的', '＋ 新的'],
   'prov.inUse': ['In use', '正在用', '使用中'],
   'prov.makeDefault': ['Click to make default', '点这里设为默认', '點這裡設為預設'],
+
+  // Skills
+  'skills.title': ['Skills', '技能库', '技能庫'],
+  'skills.savedByHint': [
+    '{name} saved this himself. Once you edit it, it is yours and he can no longer overwrite it.',
+    '这是 {name} 自己存的。你一改它就算你的了，他以后不能再覆盖。',
+    '這是 {name} 自己存的。你一改它就算你的了，他以後不能再覆蓋。',
+  ],
+  'skills.fileError': ['File read/write failed: {detail}', '文件读写失败：{detail}', '檔案讀寫失敗：{detail}'],
+  'skills.saving': ['Saving…', '保存中…', '儲存中…'],
+  'skills.saved': ['Saved', '已保存', '已儲存'],
+  'skills.deleteTitle': ['Delete skill “{name}”?', '删掉技能「{name}」？', '刪除技能「{name}」？'],
+  'skills.deleteBody': [
+    'Agents that have it installed will stop working this way.',
+    '装了它的 Agent 以后就不会这么做了。',
+    '裝了它的 Agent 以後就不會這麼做了。',
+  ],
+  'skills.deleting': ['Deleting…', '删除中…', '刪除中…'],
+  'skills.deleted': ['Deleted “{name}”', '已删除「{name}」', '已刪除「{name}」'],
+  'skills.exporting': ['Exporting…', '导出中…', '匯出中…'],
+  'skills.exported': ['Exported to {path}', '已导出到 {path}', '已匯出到 {path}'],
+  'skills.importing': ['Importing…', '导入中…', '匯入中…'],
+  'skills.imported': ['Imported “{name}”', '已导入「{name}」', '已匯入「{name}」'],
+  'skills.intro': [
+    'A skill = how to do one kind of job: steps, decision rules, what to deliver, what to ask a person first. '
+        'An Agent it is installed on reads it before doing a matching job. '
+        'Same format as Claude Code / dsh SKILL.md files, which import directly.',
+    '一个技能 = 一类活怎么干：步骤、判断规则、产出要求、哪些事要先问人。装给哪个 Agent，他碰到对得上的活就会先读它再做。'
+        '格式和 Claude Code / dsh 的 SKILL.md 一样，可以直接导入。',
+    '一個技能 = 一類工作怎麼做：步驟、判斷規則、產出要求、哪些事要先問人。裝給哪個 Agent，他碰到對得上的工作就會先讀它再做。'
+        '格式和 Claude Code / dsh 的 SKILL.md 一樣，可以直接匯入。',
+  ],
+  'skills.none': [
+    'No skills yet — write one below, or import a SKILL.md.',
+    '还没有技能 —— 在下面写一个，或者导入 SKILL.md。',
+    '還沒有技能 —— 在下面寫一個，或者匯入 SKILL.md。',
+  ],
+  'skills.newTitle': ['Write a skill', '写一个技能', '寫一個技能'],
+  'skills.editTitle': ['Edit “{name}”', '编辑「{name}」', '編輯「{name}」'],
+  'skills.nameHint': ['Name, e.g. “Weekly report”', '名字，比如「周报」', '名稱，例如「週報」'],
+  'skills.descHint': [
+    'When to use it — the Agent recalls it by this line, e.g. “when the user asks for a weekly report or summary”',
+    '什么时候用 —— Agent 靠这句话想起它，比如「用户要周报、周总结的时候」',
+    '什麼時候用 —— Agent 靠這句話想起它，例如「使用者要週報、週總結的時候」',
+  ],
+  'skills.bodyHint': [
+    'How to do it (Markdown):\n1. First…\n2. If… then…\nDeliver: …\nAsk a person first about: …',
+    '怎么做（Markdown）：\n1. 先……\n2. 如果……就……\n产出：……\n这些事要先问人：……',
+    '怎麼做（Markdown）：\n1. 先……\n2. 如果……就……\n產出：……\n這些事要先問人：……',
+  ],
+  'skills.installOn': ['Install on', '装给谁', '裝給誰'],
+  'skills.importMd': ['Import SKILL.md', '导入 SKILL.md', '匯入 SKILL.md'],
+  'skills.new': ['+ New', '＋ 新的', '＋ 新的'],
+  'skills.nobody': ['not installed on anyone yet', '还没装给任何人', '還沒裝給任何人'],
+  'skills.listSep': [', ', '、', '、'],
+  'skills.savedBy': [' · saved by {name}', ' · {name} 自己存的', ' · {name} 自己存的'],
 };

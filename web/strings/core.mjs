@@ -1,5 +1,14 @@
 // Messages for core code: key -> ['English', '简体', '繁體']. See ../i18n.mjs.
 export const coreStrings = {
+  // skill.mjs
+  'skill.nameRequired': ['A skill needs a name', '技能要有名字', '技能需要名稱'],
+  'skill.nameTooLong': ['The name can be at most {max} characters', '名字最多 {max} 个字', '名稱最多 {max} 個字'],
+  'skill.nameNewline': ['The name cannot contain line breaks', '名字不能换行', '名稱不能換行'],
+  'skill.descriptionRequired': ['Say when this skill should be used', '要写清楚什么时候用这个技能', '請寫清楚什麼時候使用這個技能'],
+  'skill.descriptionTooLong': ['"When to use" can be at most {max} characters', '「什么时候用」最多 {max} 个字', '「什麼時候使用」最多 {max} 個字'],
+  'skill.bodyRequired': ['The skill body cannot be empty', '技能正文不能为空', '技能內文不能為空'],
+  'skill.bodyTooLong': ['The body can be at most {max} characters', '正文最多 {max} 个字', '內文最多 {max} 個字'],
+
   // schedule.mjs
   'schedule.badTimeZone': ['Unknown time zone {tz}', '不认识的时区 {tz}', '無法辨識的時區 {tz}'],
   'schedule.tooShort': ['The interval must be at least {min} minutes', '间隔至少 {min} 分钟', '間隔至少 {min} 分鐘'],

@@ -15,6 +15,7 @@ const M = {
   'common.delete': ['Delete', '删除', '刪除'],
   'common.close': ['Close', '关闭', '關閉'],
   'common.new': ['＋ New', '＋ 新的', '＋ 新增'],
+  'common.export': ['Export', '导出', '匯出'],
   'common.import': ['Import', '导入', '匯入'],
   'common.edit': ['Edit', '编辑', '編輯'],
   'common.editNamed': ['Edit “{name}”', '编辑「{name}」', '編輯「{name}」'],
@@ -29,6 +30,7 @@ const M = {
   'side.newGroup': ['New group', '新建群聊', '新增群組'],
   'side.newAgent': ['New Agent', '新建 Agent', '新增 Agent'],
   'side.providers': ['Model providers', '模型上游', '模型上游'],
+  'side.skills': ['Skill library', '技能库', '技能庫'],
   'side.noMatch': ['No matching conversations', '没有匹配的会话', '沒有符合的對話'],
   'side.noMessages': ['No messages yet', '还没说过话', '還沒有訊息'],
 
@@ -72,6 +74,8 @@ const M = {
   's2.lead': ['Lead', '负责人', '負責人'],
   's2.remove': ['Remove', '移出', '移出'],
   's2.browser': ['Browser', '浏览器', '瀏覽器'],
+  's2.skills': ['Skills', '技能', '技能'],
+  's2.addSkill': ['Install / write a skill', '装技能 / 写技能', '安裝技能 / 撰寫技能'],
   's2.routines': ['Scheduled tasks', '定时任务', '排程任務'],
   's2.addRoutine': ['New scheduled task', '新建定时任务', '新增排程任務'],
   's2.exportChat': ['Export chat', '导出聊天记录', '匯出聊天紀錄'],
@@ -155,6 +159,20 @@ const M = {
   'bw.open': ['Open', '打开', '開啟'],
   'bw.note': ['Click the view to hand the keyboard to the browser · you and {name} share the same browser', '点一下画面，键盘就交给浏览器 · 你和 {name} 用的是同一个浏览器', '點一下畫面，鍵盤就交給瀏覽器 · 你和 {name} 使用同一個瀏覽器'],
   'bw.offNote': ['Their browser isn’t open yet — enter a URL above to open it; they’ll use it too.', '他还没打开浏览器 —— 在上面输入网址打开，他之后也会用这个。', '他還沒開啟瀏覽器 —— 在上方輸入網址開啟，他之後也會使用這個。'],
+
+  // skills
+  'k.intro': ['A skill = how to do one kind of job: steps, rules, expected output, and what to ask a human first. Install it on an Agent and they read it before doing matching work. Same format as Claude Code / dsh SKILL.md, so you can import those directly.', '一个技能 = 一类活怎么干：步骤、判断规则、产出要求、哪些事要先问人。装给哪个 Agent，他碰到对得上的活就会先读它再做。格式和 Claude Code / dsh 的 SKILL.md 一样，可以直接导入。', '一個技能 = 一類工作怎麼做：步驟、判斷規則、產出要求、哪些事要先問人。安裝給哪個 Agent，他遇到對應的工作就會先讀它再做。格式和 Claude Code / dsh 的 SKILL.md 一樣，可以直接匯入。'],
+  'k.write': ['Write a skill', '写一个技能', '撰寫技能'],
+  'k.namePh': ['Name, e.g. “Weekly report”', '名字，比如「周报」', '名稱，例如「週報」'],
+  'k.descPh': ['When to use — the Agent recalls it by this line, e.g. “when the user asks for a weekly report”', '什么时候用 —— Agent 靠这句话想起它，比如「用户要周报、周总结的时候」', '什麼時候用 —— Agent 靠這句話想起它，例如「使用者要週報、週總結的時候」'],
+  'k.bodyPh': ['How to do it (Markdown):\n1. First…\n2. If… then…\nOutput: …\nAsk a human first about: …', '怎么做（Markdown）：\n1. 先……\n2. 如果……就……\n产出：……\n这些事要先问人：……', '怎麼做（Markdown）：\n1. 先……\n2. 如果……就……\n產出：……\n這些事要先問人：……'],
+  'k.installOn': ['Install on', '装给谁', '安裝給誰'],
+  'k.importMd': ['Import SKILL.md', '导入 SKILL.md', '匯入 SKILL.md'],
+  'k.empty': ['No skills yet — write one below or import a SKILL.md.', '还没有技能 —— 在下面写一个，或者导入 SKILL.md。', '還沒有技能 —— 在下方撰寫一個，或匯入 SKILL.md。'],
+  'k.nobody': ['Not installed on anyone yet', '还没装给任何人', '還沒安裝給任何人'],
+  'k.selfSaved': ['saved by {name}', '{name} 自己存的', '{name} 自己存的'],
+  'k.srcNote': ['This was {src}. Once you edit it, it’s yours and they can no longer overwrite it.', '这是 {src}。你一改它就算你的了，他以后不能再覆盖。', '這是 {src}。你一修改它就算你的了，他之後不能再覆蓋。'],
+  'k.confirmDelete': ['Delete skill “{name}”? Agents that have it will stop working this way.', '删掉技能「{name}」？装了它的 Agent 以后就不会这么做了。', '刪除技能「{name}」？安裝了它的 Agent 之後就不會這樣做了。'],
 
   // scheduled tasks
   'r.new': ['New scheduled task', '新建定时任务', '新增排程任務'],

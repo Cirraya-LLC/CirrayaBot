@@ -13,8 +13,8 @@ import { coreStrings } from './strings/core.mjs'
 
 export const LANGS = ['en', 'zh-Hans', 'zh-Hant']
 
-// server.mjs owns strings/server.mjs; the smaller modules (schedule, db,
-// model, protocols) own strings/core.mjs. Keys are prefixed by area.
+// server.mjs owns strings/server.mjs; the smaller modules (schedule, skill,
+// db, model, protocols) own strings/core.mjs. Keys are prefixed by area.
 const M = { ...serverStrings, ...coreStrings }
 
 /** Pick the request's language; unknown or missing means English. */

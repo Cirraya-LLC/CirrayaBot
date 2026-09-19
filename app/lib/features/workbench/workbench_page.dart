@@ -19,6 +19,7 @@ import 'editors.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
 import '../settings/providers_page.dart';
+import '../settings/skills_page.dart';
 import 'message_view.dart';
 
 class WorkbenchPage extends StatefulWidget {
@@ -334,6 +335,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
           _footItem(Icons.tune, tr('wb.providers'), () async {
             await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ProvidersPage(api: bench.api)));
           }),
+          _footItem(Icons.auto_awesome_outlined, tr('wb.skillLibrary'), () => _openSkills()),
           _footItem(Icons.dns_outlined, tr('wb.server'), widget.onEditServer),
           // The app root persists the choice and rebuilds everything.
           PopupMenuButton<Lang>(
@@ -642,6 +644,15 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     );
   }
 
+  Future<void> _openSkills({String? open, List<String> preselect = const []}) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SkillsPage(api: bench.api, agents: bench.agents, open: open, preselect: preselect),
+      ),
+    );
+    await bench.loadSkills();
+  }
+
   Widget _routineTile(Conversation c, Routine r) {
     final (label, color, bg) = r.running
         ? (tr('wb.running'), const Color(0xFF8FB6FF), const Color(0xFF1E2D45))
@@ -771,6 +782,43 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       name: bench.agentById(id)?.name ?? id,
                       hideWhenOff: c.isGroup,
                     ),
+                ],
+                if (c != null && !c.isGroup) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.skills'))),
+                  for (final k in bench.skills)
+                    InkWell(
+                      onTap: () => _openSkills(open: k.id),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              k.savedBy != null ? tr('wb.savedBySelf', {'name': k.name}) : k.name,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                            Text(
+                              k.description,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 11.5, color: C.dim2),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 2, 8, 0),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () => _openSkills(preselect: [c.id]),
+                        icon: const Icon(Icons.add, size: 15),
+                        label: Text(tr('wb.addSkill'), style: const TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ),
                 ],
                 if (c != null) ...[
                   const Divider(height: 22),

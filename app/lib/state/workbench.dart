@@ -61,6 +61,9 @@ class Workbench extends ChangeNotifier {
   late final Timer _poller;
   List<Routine> routines = const [];
 
+  /// Skills installed on the open Agent (empty for groups — skills live on people).
+  List<Skill> skills = const [];
+
   final Api api;
 
   List<Conversation> conversations = const [];
@@ -145,9 +148,11 @@ class Workbench extends ChangeNotifier {
     memory = '';
     memoryFor = null;
     routines = const [];
+    skills = const [];
     notifyListeners();
     unawaited(_loadMemory(c, ticket));
     unawaited(loadRoutines());
+    unawaited(loadSkills());
     await _drawHistory(c, ticket);
   }
 
@@ -185,6 +190,19 @@ class Workbench extends ChangeNotifier {
       notifyListeners();
     } on ApiException catch (_) {
       // Best effort, like memory: the panel keeps what it had.
+    }
+  }
+
+  Future<void> loadSkills() async {
+    final c = current;
+    if (c == null || c.isGroup) return;
+    try {
+      final all = await api.skills();
+      if (current?.id != c.id) return;
+      skills = all.where((k) => k.agents.contains(c.id)).toList();
+      notifyListeners();
+    } on ApiException catch (_) {
+      // Best effort, like memory.
     }
   }
 

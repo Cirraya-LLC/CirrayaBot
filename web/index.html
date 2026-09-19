@@ -204,7 +204,7 @@
 
   /* Model providers */
   /* Scroll the list, not the whole dialog, so the action buttons stay in view */
-  #plist{max-height:32vh;overflow-y:auto;margin:-4px -4px 0}
+  #plist,#klist{max-height:32vh;overflow-y:auto;margin:-4px -4px 0}
   .pitem{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:9px;cursor:pointer;
          border:1px solid transparent}
   .pitem:hover{background:#26262c}
@@ -237,6 +237,7 @@
   <div class="foot">
     <button class="fitem" id="newbot"><b>＋</b> <span data-i18n="side.newAgent"></span></button>
     <button class="fitem" id="prov"><b>⚙</b> <span data-i18n="side.providers"></span></button>
+    <button class="fitem" id="skills"><b>✦</b> <span data-i18n="side.skills"></span></button>
     <label class="fitem"><b>🌐</b> <select id="lang" data-i18n-aria-label="common.language"
       style="flex:1;background:none;border:0;color:inherit;font:inherit;outline:none;cursor:pointer"></select></label>
     <div class="fitem" style="cursor:default"><b>C</b> Cirraya</div>
@@ -272,6 +273,9 @@
   <button class="addm" id="addmem"><b>＋</b> <span data-i18n="s2.addMember"></span></button>
   <div class="s2h sub" data-i18n="s2.browser"></div>
   <div id="bws"></div>
+  <div id="s2skills"><div class="s2h sub" data-i18n="s2.skills"></div>
+  <div id="bskills"></div>
+  <button class="addm" id="addsk"><b>＋</b> <span data-i18n="s2.addSkill"></span></button></div>
   <div class="s2h sub" data-i18n="s2.routines"></div>
   <div id="routines"></div>
   <button class="addm" id="addrt"><b>＋</b> <span data-i18n="s2.addRoutine"></span></button>
@@ -291,6 +295,29 @@
     <textarea id="bwime" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div></div>
   <small id="bwnote"></small>
 </div>
+
+<dialog id="kdlg" style="width:640px">
+  <h4 data-i18n="side.skills"></h4>
+  <small class="rhint" data-i18n="k.intro"></small>
+  <div id="klist"></div>
+  <div class="psplit"></div>
+  <h4 id="ktitle" style="margin-bottom:10px" data-i18n="k.write"></h4>
+  <input type="text" id="kname" data-i18n-placeholder="k.namePh" autocomplete="off">
+  <input type="text" id="kdesc" data-i18n-placeholder="k.descPh" autocomplete="off">
+  <textarea id="kbody" style="min-height:180px;font:12.5px/1.6 ui-monospace,Menlo,monospace" data-i18n-placeholder="k.bodyPh"></textarea>
+  <small class="rhint" data-i18n="k.installOn"></small>
+  <div class="wd" id="kagents"></div>
+  <small class="rhint" id="ksrc"></small>
+  <div class="acts">
+    <button class="btn" style="margin-right:auto;color:#e06c75" id="kdel" data-i18n="common.delete"></button>
+    <button class="btn" id="kexp" data-i18n="common.export"></button>
+    <button class="btn" id="kimp" data-i18n="k.importMd"></button>
+    <input type="file" id="kfile" accept=".md,text/markdown,text/plain" hidden>
+    <button class="btn" id="knew" data-i18n="common.new"></button>
+    <button class="btn" id="kclose" data-i18n="common.close"></button>
+    <button class="btn pri" id="ksave" data-i18n="common.save"></button>
+  </div>
+</dialog>
 
 <dialog id="rdlg">
   <h4 id="rtitle" data-i18n="r.new"></h4>

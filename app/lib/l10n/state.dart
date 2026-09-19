@@ -41,6 +41,7 @@ const Map<String, List<String>> stateStrings = {
     '即時畫面連不上（{code}）',
   ],
   'api.browserRefused': ["The browser didn't do it", '浏览器没有照做', '瀏覽器沒有照做'],
+  'api.exportFailed': ['Export failed ({code})', '导出失败（{code}）', '匯出失敗（{code}）'],
   'api.silent': [
     'Nothing from the server for 5 minutes — stopping this turn',
     '5 分钟没收到服务器的任何动静，这一轮先停下',

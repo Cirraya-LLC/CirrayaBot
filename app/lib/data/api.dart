@@ -104,6 +104,42 @@ class Message {
   final int at;
 }
 
+/// A skill: how to do one kind of job. Same shape as a SKILL.md file.
+class Skill {
+  const Skill({
+    required this.id,
+    required this.name,
+    required this.description,
+    required this.body,
+    required this.agents,
+    required this.source,
+  });
+
+  final String id;
+  final String name;
+
+  /// When to use it — the only thing an Agent sees until he decides to read it.
+  final String description;
+  final String body;
+
+  /// Agent ids it is installed on.
+  final List<String> agents;
+
+  /// `human`, or `agent:<id>` when an Agent saved it himself.
+  final String source;
+
+  String? get savedBy => source.startsWith('agent:') ? source.substring(6) : null;
+
+  static Skill fromJson(Map<String, Object?> j) => Skill(
+    id: (j['id'] as String?) ?? '',
+    name: (j['name'] as String?) ?? '',
+    description: (j['description'] as String?) ?? '',
+    body: (j['body'] as String?) ?? '',
+    agents: [for (final a in (j['agents'] as List?) ?? const []) if (a is String) a],
+    source: (j['source'] as String?) ?? 'human',
+  );
+}
+
 /// A scheduled task: at its time the server posts [prompt] into the target
 /// conversation as if someone typed it. Schedule semantics live server-side
 /// (web/schedule.mjs); the client only renders them.
@@ -481,6 +517,28 @@ class Api {
     final j = await _map('POST', '/api/browser/${Uri.encodeComponent(agentId)}/act', action);
     if (j['ok'] != true) throw ApiException(ApiFailure.server, (j['error'] as String?) ?? tr('api.browserRefused'));
   }
+
+  Future<List<Skill>> skills() async {
+    final j = await _list('/api/skills');
+    return j.map((e) => Skill.fromJson(e as Map<String, Object?>)).toList();
+  }
+
+  Future<Skill> saveSkill(Map<String, Object?> body, {String? id}) async => Skill.fromJson(
+    id == null ? await _map('POST', '/api/skills', body) : await _map('PATCH', '/api/skills/$id', body),
+  );
+
+  Future<void> deleteSkill(String id) => _json('DELETE', '/api/skills/$id');
+
+  /// The skill as a SKILL.md file.
+  Future<String> exportSkill(String id) async {
+    final res = await _send('GET', '/api/skills/$id/export');
+    final text = await utf8.decoder.bind(res).join();
+    if (res.statusCode >= 400) throw ApiException(ApiFailure.server, tr('api.exportFailed', {'code': res.statusCode}));
+    return text;
+  }
+
+  Future<Skill> importSkill(String text, {required String fallbackName, List<String> agents = const []}) async =>
+      Skill.fromJson(await _map('POST', '/api/skills/import', {'text': text, 'name': fallbackName, 'agents': agents}));
 
   Future<List<Routine>> routines(Conversation c) async {
     final j = await _list('/api/routines?kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}');

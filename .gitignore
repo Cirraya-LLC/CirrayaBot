@@ -11,3 +11,4 @@ workspace/*
 app/build/
 app/.dart_tool/
 app/pubspec.lock
+__pycache__/

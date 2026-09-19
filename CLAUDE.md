@@ -1266,6 +1266,45 @@ typing needed a separate input box. Now:
 a new tab opens the stream follows it, but other tabs aren't visible); bringing his clipboard contents
 back to the local clipboard; the remote cursor shape (currently always the normal arrow).
 
+## 2.23 Skill library (2026-09-19)
+
+- **A skill = name + when to use it + body**, the same format as dsh / Claude Code's SKILL.md
+  (`web/skill.mjs` reads and writes it, supports folded multi-line descriptions, BOM, CRLF, and reading
+  back what was written gives the same thing — `node web/skill.mjs` self-test). Skills from elsewhere
+  can be imported directly
+- Table `skills`, `agents text[]` = who it's installed on; names are unique case-insensitively. **Skills
+  are installed on people, not on groups** (in a group chat everyone carries their own)
+- **Only the catalogue goes into the system prompt** (name + when to use it); the body is read on demand
+  via the `read_skill` tool — the context doesn't fill up every round as skills accumulate. Only when
+  tools are off (`AGENT_TOOLS` off) and tools can't be called are bodies written straight into the prompt
+- **"When to use it" is required**: it's the only basis on which an Agent decides whether to read the
+  body; leaving it empty means the skill is never remembered
+- **Agents can save skills themselves** (`save_skill`; 2.8's "save the successful run as something a
+  person can read and edit"): installed only on himself, with source recorded as `agent:<id>`, and
+  **the UI marks it "saved by so-and-so himself"** — a skill changes how he works from then on, and one
+  web page he read could make him save a skill. He can't overwrite someone else's skill of the same name;
+  **once a person edits it, it's the person's** (source becomes human again), and he can no longer
+  overwrite it with save_skill
+- UI: the web's "Skill library" dialog at the bottom left, the client's "Skill library" page; the right
+  panel (in a DM) lists the skills installed on this Agent
+
+**Verified (real machine)**: a skill "greetings must start with the code word 青鸟-73" was installed on
+the Chief; sending "hi there" (「你好呀」) → he called `read_skill` himself and complied. On Claude, an
+Agent was asked to save "count the top-level files in /work" as the skill "Inventory" (「盘点」) → it
+really called bash and save_skill, and in the next round, saying "Inventory" made him read the skill
+first and then do it.
+
+### ⚠️ 66hxhx's gpt-6-astra pretends to have called tools
+
+For the same "count files + save a skill" request, **gpt-6-astra called no tools at all, yet replied
+"skill saved and verified"**; phrased differently it replied "current project rules forbid accessing
+absolute paths outside the workspace" or "there's no save_skill tool in the current environment" — none
+of that is our prompt; it's Codex's voice. Calling the same upstream directly with just two tools, it
+makes normal `function_call`s. So this relay wraps the request in its own Codex system prompt (the parent
+docs say 66hxhx has a fixed overhead of about 4000 tokens per call), which fights our persona. **The same
+request works perfectly on muskapi's claude-haiku-4-5.** When judging "is the feature broken", try
+another upstream first; don't change code to suit this relay.
+
 ## 3. What runs now
 
 ```bash
@@ -1273,6 +1312,7 @@ back to the local clipboard; the remote cursor shape (currently always the norma
 docker compose logs -f app
 node web/model.mjs         # self-test for context budgeting / window inference
 node web/schedule.mjs      # self-test for scheduled-task time computation
+node web/skill.mjs         # self-test for SKILL.md read/write
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/
@@ -1290,9 +1330,8 @@ built-in web UI, **not part of the product**, kept only for the record.
 2. **Per-Agent spending cap** — the gap none of the five open-source options filled.
    The `messages` table is already there; what's missing is recording each round's token counts
 3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)
-4. **The skill library** — the third of the three the boss asked for in 2.21, still to build.
-   Then event triggers for scheduled tasks and the browser via MCP (v1 of scheduled tasks 2.21 and
-   browser 2.22 are done)
+4. Event triggers for scheduled tasks, browser via MCP, a skill marketplace (v1 of scheduled tasks 2.21,
+   browser 2.22 and skill library 2.23 are done)
 
 ## 4. Maintaining this file (the boss, 2026-09-05: "from now on you should update CLAUDE.md yourself" (「你以后都应该自我更新 CLAUDE.md」))
 
