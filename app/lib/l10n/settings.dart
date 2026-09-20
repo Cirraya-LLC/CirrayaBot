@@ -171,4 +171,19 @@ const Map<String, List<String>> settingsStrings = {
         '定時任務沒人可問，所以在那裡會直接拒絕。',
   ],
   'ap.saved': ['Approval settings saved', '审批设置已保存', '審批設定已儲存'],
+
+  // Reasoning effort, platform-wide
+  'ef.title': [
+    'How hard every model should think, unless the Agent says otherwise',
+    '除非 Agent 自己指定，模型回答前想多久',
+    '除非 Agent 自己指定，模型回答前想多久',
+  ],
+  'ef.none': ['Send nothing', '什么都不发', '什麼都不傳'],
+  'ef.hint': [
+    'Agents set to \u201cplatform default\u201d follow this. Models that don\u2019t support it ignore '
+        'it; an upstream that rejects it is retried once without it.',
+    '设成「跟随平台设置」的 Agent 用这个。不支持的模型会忽略它；上游拒绝时会去掉它重试一次。',
+    '設成「跟隨平台設定」的 Agent 用這個。不支援的模型會忽略它；上游拒絕時會去掉它重試一次。',
+  ],
+  'ef.saved': ['Reasoning effort saved', '推理强度已保存', '推理強度已儲存'],
 };

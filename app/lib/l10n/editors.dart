@@ -26,7 +26,7 @@ const Map<String, List<String>> editorStrings = {
   ],
   'ed.provider': ['Model provider', '模型上游', '模型上游'],
   'ed.effort': ['Reasoning effort', '推理强度', '推理強度'],
-  'ed.effortDefault': ['Default (send nothing)', '默认（什么都不发）', '預設（什麼都不傳）'],
+  'ed.effortDefault': ['Platform default', '跟随平台设置', '跟隨平台設定'],
   'ed.effortLow': ['Low', '低', '低'],
   'ed.effortMedium': ['Medium', '中', '中'],
   'ed.effortHigh': ['High', '高', '高'],

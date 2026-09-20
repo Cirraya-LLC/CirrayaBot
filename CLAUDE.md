@@ -1128,8 +1128,15 @@ editing it whenever one of them moves.
   never touches `runAgent`'s own backoff/image-drop retries. A model that merely **ignores** the field
   is fine and needs nothing.
 - The memory is per process, so a restart tries again — which is what you want after fixing an upstream.
-- **`POST /api/bots` destructures a fixed field list**, so a new field is dropped at creation unless you
-  add it there too (it still has this bug for `daily_cap_micro`: a cap can only be set by PATCH).
+- **A platform default too** (2026-09-20), settings key `model.default_effort`, in the upstreams
+  dialog beside the daily cap and the approval mode. An agent's own value wins; **its empty means
+  "follow the platform", and the platform's own empty means send nothing** — so an untouched
+  deployment behaves exactly as before. It is resolved in `providerFor`, one place, so every caller
+  (DM, group relay, scheduled task) gets it without knowing about it.
+- ⚠️ `POST /api/bots` used to destructure a fixed field list and drop anything new at creation —
+  `effort` and `daily_cap_micro` could only be set by PATCH. Fixed by spreading what `checkAgent`
+  returned; **add a field to the editor and it now arrives, but only because nothing hand-copies
+  the list any more — don't reintroduce one.**
 
 Verified against the real deployment with a throwaway fake upstream that recorded the request bodies:
 all three protocols sent the right shape (messages: `budget_tokens 4096` with `max_tokens 12288`), and
