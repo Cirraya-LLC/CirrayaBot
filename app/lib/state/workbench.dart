@@ -75,6 +75,11 @@ class Workbench extends ChangeNotifier {
   /// the page copies it into its text box only when that id changes.
   String memory = '';
   String? memoryFor;
+
+  /// The open Agent's self-notes — the memory he writes himself. Empty and
+  /// null for a group: only a person writes a group's memory.
+  String selfMemory = '';
+  String? selfMemoryFor;
   bool loading = true;
   bool busy = false;
   String? error;
@@ -147,6 +152,8 @@ class Workbench extends ChangeNotifier {
     entries.clear();
     memory = '';
     memoryFor = null;
+    selfMemory = '';
+    selfMemoryFor = null;
     routines = const [];
     skills = const [];
     notifyListeners();
@@ -230,6 +237,16 @@ class Workbench extends ChangeNotifier {
       // Best effort. A memory panel that failed to load is not a reason to
       // block the conversation next to it.
     }
+    if (c.isGroup || ticket != _shown) return;
+    try {
+      final text = await api.selfMemory(c.id);
+      if (ticket != _shown) return;
+      selfMemory = text;
+      selfMemoryFor = c.id;
+      notifyListeners();
+    } on ApiException catch (_) {
+      // Best effort, as above.
+    }
   }
 
   Future<void> saveMemory(String text) async {
@@ -237,6 +254,13 @@ class Workbench extends ChangeNotifier {
     if (c == null) return;
     await api.saveMemory(c, text);
     memory = text;
+  }
+
+  Future<void> saveSelfMemory(String text) async {
+    final c = current;
+    if (c == null || c.isGroup) return;
+    await api.saveSelfMemory(c.id, text);
+    selfMemory = text;
   }
 
   /// Sends and streams the reply. Returns when the turn is over.

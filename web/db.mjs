@@ -181,7 +181,7 @@ export async function deleteAgent(id) {
   await q(`update groups set lead = null where lead = $1`, [id])
   await q(`delete from messages where scope = 'dm' and scope_id = $1`, [id])
   await q('delete from agents where id = $1', [id])
-  await q('delete from settings where key = $1', [memKey('agent', id)])
+  await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id)]])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
   await q(`update skills set agents = array_remove(agents, $1)`, [id])
 }
@@ -272,6 +272,13 @@ export async function setSetting(key, value) {
 export const memKey = (kind, id) => `memory:${kind}:${id}`
 export const getMemory = (kind, id) => getSetting(memKey(kind, id), '')
 export const setMemory = (kind, id, text) => setSetting(memKey(kind, id), text)
+
+// An Agent's self-notes: a second, separate store, the only memory it can write itself
+// (the `remember` tool). The memory above stays human-only — an agent must never be able to
+// rewrite what a person wrote for it. See web/memory.mjs.
+export const selfMemKey = id => `${memKey('agent', id)}:self`
+export const getSelfMemory = id => getSetting(selfMemKey(id), '')
+export const setSelfMemory = (id, text) => setSetting(selfMemKey(id), text)
 
 // ---------- skills ----------
 export async function listSkills() {

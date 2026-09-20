@@ -73,6 +73,17 @@ const Map<String, List<String>> workbenchStrings = {
     '寫給這個群組的長期備忘，群組裡每個人每一輪都會讀到',
   ],
   'wb.agentMemoryHint': ['Long-term notes for them, read every turn', '写给他的长期备忘，每一轮都会读到', '寫給他的長期備忘，每一輪都會讀到'],
+  'wb.selfMemory': ['What {name} remembers', '{name} 自己记下的', '{name} 自己記下的'],
+  'wb.selfMemoryNote': [
+    'They wrote these themselves with the remember tool. You can edit or clear them.',
+    '这些是他自己用 remember 工具记下来的，你可以修改或清空。',
+    '這些是他自己用 remember 工具記下來的，你可以修改或清空。',
+  ],
+  'wb.selfMemoryHint': [
+    'Nothing yet — they add a line here when something is worth keeping',
+    '还没有 — 遇到值得记住的事，他会自己往这里加一行',
+    '還沒有 — 遇到值得記住的事，他會自己往這裡加一行',
+  ],
   'wb.saved': ['Saved', '已保存', '已儲存'],
   'wb.notSaved': ['Not saved: {msg}', '没保存上：{msg}', '沒有儲存：{msg}'],
   'wb.exportChat': ['Export chat', '导出记录', '匯出紀錄'],

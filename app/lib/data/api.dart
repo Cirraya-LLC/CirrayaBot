@@ -297,22 +297,25 @@ class Api {
   Future<HttpClientResponse> _send(String method, String path, [Object? body]) async {
     HttpClientResponse res;
     try {
-      res = await _attempt(method, path, body);
-    } on HttpException catch (e) {
-      // A pooled socket the server closed a moment ago: the request never
-      // reached it, so sending once more on a fresh connection is safe.
-      if (!e.message.contains('Connection closed')) {
-        throw ApiException(ApiFailure.unreachable, e.message);
-      }
       try {
         res = await _attempt(method, path, body);
       } on HttpException catch (e) {
-        throw ApiException(ApiFailure.unreachable, e.message);
-      } on SocketException catch (e) {
-        throw ApiException(ApiFailure.unreachable, e.osError?.message ?? e.message);
+        // A pooled socket the server closed a moment ago: the request never
+        // reached it, so sending once more on a fresh connection is safe.
+        // Whatever the retry throws falls through to the one list below —
+        // two lists drift, and the shorter one lets failures escape.
+        if (!e.message.contains('Connection closed')) rethrow;
+        res = await _attempt(method, path, body);
       }
+    } on HttpException catch (e) {
+      throw ApiException(ApiFailure.unreachable, e.message);
     } on SocketException catch (e) {
       throw ApiException(ApiFailure.unreachable, e.osError?.message ?? e.message);
+    } on StateError catch (e) {
+      // The client is closed: dispose() ran while a best-effort load (memory,
+      // routines, skills) was still in flight. Those callers catch
+      // ApiException, so it has to arrive as one or it escapes them all.
+      throw ApiException(ApiFailure.unreachable, e.message);
     } on ArgumentError {
       throw ApiException(ApiFailure.unreachable, tr('api.badUrl'));
     } on FormatException {
@@ -421,6 +424,18 @@ class Api {
   }
 
   Future<void> saveMemory(Conversation c, String text) => _json('PUT', _memoryPath(c), {'text': text});
+
+  /// An Agent's self-notes: a second, separate store, the one memory he writes
+  /// himself (the `remember` tool). Groups have none.
+  static String _selfMemoryPath(String agentId) => '/api/memory/agent/$agentId/self';
+
+  Future<String> selfMemory(String agentId) async {
+    final j = await _map('GET', _selfMemoryPath(agentId));
+    return (j['text'] as String?) ?? '';
+  }
+
+  Future<void> saveSelfMemory(String agentId, String text) =>
+      _json('PUT', _selfMemoryPath(agentId), {'text': text});
 
   // ---- Agents & groups ----
   // Same endpoints the web page uses; the server generates the id for a

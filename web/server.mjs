@@ -10,6 +10,7 @@ import { fitContext, listModels, probeContext } from './model.mjs'
 import { callUpstream, normProtocol, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
+import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
@@ -148,6 +149,12 @@ ${skills.map(k => `- ${k.name}: ${k.description}`).join('\n')}` : `
 When a task matches, follow the procedure below.
 ${skills.map(k => `### ${k.name}\nWhen to use: ${k.description}\n\n${k.body}`).join('\n\n')}`)
   if (memory.own?.trim()) parts.push(`\n\n--- Your memory (maintained by humans, only you can read it) ---\n${memory.own.trim()}`)
+  if (memory.self?.trim()) parts.push(`
+
+--- Notes you kept yourself ---
+You wrote these with the remember tool, so they may be wrong or out of date: when you can check
+something, trust what you check over what is written here. Keep adding to them as you learn.
+${memory.self.trim()}`)
   if (memory.group?.trim()) parts.push(`\n\n--- This group's memory (everyone in the group can read it; maintained by humans) ---\n${memory.group.trim()}`)
   if (recall?.trim()) parts.push(`
 
@@ -318,6 +325,14 @@ const TOOL_SPECS = [
       description: { type: 'string', description: 'When to use it — this sentence is how you will recall it later, so describe the triggering situation clearly' },
       body: { type: 'string', description: 'The full procedure (Markdown): steps, decision rules, expected output, what to ask a human first. Write it so someone else could follow it' } } } } },
   { type: 'function', function: {
+    name: 'remember',
+    description: 'Keep one short fact in your own notes, so you still know it next time. Use it when you learn something about the user, their setup or how they want things done. ' +
+      'Keep it short — one fact per call, one sentence. Only things that will still be true later, not what is only true in this conversation. ' +
+      'Never store secrets (passwords, keys, tokens). Don\'t store something that is already written in one of your skills — a procedure belongs in save_skill, a fact belongs here. ' +
+      'These notes are yours alone; the memory a human wrote for you is separate and you cannot change it.',
+    parameters: { type: 'object', required: ['fact'], properties: {
+      fact: { type: 'string', description: 'One short fact worth keeping, e.g. "Deploys go through ./start.sh, never docker compose directly"' } } } } },
+  { type: 'function', function: {
     name: 'browser',
     description: 'Drive the browser on your own machine. It is stateful: open pages, half-filled forms and logins all persist (logins survive container restarts too). ' +
       'Workflow: open a URL → read the page text, which also numbers the elements you can click or fill → click / type by number → screenshot to see what the page looks like. ' +
@@ -432,6 +447,7 @@ async function runTool(name, args, ctx) {
       : `You have no skill named "${args.name}". Installed for you: ${mine.map(x => x.name).join(', ') || '(none)'}`
   }
   if (name === 'save_skill') return saveSkillFromAgent(ctx.bot, args)
+  if (name === 'remember') return rememberFromAgent(ctx.bot, args.fact)
   if (name === 'bash') {
     const { code, out, err } = await execIn(c, ['-w', '/work', c, 'bash', '-lc', args.command])
     const killed = code === 124 ? `\n(over ${EXEC_TIMEOUT / 1000}s — we stopped waiting; the command may still be running in the container)` : ''
@@ -546,6 +562,26 @@ async function saveSkillFromAgent(bot, args) {
   return `${cur ? 'Updated' : 'Saved'} the skill "${k.name}", installed only for you. Next time you get a "${k.description}" kind of task, read_skill first, then do it.`
 }
 
+/**
+ * An agent writing its own long-term memory. It can only ever reach its own notes —
+ * never the memory a human wrote for it, never a group's, never another agent's.
+ *
+ * When the cap pushes old notes out we say exactly which ones: an agent that quietly
+ * forgot something is worse than one that never remembered it.
+ */
+async function rememberFromAgent(bot, fact) {
+  const r = addNote(await db.getSelfMemory(bot.id), fact)
+  if (r.empty) return 'Nothing to remember: give the fact as one short sentence.'
+  if (r.tooLong) return `Too long (at most ${NOTE_MAX_CHARS} characters). One short fact per call — if it is a procedure, save_skill is the place for it.`
+  if (r.duplicate) return 'You already have that in your notes; nothing was added.'
+  await db.setSelfMemory(bot.id, r.text)
+  const forgot = r.dropped.length
+    ? ` Your notes were full, so the oldest ${r.dropped.length} ${r.dropped.length === 1 ? 'is' : 'are'} gone: ${r.dropped.map(d => `"${d}"`).join('; ')}.`
+    : ''
+  const kept = r.text.split('\n').length
+  return `Remembered — you now keep ${kept} note${kept === 1 ? '' : 's'}.${forgot}`
+}
+
 /** Strip every screenshot from the history (in place). Returns true if at least one was removed. */
 function dropImages(messages, note = '(a screenshot was here; the current model can\'t see images, so it was removed)') {
   let n = 0
@@ -617,7 +653,8 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
     if (!groupId && bots.length === 1) {
       const bot = bots[0]
       emit('start', { botId: bot.id })
-      await askSolo(providers.get(bot.id), bot, text, { own: await db.getMemory('agent', bot.id) },
+      await askSolo(providers.get(bot.id), bot, text,
+        { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
         d => emit('delta', { botId: bot.id, text: d }),
         t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, 400) }), signal, lang)
       emit('end', { botId: bot.id })
@@ -636,7 +673,8 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
         let reply = ''
         try {
           reply = await askInGroup(providers.get(speaker.id), speaker, peers, lead,
-            { own: await db.getMemory('agent', speaker.id), group: await db.getMemory('group', gid) },
+            { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
+              group: await db.getMemory('group', gid) },
             d => emit('delta', { botId: speaker.id, text: d }),
             t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, 400) }),
             gid, signal, lang)
@@ -983,15 +1021,21 @@ const server = createServer(async (req, res) => {
       return send(200, { ok: true })
     }
 
-    const mm = url.pathname.match(/^\/api\/memory\/(agent|group)\/([\w-]+)$/)
+    // .../self is the second store: the notes the agent writes himself (memory.mjs). Agents only —
+    // groups have no self-notes, because only a person can write a group's memory.
+    const mm = url.pathname.match(/^\/api\/memory\/(agent|group)\/([\w-]+)(\/self)?$/)
     if (mm) {
-      const [, kind, id] = mm
+      const [, kind, id, own] = mm
       const exists = kind === 'agent'
         ? (await db.listAgents()).some(a => a.id === id)
         : (await db.listGroups()).some(g => g.id === id)
-      if (!exists) return send(404, { error: t(kind === 'agent' ? 'err.noAgent' : 'err.noGroup') })
-      if (req.method === 'GET') return send(200, { text: await db.getMemory(kind, id) })
-      if (req.method === 'PUT') { await db.setMemory(kind, id, str((await readBody(req)).text)); return send(200, { ok: true }) }
+      if (!exists || (own && kind !== 'agent')) return send(404, { error: t(kind === 'agent' ? 'err.noAgent' : 'err.noGroup') })
+      if (req.method === 'GET') return send(200, { text: own ? await db.getSelfMemory(id) : await db.getMemory(kind, id) })
+      if (req.method === 'PUT') {
+        const text = str((await readBody(req)).text)
+        await (own ? db.setSelfMemory(id, text) : db.setMemory(kind, id, text))
+        return send(200, { ok: true })
+      }
     }
 
     // ---- An agent's browser: a human watching, a human taking over ----
