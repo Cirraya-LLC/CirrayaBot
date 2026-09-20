@@ -120,4 +120,31 @@ void main() {
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
     dir.deleteSync(recursive: true);
   });
+
+  testWidgets('appearance: system follows the desktop live, a choice sticks', (tester) async {
+    final dir = Directory.systemTemp.createTempSync('ma-theme');
+    final store = SettingsStore(dir: dir);
+    addTearDown(() => dir.deleteSync(recursive: true));
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    addTearDown(() => currentTheme.value = ThemeMode.system);
+
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    await tester.pumpWidget(MultiAgentApp(store: store, initial: const Settings()));
+    expect(C.isLight, isFalse);
+
+    // No reload, no re-selection: the desktop flipped and so does the app.
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    await tester.pump();
+    expect(C.isLight, isTrue);
+
+    // An explicit choice outranks the desktop and is written down.
+    currentTheme.value = ThemeMode.dark;
+    await tester.pump();
+    expect(C.isLight, isFalse);
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+    }
+    expect((await tester.runAsync(store.load))!.theme, ThemeMode.dark);
+  });
 }

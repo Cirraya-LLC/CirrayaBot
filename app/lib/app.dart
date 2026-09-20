@@ -33,6 +33,14 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
     super.initState();
     if (_settings.configured) _bench = Workbench(_settings);
     currentLang.addListener(_langChanged);
+    currentTheme.value = _settings.theme;
+    currentTheme.addListener(_themeChanged);
+  }
+
+  void _themeChanged() {
+    _settings = _settings.copyWith(theme: currentTheme.value);
+    widget.store.save(_settings).ignore(); // best effort, same as the language
+    if (mounted) setState(() {});
   }
 
   /// Anyone may set `currentLang.value`; this persists it and redraws every
@@ -67,6 +75,7 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
   @override
   void dispose() {
     currentLang.removeListener(_langChanged);
+    currentTheme.removeListener(_themeChanged);
     _bench?.dispose();
     super.dispose();
   }
@@ -74,10 +83,26 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
   @override
   Widget build(BuildContext context) {
     final bench = _bench;
+    final mode = currentTheme.value;
+    final brightness = switch (mode) {
+      ThemeMode.light => Brightness.light,
+      ThemeMode.dark => Brightness.dark,
+      // runApp's View provides this, so the dependency is real: when the
+      // desktop flips, this rebuilds and everything follows without a reload.
+      ThemeMode.system => MediaQuery.platformBrightnessOf(context),
+    };
+    // Set before the subtree builds: C.* is read during build, not from
+    // context. One app, one theme at a time.
+    C.use(brightness);
     return MaterialApp(
       title: 'Multi-Agent',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.dark(),
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
+      themeMode: mode,
+      // Material cross-fades themes over 200ms while C.* flips at once, which
+      // leaves half the window mid-fade. Everything switches together instead.
+      themeAnimationDuration: Duration.zero,
       home: (bench == null || _editing)
           ? SetupPage(
               key: ValueKey(_settings.baseUrl),
@@ -89,6 +114,13 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
               key: ValueKey(_settings.baseUrl),
               bench: bench,
               onEditServer: () => setState(() => _editing = true),
+              collapsed: _settings.sidebarCollapsed,
+              // The page owns the state while it is open; this only writes it
+              // down, so toggling does not rebuild the whole app mid-animation.
+              onCollapsed: (v) {
+                _settings = _settings.copyWith(sidebarCollapsed: v);
+                widget.store.save(_settings).ignore();
+              },
             ),
     );
   }

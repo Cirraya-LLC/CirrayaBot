@@ -9,10 +9,18 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/material.dart' show ThemeMode;
+
 import '../platform.dart';
 
 class Settings {
-  const Settings({this.baseUrl = '', this.token = '', this.lang = 'en'});
+  const Settings({
+    this.baseUrl = '',
+    this.token = '',
+    this.lang = 'en',
+    this.theme = ThemeMode.system,
+    this.sidebarCollapsed = false,
+  });
 
   /// e.g. `http://192.168.1.10:8080`. No trailing slash — normalised on the
   /// way in so every call site can just append a path.
@@ -22,21 +30,49 @@ class Settings {
   /// Interface language code (`en` / `zh-Hans` / `zh-Hant`), see l10n.dart.
   final String lang;
 
+  /// Light, dark, or whatever the desktop is set to. Per machine, like the
+  /// language — the same person's laptop and desktop need not agree.
+  final ThemeMode theme;
+
+  /// Whether the conversation list is showing as a rail.
+  final bool sidebarCollapsed;
+
   bool get configured => baseUrl.isNotEmpty;
 
-  Settings copyWith({String? baseUrl, String? token, String? lang}) => Settings(
+  Settings copyWith({
+    String? baseUrl,
+    String? token,
+    String? lang,
+    ThemeMode? theme,
+    bool? sidebarCollapsed,
+  }) => Settings(
     baseUrl: normaliseUrl(baseUrl ?? this.baseUrl),
     token: token ?? this.token,
     lang: lang ?? this.lang,
+    theme: theme ?? this.theme,
+    sidebarCollapsed: sidebarCollapsed ?? this.sidebarCollapsed,
   );
 
-  Map<String, Object?> toJson() => {'baseUrl': baseUrl, 'token': token, 'lang': lang};
+  Map<String, Object?> toJson() => {
+    'baseUrl': baseUrl,
+    'token': token,
+    'lang': lang,
+    'theme': theme.name,
+    'sidebarCollapsed': sidebarCollapsed,
+  };
 
   static Settings fromJson(Map<String, Object?> j) => Settings(
     baseUrl: normaliseUrl((j['baseUrl'] as String?) ?? ''),
     token: (j['token'] as String?) ?? '',
     lang: (j['lang'] as String?) ?? 'en',
+    theme: parseTheme(j['theme'] as String?),
+    sidebarCollapsed: (j['sidebarCollapsed'] as bool?) ?? false,
   );
+
+  /// Anything unrecognised means "follow the desktop" — the answer that is
+  /// right for someone who has never chosen.
+  static ThemeMode parseTheme(String? name) =>
+      ThemeMode.values.firstWhere((m) => m.name == name, orElse: () => ThemeMode.system);
 
   /// Trims, drops trailing slashes, and assumes http:// when someone types a
   /// bare host — which they will, because the address they were handed looks

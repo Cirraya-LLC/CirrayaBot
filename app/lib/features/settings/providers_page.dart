@@ -173,7 +173,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       context: context,
       builder: (c) => AlertDialog(
         title: Text(tr('prov.deleteTitle', {'name': p.name}), style: const TextStyle(fontSize: 15)),
-        content: Text(tr('prov.deleteBody'), style: const TextStyle(fontSize: 13, color: C.dim)),
+        content: Text(tr('prov.deleteBody'), style: TextStyle(fontSize: 13, color: C.dim)),
         actions: [
           TextButton(onPressed: () => Navigator.of(c).pop(false), child: Text(tr('common.cancel'))),
           FilledButton(
@@ -208,7 +208,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
         title: Text(tr('prov.title'), style: const TextStyle(fontSize: 15)),
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(strokeWidth: 2, color: C.dim))
+          ? Center(child: CircularProgressIndicator(strokeWidth: 2, color: C.dim))
           : Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 620),
@@ -218,7 +218,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
                     if (_rows.isEmpty)
                       Padding(
                         padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Text(tr('prov.none'), style: const TextStyle(fontSize: 12.5, color: C.dim2)),
+                        child: Text(tr('prov.none'), style: TextStyle(fontSize: 12.5, color: C.dim2)),
                       ),
                     for (final p in _rows) _row(p),
                     const SizedBox(height: 18),
@@ -299,7 +299,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
                       ],
                     ),
                     const SizedBox(height: 6),
-                    Text(tr('prov.priceHint'), style: const TextStyle(fontSize: 11.5, color: C.dim2)),
+                    Text(tr('prov.priceHint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
                     const SizedBox(height: 14),
                     const Divider(height: 1),
                     const SizedBox(height: 12),
@@ -325,7 +325,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
                         if (_editing != null && _rows.length > 1)
                           TextButton(
                             onPressed: _busy ? null : _delete,
-                            child: Text(tr('common.delete'), style: const TextStyle(color: C.code)),
+                            child: Text(tr('common.delete'), style: TextStyle(color: C.code)),
                           ),
                         const Spacer(),
                         TextButton(onPressed: () => _fill(null), child: Text(tr('prov.new'))),
@@ -361,12 +361,12 @@ class _ProvidersPageState extends State<ProvidersPage> {
                   child: Container(
                     width: 6,
                     height: 6,
-                    decoration: const BoxDecoration(color: C.accent, shape: BoxShape.circle),
+                    decoration: BoxDecoration(color: C.accent, shape: BoxShape.circle),
                   ),
                 )
               : null,
         ),
-        Text(label, style: const TextStyle(fontSize: 12.5, color: C.dim)),
+        Text(label, style: TextStyle(fontSize: 12.5, color: C.dim)),
       ],
     ),
   );
@@ -380,7 +380,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
         margin: const EdgeInsets.only(bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
         decoration: BoxDecoration(
-          color: on ? const Color(0xFF1C2333) : null,
+          color: on ? C.tint : null,
           border: Border.all(color: on ? C.accent : Colors.transparent),
           borderRadius: BorderRadius.circular(9),
         ),
@@ -400,7 +400,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
                     width: 10,
                     height: 10,
                     decoration: BoxDecoration(
-                      color: p.isDefault ? C.ok : const Color(0xFF3A3A44),
+                      color: p.isDefault ? C.ok : C.chipStrong,
                       shape: BoxShape.circle,
                     ),
                   ),
@@ -417,7 +417,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
                     '${protocolLabels[p.protocol] ?? 'Chat'} · ${p.autoContext ? tr('prov.ctxAuto') : '${(p.contextTokens / 1000).round()}k'} · ${p.baseUrl}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11.5, color: C.dim),
+                    style: TextStyle(fontSize: 11.5, color: C.dim),
                   ),
                 ],
               ),

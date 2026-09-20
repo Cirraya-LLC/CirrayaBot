@@ -22,11 +22,30 @@ import '../settings/providers_page.dart';
 import '../settings/skills_page.dart';
 import 'message_view.dart';
 
+/// Expanded and collapsed widths of the conversation list.
+///
+/// Everything inside stays laid out at [_wide] and is clipped, so collapsing
+/// animates one number and nothing reflows — the labels fade, the avatars do
+/// not move. [_rail] is chosen so the 34px avatar (8px list padding + 11px row
+/// padding) is already centred in the rail.
+const double _wide = 308;
+const double _rail = 72;
+
 class WorkbenchPage extends StatefulWidget {
-  const WorkbenchPage({super.key, required this.bench, required this.onEditServer});
+  const WorkbenchPage({
+    super.key,
+    required this.bench,
+    required this.onEditServer,
+    required this.collapsed,
+    required this.onCollapsed,
+  });
 
   final Workbench bench;
   final VoidCallback onEditServer;
+
+  /// Restored from the settings file; [onCollapsed] writes it back.
+  final bool collapsed;
+  final ValueChanged<bool> onCollapsed;
 
   @override
   State<WorkbenchPage> createState() => _WorkbenchPageState();
@@ -36,11 +55,24 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   final _input = TextEditingController();
   final _inputFocus = FocusNode();
   final _search = TextEditingController();
+  final _searchFocus = FocusNode();
   final _scroll = ScrollController();
   final _memory = TextEditingController();
   final _selfMemory = TextEditingController();
   final _scaffold = GlobalKey<ScaffoldState>();
   bool _rightOpen = true;
+  late bool _railed = widget.collapsed;
+
+  /// Kept across builds so a row's tooltip can be shown on keyboard focus —
+  /// Tooltip only opens itself on hover.
+  final _tips = <String, GlobalKey<TooltipState>>{};
+  GlobalKey<TooltipState> _tipKey(String id) =>
+      _tips.putIfAbsent(id, () => GlobalKey<TooltipState>());
+
+  void _setRailed(bool on) {
+    setState(() => _railed = on);
+    widget.onCollapsed(on);
+  }
   String _memoryStatus = '';
   String? _memoryShownFor;
   String _selfMemoryStatus = '';
@@ -116,6 +148,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     _input.dispose();
     _inputFocus.dispose();
     _search.dispose();
+    _searchFocus.dispose();
     _scroll.dispose();
     _memory.dispose();
     _selfMemory.dispose();
@@ -181,7 +214,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       context: context,
       builder: (d) => AlertDialog(
         title: Text(tr('wb.importInto', {'name': c.name}), style: const TextStyle(fontSize: 15)),
-        content: Text(tr('wb.importHow'), style: const TextStyle(fontSize: 13, color: C.dim)),
+        content: Text(tr('wb.importHow'), style: TextStyle(fontSize: 13, color: C.dim)),
         actions: [
           TextButton(onPressed: () => Navigator.of(d).pop(), child: Text(tr('common.cancel'))),
           TextButton(
@@ -252,7 +285,14 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   @override
   Widget build(BuildContext context) {
     final narrow = _narrow(context);
-    return Scaffold(
+    return CallbackShortcuts(
+      bindings: {
+        // The conventional toggle everywhere else. The Agent's browser is a
+        // pushed route, so its own Ctrl+B forwarding is out of this subtree.
+        const SingleActivator(LogicalKeyboardKey.keyB, control: true): () => _setRailed(!_railed),
+        const SingleActivator(LogicalKeyboardKey.keyB, meta: true): () => _setRailed(!_railed),
+      },
+      child: Scaffold(
       key: _scaffold,
       // Too narrow for three columns: the right panel slides over instead of
       // disappearing. Hiding it outright left its toggle doing nothing, and a
@@ -265,8 +305,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
           if (_rightOpen && !narrow) _right(),
         ],
       ),
+    ),
     );
   }
+
+  /// Zero when the desktop asks for less motion: the end state, no travel.
+  Duration _motion(BuildContext context) =>
+      MediaQuery.disableAnimationsOf(context) ? Duration.zero : const Duration(milliseconds: 200);
 
   // ── left ──────────────────────────────────────────────────────────────
   Widget _sidebar() {
@@ -276,47 +321,96 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       return '${c.name}${c.tag}${c.preview}'.toLowerCase().contains(filter);
     }).toList();
 
-    return Container(
-      width: 308,
-      decoration: const BoxDecoration(
+    final motion = _motion(context);
+    return AnimatedContainer(
+      key: const ValueKey('sidebar'),
+      duration: motion,
+      curve: Curves.easeInOutCubic,
+      width: _railed ? _rail : _wide,
+      decoration: BoxDecoration(
         color: C.side,
         border: Border(right: BorderSide(color: C.line)),
       ),
-      child: Column(
+      // OverflowBox pins the child at _wide whatever the parent has animated
+      // down to, so the rows are clipped rather than re-laid-out.
+      child: ClipRect(
+        child: OverflowBox(
+          alignment: Alignment.centerLeft,
+          minWidth: _wide,
+          maxWidth: _wide,
+          child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 8, 10),
-            child: Row(
+          SizedBox(
+            height: 60,
+            // Two layers, each pinned to the width it belongs to, cross-faded.
+            // Neither drifts while the aside animates — they only fade.
+            child: Stack(
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _search,
-                    onChanged: (_) => setState(() {}),
-                    decoration: InputDecoration(hintText: tr('wb.search')),
-                    style: const TextStyle(fontSize: 13),
-                  ),
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: _wide,
+                  child: _fade(!_railed, motion, IgnorePointer(
+                    ignoring: _railed,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 14, 8, 10),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _search,
+                              focusNode: _searchFocus,
+                              onChanged: (_) => setState(() {}),
+                              decoration: InputDecoration(hintText: tr('wb.search')),
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                          _newMenu(),
+                        ],
+                      ),
+                    ),
+                  )),
                 ),
-                PopupMenuButton<String>(
-                  tooltip: tr('wb.new'),
-                  icon: const Icon(Icons.add, size: 20, color: C.dim),
-                  onSelected: (v) => v == 'agent' ? showAgentEditor(context, bench) : showGroupEditor(context, bench),
-                  itemBuilder: (_) => [
-                    PopupMenuItem(
-                      value: 'agent',
-                      child: Text(tr('wb.newAgent'), style: const TextStyle(fontSize: 13)),
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: _rail,
+                  child: _fade(_railed, motion, IgnorePointer(
+                    ignoring: !_railed,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        // A search box you cannot type in is a dead control, so
+                        // the rail's magnifier opens the list and focuses it.
+                        Tooltip(
+                          message: tr('wb.search'),
+                          child: InkWell(
+                            onTap: () {
+                              _setRailed(false);
+                              _searchFocus.requestFocus();
+                            },
+                            borderRadius: BorderRadius.circular(8),
+                            child: SizedBox(
+                              width: 32,
+                              height: 32,
+                              child: Icon(Icons.search, size: 18, color: C.dim),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        _newMenu(compact: true),
+                      ],
                     ),
-                    PopupMenuItem(
-                      value: 'group',
-                      child: Text(tr('wb.newGroup'), style: const TextStyle(fontSize: 13)),
-                    ),
-                  ],
+                  )),
                 ),
               ],
             ),
           ),
           Expanded(
             child: bench.loading
-                ? const Center(
+                ? Center(
                     child: SizedBox(
                       width: 18,
                       height: 18,
@@ -330,7 +424,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       child: Text(
                         tr('wb.noConversations'),
                         textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 12.5, color: C.dim2),
+                        style: TextStyle(fontSize: 12.5, color: C.dim2),
                       ),
                     ),
                   )
@@ -341,6 +435,11 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   ),
           ),
           const Divider(height: 1),
+          _footItem(
+            _railed ? Icons.keyboard_double_arrow_right : Icons.keyboard_double_arrow_left,
+            tr(_railed ? 'wb.expandSidebar' : 'wb.collapseSidebar'),
+            () => _setRailed(!_railed),
+          ),
           _footItem(Icons.tune, tr('wb.providers'), () async {
             await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ProvidersPage(api: bench.api)));
           }),
@@ -367,47 +466,134 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
             ],
             child: _footRow(Icons.language, currentLang.value.label),
           ),
+          PopupMenuButton<ThemeMode>(
+            tooltip: tr('common.theme'),
+            initialValue: currentTheme.value,
+            onSelected: (m) => currentTheme.value = m,
+            itemBuilder: (_) => [
+              for (final m in ThemeMode.values)
+                PopupMenuItem(
+                  value: m,
+                  child: Text(tr('theme.${m.name}'), style: const TextStyle(fontSize: 13)),
+                ),
+            ],
+            child: _footRow(
+              C.isLight ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+              tr('theme.${currentTheme.value.name}'),
+            ),
+          ),
           const SizedBox(height: 6),
         ],
+      ),
+        ),
       ),
     );
   }
 
-  Widget _footItem(IconData icon, String label, VoidCallback onTap) =>
-      InkWell(onTap: onTap, child: _footRow(icon, label));
+  Widget _newMenu({bool compact = false}) => PopupMenuButton<String>(
+    tooltip: tr('wb.new'),
+    padding: EdgeInsets.zero,
+    icon: compact ? null : Icon(Icons.add, size: 20, color: C.dim),
+    child: compact
+        ? SizedBox(width: 32, height: 32, child: Icon(Icons.add, size: 20, color: C.dim))
+        : null,
+    onSelected: (v) => v == 'agent' ? showAgentEditor(context, bench) : showGroupEditor(context, bench),
+    itemBuilder: (_) => [
+      PopupMenuItem(value: 'agent', child: Text(tr('wb.newAgent'), style: const TextStyle(fontSize: 13))),
+      PopupMenuItem(value: 'group', child: Text(tr('wb.newGroup'), style: const TextStyle(fontSize: 13))),
+    ],
+  );
 
+  /// Labels go quickly and come back only once there is room for them.
+  Widget _fade(bool show, Duration motion, Widget child) => AnimatedOpacity(
+    opacity: show ? 1 : 0,
+    duration: motion == Duration.zero ? Duration.zero : const Duration(milliseconds: 130),
+    curve: Curves.easeInOut,
+    child: child,
+  );
+
+  Widget _footItem(IconData icon, String label, VoidCallback onTap) {
+    final key = _tipKey('foot:$label');
+    return Tooltip(
+      key: key,
+      message: _railed ? label : '',
+      child: InkWell(
+        onTap: onTap,
+        onFocusChange: (has) {
+          if (has && _railed) key.currentState?.ensureTooltipVisible();
+        },
+        child: _footRow(icon, label),
+      ),
+    );
+  }
+
+  /// The icon sits in a rail-wide box, so it is on the same vertical axis as
+  /// the avatars above it and stays centred once the labels are gone.
   Widget _footRow(IconData icon, String label) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+    padding: const EdgeInsets.symmetric(vertical: 9),
     child: Row(
       children: [
-        Icon(icon, size: 15, color: C.dim),
-        const SizedBox(width: 10),
-        Text(label, style: const TextStyle(fontSize: 12.5, color: C.dim)),
+        SizedBox(width: _rail, child: Center(child: Icon(icon, size: 15, color: C.dim))),
+        Expanded(
+          child: _fade(!_railed, _motion(context), Padding(
+            padding: const EdgeInsets.only(right: 14),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12.5, color: C.dim),
+            ),
+          )),
+        ),
       ],
     ),
   );
 
   Widget _row(Conversation c) {
     final on = bench.current?.id == c.id;
-    return InkWell(
+    final key = _tipKey(c.id);
+    return Tooltip(
+      key: key,
+      message: _railed ? c.name : '',
+      child: InkWell(
       onTap: () async {
         await bench.open(c);
+      },
+      onFocusChange: (has) {
+        if (has && _railed) key.currentState?.ensureTooltipVisible();
       },
       borderRadius: BorderRadius.circular(10),
       child: Container(
         margin: const EdgeInsets.only(top: 2),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-        decoration: BoxDecoration(color: on ? const Color(0xFF232328) : null, borderRadius: BorderRadius.circular(10)),
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+        decoration: BoxDecoration(
+          color: on && !_railed ? C.selected : null,
+          borderRadius: BorderRadius.circular(10),
+        ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (c.isGroup)
-              GroupAvatar(colors: [for (final h in c.colors) C.parse(h)], count: c.members.length)
-            else
-              Avatar(label: c.name, color: C.parse(c.color), size: 34),
+            Container(
+              width: 34,
+              height: 34,
+              // A ring, not padding: box shadows cost no layout, so nothing
+              // shifts when the selection moves.
+              decoration: on && _railed
+                  ? BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(color: C.accent, spreadRadius: 4),
+                        BoxShadow(color: C.side, spreadRadius: 2),
+                      ],
+                    )
+                  : null,
+              child: c.isGroup
+                  ? GroupAvatar(colors: [for (final h in c.colors) C.parse(h)], count: c.members.length)
+                  : Avatar(label: c.name, color: C.parse(c.color), size: 34),
+            ),
             const SizedBox(width: 10),
             Expanded(
-              child: Column(
+              child: _fade(!_railed, _motion(context), Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
@@ -417,7 +603,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                           c.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: C.ink),
+                          style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: C.ink),
                         ),
                       ),
                       if (c.tag.isNotEmpty) ...[
@@ -426,20 +612,20 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A30),
+                              color: C.chip,
                               borderRadius: BorderRadius.circular(5),
                             ),
                             child: Text(
                               c.tag,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 10.5, color: C.dim),
+                              style: TextStyle(fontSize: 10.5, color: C.dim),
                             ),
                           ),
                         ),
                       ],
                       const SizedBox(width: 6),
-                      Text(when(c.at), style: const TextStyle(fontSize: 10.5, color: C.dim2)),
+                      Text(when(c.at), style: TextStyle(fontSize: 10.5, color: C.dim2)),
                     ],
                   ),
                   const SizedBox(height: 2),
@@ -450,11 +636,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     style: TextStyle(fontSize: 12, color: c.preview.isEmpty ? C.dim2 : C.dim),
                   ),
                 ],
-              ),
+              )),
             ),
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -466,7 +653,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
         Container(
           height: 60,
           padding: const EdgeInsets.symmetric(horizontal: 18),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: C.line)),
           ),
           child: Row(
@@ -495,7 +682,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                           : c.tag,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11.5, color: C.dim),
+                      style: TextStyle(fontSize: 11.5, color: C.dim),
                     ),
                   ],
                 ),
@@ -517,16 +704,16 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
         if (bench.error != null)
           Container(
             width: double.infinity,
-            color: const Color(0x33FF7B72),
+            color: C.badBg,
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-            child: Text(bench.error!, style: const TextStyle(fontSize: 12, color: C.code)),
+            child: Text(bench.error!, style: TextStyle(fontSize: 12, color: C.bad)),
           ),
         Expanded(
           child: bench.entries.isEmpty
               ? Center(
                   child: Text(
                     c == null ? '' : tr('wb.sayTo', {'name': c.name}),
-                    style: const TextStyle(color: C.dim2, fontSize: 13),
+                    style: TextStyle(color: C.dim2, fontSize: 13),
                   ),
                 )
               : ListView.builder(
@@ -553,7 +740,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       color: C.panel,
       borderRadius: BorderRadius.circular(12),
       border: Border.all(color: C.line),
-      boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 18, offset: Offset(0, 6))],
+      boxShadow: [BoxShadow(color: C.shadow, blurRadius: 18, offset: const Offset(0, 6))],
     ),
     child: ListView(
       shrinkWrap: true,
@@ -566,7 +753,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
               decoration: BoxDecoration(
-                color: i == _mentionSel ? const Color(0xFF34343C) : null,
+                color: i == _mentionSel ? C.selected : null,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Row(
@@ -580,7 +767,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       a.description,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: C.dim2),
+                      style: TextStyle(fontSize: 11, color: C.dim2),
                     ),
                   ),
                 ],
@@ -644,13 +831,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                 IconButton.filled(
                   onPressed: ready && !bench.busy ? _send : null,
                   icon: bench.busy
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 14,
                           height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          child: CircularProgressIndicator(strokeWidth: 2, color: C.onAccent),
                         )
                       : const Icon(Icons.arrow_upward, size: 17),
-                  style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: Colors.white),
+                  style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
                 ),
               ],
             ),
@@ -685,16 +872,16 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
           if (group) Text(u.name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
           Text(
             tr('wb.spendLine', {'day': moneyText(u.day.costMicro), 'month': moneyText(u.month.costMicro)}),
-            style: const TextStyle(fontSize: 12, color: C.dim),
+            style: TextStyle(fontSize: 12, color: C.dim),
           ),
           Text(
             '${tr('wb.spendTokens', {'n': _tokens(u.month.tokens)})} · $cap',
-            style: const TextStyle(fontSize: 11.5, color: C.dim2),
+            style: TextStyle(fontSize: 11.5, color: C.dim2),
           ),
           if (!u.priced)
             Padding(
               padding: const EdgeInsets.only(top: 3),
-              child: Text(tr('wb.unpriced'), style: const TextStyle(fontSize: 11, color: C.warn)),
+              child: Text(tr('wb.unpriced'), style: TextStyle(fontSize: 11, color: C.warn)),
             ),
         ],
       ),
@@ -709,13 +896,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 
   Widget _routineTile(Conversation c, Routine r) {
     final (label, color, bg) = r.running
-        ? (tr('wb.running'), const Color(0xFF8FB6FF), const Color(0xFF1E2D45))
+        ? (tr('wb.running'), C.tintInk, C.tint)
         : r.lastStatus == 'failed'
-        ? (tr('wb.lastFailed'), C.code, const Color(0xFF3A2226))
+        ? (tr('wb.lastFailed'), C.bad, C.badBg)
         : r.lastStatus == 'capped'
-        ? (tr('wb.lastCapped'), C.warn, const Color(0xFF3A3122))
+        ? (tr('wb.lastCapped'), C.warn, C.warnBg)
         : !r.enabled
-        ? (tr('wb.paused'), C.dim, const Color(0xFF2A2A31))
+        ? (tr('wb.paused'), C.dim, C.selected)
         : ('', C.dim, Colors.transparent);
     final sub = [scheduleText(r), nextRunText(r)].where((s) => s.isNotEmpty).join(' · ');
     return InkWell(
@@ -751,7 +938,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
               sub,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11.5, color: C.dim2),
+              style: TextStyle(fontSize: 11.5, color: C.dim2),
             ),
           ],
         ),
@@ -765,7 +952,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     final ids = c == null ? <String>[] : (c.isGroup ? c.members : [c.id]);
     return Container(
       width: 290,
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: C.side,
         border: Border(left: BorderSide(color: C.line)),
       ),
@@ -814,12 +1001,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF1E2D45),
+                              color: C.tint,
                               borderRadius: BorderRadius.circular(5),
                             ),
                             child: Text(
                               tr('wb.lead'),
-                              style: const TextStyle(fontSize: 10.5, color: Color(0xFF8FB6FF)),
+                              style: TextStyle(fontSize: 10.5, color: C.tintInk),
                             ),
                           ),
                       ],
@@ -861,7 +1048,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                               k.description,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 11.5, color: C.dim2),
+                              style: TextStyle(fontSize: 11.5, color: C.dim2),
                             ),
                           ],
                         ),
@@ -906,7 +1093,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
               children: [
                 Text(
                   c == null ? tr('wb.memory') : tr(c.isGroup ? 'wb.groupMemory' : 'wb.agentMemory', {'name': c.name}),
-                  style: const TextStyle(fontSize: 11, color: C.dim),
+                  style: TextStyle(fontSize: 11, color: C.dim),
                 ),
                 const SizedBox(height: 8),
                 TextField(
@@ -961,7 +1148,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     _memoryStatus,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11, color: C.dim),
+                    style: TextStyle(fontSize: 11, color: C.dim),
                   ),
                 ],
                 // The Agent's own notes: a second, separate store he writes with
@@ -973,12 +1160,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   const SizedBox(height: 10),
                   Text(
                     tr('wb.selfMemory', {'name': c.name}),
-                    style: const TextStyle(fontSize: 11, color: C.dim),
+                    style: TextStyle(fontSize: 11, color: C.dim),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     tr('wb.selfMemoryNote'),
-                    style: const TextStyle(fontSize: 10.5, color: C.dim2, height: 1.5),
+                    style: TextStyle(fontSize: 10.5, color: C.dim2, height: 1.5),
                   ),
                   const SizedBox(height: 6),
                   TextField(
@@ -1014,7 +1201,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       _selfMemoryStatus,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: C.dim),
+                      style: TextStyle(fontSize: 11, color: C.dim),
                     ),
                 ],
               ],

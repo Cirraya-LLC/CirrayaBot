@@ -23,6 +23,10 @@ const M = {
   'common.sep': [', ', '、', '、'],
   'common.quote': ['“{s}”', '「{s}」', '「{s}」'],
   'common.language': ['Language', '语言', '語言'],
+  'common.theme': ['Appearance', '外观', '外觀'],
+  'theme.system': ['Match system', '跟随系统', '跟隨系統'],
+  'theme.light': ['Light', '浅色', '淺色'],
+  'theme.dark': ['Dark', '深色', '深色'],
   'err.backend': ['Cannot reach the backend: {msg}', '连不上后端：{msg}', '無法連線到後端：{msg}'],
 
   // left column
@@ -33,6 +37,8 @@ const M = {
   'side.skills': ['Skill library', '技能库', '技能庫'],
   'side.noMatch': ['No matching conversations', '没有匹配的会话', '沒有符合的對話'],
   'side.noMessages': ['No messages yet', '还没说过话', '還沒有訊息'],
+  'side.collapse': ['Collapse sidebar', '收起侧栏', '收合側欄'],
+  'side.expand': ['Expand sidebar', '展开侧栏', '展開側欄'],
 
   // header / composer
   'head.pick': ['Pick a conversation', '选一个会话', '選擇一個對話'],

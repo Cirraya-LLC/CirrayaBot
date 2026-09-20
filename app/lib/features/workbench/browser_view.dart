@@ -163,7 +163,7 @@ class _BrowserThumbState extends State<BrowserThumb> with _ShotPoller {
         child: Row(
           children: [
             Expanded(
-              child: Text(tr('br.notOpen'), style: const TextStyle(fontSize: 12, color: C.dim2)),
+              child: Text(tr('br.notOpen'), style: TextStyle(fontSize: 12, color: C.dim2)),
             ),
             TextButton(
               onPressed: _open,
@@ -197,7 +197,7 @@ class _BrowserThumbState extends State<BrowserThumb> with _ShotPoller {
                     : (s.title.isEmpty ? s.url : s.title),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11.5, color: C.dim),
+                style: TextStyle(fontSize: 11.5, color: C.dim),
               ),
             ],
           ),
@@ -463,7 +463,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
                 s?.title ?? '',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: C.dim),
+                style: TextStyle(fontSize: 12, color: C.dim),
               ),
             ),
           ],
@@ -507,7 +507,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: Center(
                 child: s == null
-                    ? Text(tr(loaded ? 'br.notOpenLong' : 'br.connecting'), style: const TextStyle(color: C.dim))
+                    ? Text(tr(loaded ? 'br.notOpenLong' : 'br.connecting'), style: TextStyle(color: C.dim))
                     // Not focusable itself: key events from the hidden text field (which
                     // holds the focus) bubble up here first, before the app's own shortcuts.
                     : Focus(
@@ -595,7 +595,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
                   ),
                 ),
                 if (_busy)
-                  const SizedBox(
+                  SizedBox(
                     width: 12,
                     height: 12,
                     child: CircularProgressIndicator(strokeWidth: 1.6, color: C.dim),

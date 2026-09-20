@@ -253,7 +253,7 @@ class _AgentEditorState extends State<_AgentEditor> {
                   child: _modelsLoading
                       ? InputDecorator(
                           decoration: InputDecoration(labelText: tr('ed.model')),
-                          child: Text(tr('ed.askingProvider'), style: const TextStyle(fontSize: 13, color: C.dim)),
+                          child: Text(tr('ed.askingProvider'), style: TextStyle(fontSize: 13, color: C.dim)),
                         )
                       : _models.isEmpty
                       ? TextField(
@@ -291,7 +291,7 @@ class _AgentEditorState extends State<_AgentEditor> {
             ),
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text(tr('ed.effortHint'), style: const TextStyle(fontSize: 11, color: C.dim)),
+              child: Text(tr('ed.effortHint'), style: TextStyle(fontSize: 11, color: C.dim)),
             ),
             const SizedBox(height: 10),
             TextField(
@@ -303,11 +303,11 @@ class _AgentEditorState extends State<_AgentEditor> {
             if (_capUseless)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
-                child: Text(tr('wb.unpriced'), style: const TextStyle(fontSize: 11, color: C.warn)),
+                child: Text(tr('wb.unpriced'), style: TextStyle(fontSize: 11, color: C.warn)),
               ),
             if (_error.isNotEmpty) ...[
               const SizedBox(height: 10),
-              Text(_error, style: const TextStyle(fontSize: 12, color: C.code)),
+              Text(_error, style: TextStyle(fontSize: 12, color: C.code)),
             ],
           ],
         ),
@@ -416,14 +416,14 @@ class _GroupEditorState extends State<_GroupEditor> {
               decoration: InputDecoration(hintText: tr('ed.groupNameHint')),
             ),
             const SizedBox(height: 14),
-            Text(tr('ed.membersMin'), style: const TextStyle(fontSize: 12, color: C.dim)),
+            Text(tr('ed.membersMin'), style: TextStyle(fontSize: 12, color: C.dim)),
             const SizedBox(height: 4),
             ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 280),
               child: agents.isEmpty
                   ? Padding(
                       padding: const EdgeInsets.symmetric(vertical: 12),
-                      child: Text(tr('ed.noAgents'), style: const TextStyle(fontSize: 12.5, color: C.dim2)),
+                      child: Text(tr('ed.noAgents'), style: TextStyle(fontSize: 12.5, color: C.dim2)),
                     )
                   : ListView(
                       shrinkWrap: true,
@@ -446,7 +446,7 @@ class _GroupEditorState extends State<_GroupEditor> {
                                     a.description,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(fontSize: 11, color: C.dim),
+                                    style: TextStyle(fontSize: 11, color: C.dim),
                                   ),
                           ),
                       ],
@@ -467,10 +467,10 @@ class _GroupEditorState extends State<_GroupEditor> {
               onChanged: (v) => setState(() => _lead = v ?? ''),
             ),
             const SizedBox(height: 4),
-            Text(tr('ed.leadHelp'), style: const TextStyle(fontSize: 11, color: C.dim2)),
+            Text(tr('ed.leadHelp'), style: TextStyle(fontSize: 11, color: C.dim2)),
             if (_error.isNotEmpty) ...[
               const SizedBox(height: 10),
-              Text(_error, style: const TextStyle(fontSize: 12, color: C.code)),
+              Text(_error, style: TextStyle(fontSize: 12, color: C.code)),
             ],
           ],
         ),
@@ -494,7 +494,7 @@ Future<bool> _confirm(BuildContext context, String title, String body) async =>
       context: context,
       builder: (c) => AlertDialog(
         title: Text(title, style: const TextStyle(fontSize: 15)),
-        content: Text(body, style: const TextStyle(fontSize: 13, color: C.dim)),
+        content: Text(body, style: TextStyle(fontSize: 13, color: C.dim)),
         actions: [
           TextButton(onPressed: () => Navigator.of(c).pop(false), child: Text(tr('common.cancel'))),
           FilledButton(
@@ -686,7 +686,7 @@ class _RoutineEditorState extends State<_RoutineEditor> {
           ),
         ),
         const SizedBox(width: 10),
-        Text(tr('ed.min5'), style: const TextStyle(fontSize: 12, color: C.dim)),
+        Text(tr('ed.min5'), style: TextStyle(fontSize: 12, color: C.dim)),
       ],
     ),
     'once' => Align(
@@ -722,7 +722,7 @@ class _RoutineEditorState extends State<_RoutineEditor> {
           ],
         ),
         const SizedBox(height: 4),
-        Text(tr('ed.noneEveryDay'), style: const TextStyle(fontSize: 11, color: C.dim2)),
+        Text(tr('ed.noneEveryDay'), style: TextStyle(fontSize: 11, color: C.dim2)),
       ],
     ),
   };
@@ -765,7 +765,7 @@ class _RoutineEditorState extends State<_RoutineEditor> {
                 tr('ed.firesInto', {'name': widget.target.name}) +
                     (widget.target.isGroup ? tr('ed.firesGroup') : '') +
                     tr('ed.costs'),
-                style: const TextStyle(fontSize: 11.5, color: C.dim2),
+                style: TextStyle(fontSize: 11.5, color: C.dim2),
               ),
               const SizedBox(height: 12),
               SegmentedButton<String>(
@@ -794,10 +794,10 @@ class _RoutineEditorState extends State<_RoutineEditor> {
                 value: _enabled,
                 onChanged: (v) => setState(() => _enabled = v),
               ),
-              if (last.isNotEmpty) Text(last, style: const TextStyle(fontSize: 11.5, color: C.dim)),
+              if (last.isNotEmpty) Text(last, style: TextStyle(fontSize: 11.5, color: C.dim)),
               if (_error.isNotEmpty) ...[
                 const SizedBox(height: 10),
-                Text(_error, style: const TextStyle(fontSize: 12, color: C.code)),
+                Text(_error, style: TextStyle(fontSize: 12, color: C.code)),
               ],
             ],
           ),

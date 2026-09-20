@@ -122,7 +122,7 @@ class _SkillsPageState extends State<SkillsPage> {
       context: context,
       builder: (c) => AlertDialog(
         title: Text(tr('skills.deleteTitle', {'name': k.name}), style: const TextStyle(fontSize: 15)),
-        content: Text(tr('skills.deleteBody'), style: const TextStyle(fontSize: 13, color: C.dim)),
+        content: Text(tr('skills.deleteBody'), style: TextStyle(fontSize: 13, color: C.dim)),
         actions: [
           TextButton(onPressed: () => Navigator.of(c).pop(false), child: Text(tr('common.cancel'))),
           FilledButton(
@@ -166,7 +166,7 @@ class _SkillsPageState extends State<SkillsPage> {
     return Scaffold(
       appBar: AppBar(backgroundColor: C.side, title: Text(tr('skills.title'), style: const TextStyle(fontSize: 15))),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(strokeWidth: 2, color: C.dim))
+          ? Center(child: CircularProgressIndicator(strokeWidth: 2, color: C.dim))
           : Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 680),
@@ -175,13 +175,13 @@ class _SkillsPageState extends State<SkillsPage> {
                   children: [
                     Text(
                       tr('skills.intro'),
-                      style: const TextStyle(fontSize: 12, color: C.dim, height: 1.6),
+                      style: TextStyle(fontSize: 12, color: C.dim, height: 1.6),
                     ),
                     const SizedBox(height: 12),
                     if (_rows.isEmpty)
                       Padding(
                         padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Text(tr('skills.none'), style: const TextStyle(fontSize: 12.5, color: C.dim2)),
+                        child: Text(tr('skills.none'), style: TextStyle(fontSize: 12.5, color: C.dim2)),
                       ),
                     for (final k in _rows) _row(k),
                     const SizedBox(height: 16),
@@ -207,7 +207,7 @@ class _SkillsPageState extends State<SkillsPage> {
                       decoration: InputDecoration(hintText: tr('skills.bodyHint')),
                     ),
                     const SizedBox(height: 12),
-                    Text(tr('skills.installOn'), style: const TextStyle(fontSize: 12, color: C.dim)),
+                    Text(tr('skills.installOn'), style: TextStyle(fontSize: 12, color: C.dim)),
                     const SizedBox(height: 6),
                     Wrap(
                       spacing: 6,
@@ -260,7 +260,7 @@ class _SkillsPageState extends State<SkillsPage> {
         margin: const EdgeInsets.only(bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
         decoration: BoxDecoration(
-          color: on ? const Color(0xFF1C2333) : null,
+          color: on ? C.tint : null,
           border: Border.all(color: on ? C.accent : Colors.transparent),
           borderRadius: BorderRadius.circular(9),
         ),
@@ -274,7 +274,7 @@ class _SkillsPageState extends State<SkillsPage> {
                   if (k.savedBy != null)
                     TextSpan(
                       text: tr('skills.savedBy', {'name': _agentName(k.savedBy!)}),
-                      style: const TextStyle(fontSize: 11, color: C.dim),
+                      style: TextStyle(fontSize: 11, color: C.dim),
                     ),
                 ],
               ),
@@ -283,7 +283,7 @@ class _SkillsPageState extends State<SkillsPage> {
               '${k.description} · $who',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11.5, color: C.dim),
+              style: TextStyle(fontSize: 11.5, color: C.dim),
             ),
           ],
         ),

@@ -22,4 +22,8 @@ const Map<String, List<String>> commonStrings = {
   'common.name': ['Name', '名字', '名稱'],
   'common.description': ['Description', '描述', '描述'],
   'common.language': ['Language', '语言', '語言'],
+  'common.theme': ['Appearance', '外观', '外觀'],
+  'theme.system': ['Match system', '跟随系统', '跟隨系統'],
+  'theme.light': ['Light', '浅色', '淺色'],
+  'theme.dark': ['Dark', '深色', '深色'],
 };
