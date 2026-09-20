@@ -179,16 +179,7 @@ class Workbench extends ChangeNotifier {
       if (ticket != _shown) return; // two quick clicks: the older answer loses
       entries
         ..clear()
-        ..addAll(
-          history.map(
-            (m) => Said(
-              mine: m.mine,
-              speaker: m.speaker,
-              color: m.mine ? '' : (agentByName(m.speaker)?.color ?? c.color),
-              text: m.text,
-            ),
-          ),
-        );
+        ..addAll(history.map((m) => _entryOf(m, c)));
       error = null;
     } on ApiException catch (e) {
       error = e.message;
@@ -383,6 +374,18 @@ class Workbench extends ChangeNotifier {
     // Left and came back while it was answering: what's on screen is the
     // history from before the reply landed. Read it again.
     if (ticket != _shown && current?.id == c.id) await open(current!);
+  }
+
+  /// A stored line becomes a bubble or a finished tool card. A card from history
+  /// has no screenshot: only text is stored.
+  Entry _entryOf(Message m, Conversation c) {
+    final colour = m.mine ? '' : (agentByName(m.speaker)?.color ?? c.color);
+    if (m.tool == null) {
+      return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text);
+    }
+    return Ran(speaker: m.speaker, color: colour, label: _label(m.tool, m.args))
+      ..running = false
+      ..output = m.text;
   }
 
   static String _label(Object? tool, Map args) => switch (tool) {

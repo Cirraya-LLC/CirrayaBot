@@ -8,7 +8,7 @@ import 'package:multi_agent/state/workbench.dart';
 
 /// A stand-in for the server: two DMs, and a chat reply that is released in
 /// two halves so the test can act in between.
-Future<(HttpServer, Completer<void>)> fakeServer({String historyB = 'B history'}) async {
+Future<(HttpServer, Completer<void>)> fakeServer({String historyB = 'B history', bool toolInHistory = false}) async {
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   final release = Completer<void>();
   server.listen((req) async {
@@ -28,6 +28,8 @@ Future<(HttpServer, Completer<void>)> fakeServer({String historyB = 'B history'}
         res.write('[]');
       case '/api/dm/b':
         res.write(jsonEncode([
+          if (toolInHistory)
+            {'role': 'tool', 'speaker': 'B', 'name': 'bash', 'args': {'command': 'uname -a'}, 'output': 'Linux'},
           {'role': 'assistant', 'content': historyB},
         ]));
       case '/api/chat':
@@ -53,6 +55,25 @@ Future<(HttpServer, Completer<void>)> fakeServer({String historyB = 'B history'}
 }
 
 void main() {
+  // Reopening a conversation used to show only the final text: which commands ran was
+  // lost with the stream. A stored tool row has to come back as a finished card.
+  test('a stored tool call comes back as a finished card', () async {
+    final (server, release) = await fakeServer(toolInHistory: true);
+    release.complete();
+    final bench = Workbench(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    await bench.refresh();
+    await bench.open(bench.conversations[1]); // B
+
+    expect(bench.entries.length, 2);
+    final card = bench.entries.first as Ran;
+    expect(card.label, 'uname -a');
+    expect(card.output, 'Linux');
+    expect(card.running, isFalse, reason: 'a card read back from history is never still running');
+    expect((bench.entries[1] as Said).text, 'B history');
+    bench.dispose();
+    await server.close(force: true);
+  });
+
   // What the review caught: open A, send, click B while A is still answering —
   // A's reply kept landing in B's transcript.
   test('a reply still streaming does not land in the conversation switched to', () async {
