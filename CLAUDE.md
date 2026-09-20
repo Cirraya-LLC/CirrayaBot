@@ -1499,6 +1499,51 @@ Both reduced-motion settings are honoured (`prefers-reduced-motion` → `--dur: 
 `test/sidebar_test.dart` asserts the width is *between* the two at 100ms — a before/after check
 would pass on a version with no transition at all.
 
+## 2.27 Asking a person first (2026-09-20)
+
+2.2 called this the key part to copy, and 2.3 said why Grok Bot's version is worthless: its
+off-limits areas are a sentence in the persona, and one prompt injection rewrites what the agent
+wants. So the gate sits outside the model — the agent never sees a decision it can argue with, only
+a tool result.
+
+**Three modes, per platform with a per-agent override** (`agents.approval`, `''` = follow the
+platform; settings key `approvals`):
+
+| mode | asks before |
+| --- | --- |
+| `off` | nothing — what it did before this existed |
+| `match` | bash / write_file / browser calls a pattern catches. **The default** |
+| `all` | every bash / write_file / browser call |
+
+- **The rule is in `web/approve.mjs`**, pure, with `node web/approve.mjs` as its check. It matches
+  **what the call is about to do** (the command, the path being written), never the whole argument
+  blob — otherwise writing a file that happens to contain `git push` would trip the gate.
+  Reading is never gated: a read can't be the thing you regret.
+- **Patterns are regular expressions, and one that doesn't compile is matched as plain text.**
+  A typo must not silently match nothing, which is the one failure a permission list can't have.
+- **The seeded list is short on purpose.** A list long enough to catch everything asks so often that
+  people approve without reading, which is worse than not asking.
+- **The answer comes back over the open stream**: the card grows two buttons, the click is a
+  `POST /api/approvals/<id>`, and the id only exists while that stream is open. A stale click is a
+  404, never a silent yes.
+- **Hanging up is not a refusal.** The abort resolves the wait, and the turn then throws instead of
+  recording "the user said no" for something they never answered.
+- **A scheduled task has nobody to ask, so it refuses immediately** rather than stalling a task
+  nobody is watching. The refusal says which it was, so the agent writes up something true.
+- **The refusal goes back as the tool result** — it is the only thing the agent will ever see about
+  that call — and it says "do not try this again", or the next step is the same command reworded.
+
+Verified on the live deployment, both answers and both ways of not answering: denied (`sudo whoami`
+→ the agent reported it couldn't and stopped), approved (same command ran, exit 127), hung up
+mid-wait (stream ends, nothing recorded), a scheduled task (`last_status: ok`, refusal in the
+transcript, agent wrote up what happened), a per-agent `all` override asking for a plain `ls`, a
+stale id → 404, and a bad mode → 400. In the browser the waiting card is amber with Deny/Approve
+and the whole flow runs with zero console errors.
+
+**Not done**: no "always allow this one" — it would need somewhere to keep the decision, and a list
+of standing allowances nobody re-reads is how permission prompts stop meaning anything. The gate
+also doesn't cover the human-driven browser takeover (2.22.2), which is a person acting already.
+
 ## 3. What runs now
 
 ```bash
@@ -1507,6 +1552,7 @@ docker compose logs -f app
 node web/model.mjs         # self-test for context budgeting / window inference
 node web/schedule.mjs      # self-test for scheduled-task time computation
 node web/skill.mjs         # self-test for SKILL.md read/write
+node web/approve.mjs       # self-test for which tool calls need a person
 node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test

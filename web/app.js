@@ -258,6 +258,29 @@ function toolLabel(name, args = {}) {
     : name === 'browser' ? browserLabel(args) : name
 }
 
+/**
+ * The card is waiting for a person. The buttons only answer; whether the command then runs is the
+ * server's business, so a stale click (the stream already gone) just says so instead of pretending.
+ */
+function askOn(el, id) {
+  if (el.querySelector('.ask')) return
+  const box = document.createElement('div')
+  box.className = 'ask'
+  box.innerHTML = `<span>${esc(t('ap.asks'))}</span>
+    <button class="btn" data-ok="0">${esc(t('ap.deny'))}</button>
+    <button class="btn pri" data-ok="1">${esc(t('ap.approve'))}</button>`
+  box.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return
+    box.querySelectorAll('button').forEach(x => x.disabled = true)
+    const r = await fetch(api(`/api/approvals/${id}`), { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ ok: b.dataset.ok === '1' }) })
+    if (!r.ok) { box.textContent = t('ap.gone'); return }
+    box.textContent = b.dataset.ok === '1' ? t('ap.approved') : t('ap.denied')
+  }
+  el.appendChild(box)
+  el.scrollIntoView({ block: 'nearest' })
+}
+
 /** Fill in a card once its command has finished. Screenshots only exist in the live stream. */
 function finishTool(el, output, image) {
   el.classList.remove('run'); el.querySelector('pre').textContent = output ?? ''
@@ -378,6 +401,11 @@ async function send() {
             // "say → run → say" merges into one bubble above the command.
             bubs.delete(d.botId)
             tools.set(key, toolLine(d.botId, toolLabel(d.name, d.args)))
+          } else if (d.phase === 'ask') {
+            const el = tools.get(key)
+            if (el) askOn(el, d.id)
+          } else if (d.phase === 'answered') {
+            tools.get(key)?.querySelector('.ask')?.remove()
           } else {
             const el = tools.get(key)
             if (el) finishTool(el, d.output, d.image)
@@ -485,6 +513,9 @@ function editBot(b) {
   $('#beffort').innerHTML = ['', 'low', 'medium', 'high']
     .map(e => `<option value="${e}">${esc(t(e ? `b.effort${e[0].toUpperCase()}${e.slice(1)}` : 'b.effortNone'))}</option>`).join('')
   $('#beffort').value = ['low', 'medium', 'high'].includes(b?.effort) ? b.effort : ''
+  $('#bapproval').innerHTML = ['', 'off', 'match', 'all']
+    .map(m => `<option value="${m}">${esc(t(m ? `b.approval${m[0].toUpperCase()}${m.slice(1)}` : 'b.approvalDefault'))}</option>`).join('')
+  $('#bapproval').value = ['off', 'match', 'all'].includes(b?.approval) ? b.approval : ''
   $('#bcap').value = dollars(b?.daily_cap_micro)
   // A cap only means something when the upstream has prices; say so rather than let it look guarded.
   const u = b && spendOf(b.id)
@@ -519,7 +550,7 @@ $('#bsave').onclick = async () => {
   const cap = toMicro($('#bcap').value)
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
-    provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value,
+    provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value,
     daily_cap_micro: cap === '' ? null : cap }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
@@ -608,7 +639,22 @@ async function loadProvs() {
 }
 
 $('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
-  $('#pdefcap').value = dollars(USAGE.default_cap_micro); $('#pdlg').showModal() }
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); $('#pdlg').showModal() }
+
+async function loadPolicy() {
+  const pol = await (await fetch(api('/api/approvals/policy'))).json().catch(() => null)
+  if (!pol) return
+  $('#apmode').innerHTML = (pol.modes ?? ['off', 'match', 'all'])
+    .map(m => `<option value="${m}">${esc(t(`ap.mode${m[0].toUpperCase()}${m.slice(1)}`))}</option>`).join('')
+  $('#apmode').value = pol.mode
+  $('#appat').value = (pol.patterns ?? []).join('\n')
+}
+$('#apsave').onclick = async () => {
+  const r = await fetch(api('/api/approvals/policy'), { method:'PUT', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ mode: $('#apmode').value, patterns: $('#appat').value.split('\n') }) })
+  if (!r.ok) { hint((await r.json()).error, 'bad'); return }
+  hint(t('ap.saved'), 'good')
+}
 $('#pcapsave').onclick = async () => {
   const micro = toMicro($('#pdefcap').value)
   if (micro === false) { hint(t('sp.capBad'), 'bad'); return }

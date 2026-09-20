@@ -196,6 +196,10 @@
   .tool pre{margin:7px 0 0;white-space:pre-wrap;word-break:break-word;color:var(--dim);
             font-family:ui-monospace,Menlo,monospace;font-size:11px;max-height:180px;overflow:auto}
   .tool.run .th::after{content:'…';color:var(--warn)}
+  /* A card waiting on a person: the border colour is the signal, the buttons are the answer. */
+  .tool:has(.ask){border-color:var(--warn)}
+  .tool .ask{display:flex;align-items:center;gap:8px;margin-top:9px;color:var(--warn)}
+  .tool .ask button{padding:3px 12px;font-size:11.5px}
   .note{align-self:center;color:var(--dim2);font-size:11.5px;background:var(--tool);border:1px solid var(--line);
         border-radius:20px;padding:3px 13px;margin-bottom:12px}
   .empty{margin:auto;text-align:center;color:var(--dim);max-width:420px;padding-bottom:60px}
@@ -489,6 +493,7 @@
     <select id="bmodel" data-i18n-title="b.modelTitle"></select>
     <input type="text" id="bmodelx" data-i18n-placeholder="b.modelPh" autocomplete="off" hidden>
     <select id="beffort" data-i18n-title="b.effortTitle"></select>
+    <select id="bapproval" data-i18n-title="b.approvalTitle"></select>
   </div>
   <small class="rhint" data-i18n="b.effortHint"></small>
   <input type="text" id="bcap" data-i18n-placeholder="sp.capPh" autocomplete="off">
@@ -529,6 +534,14 @@
     <input type="text" id="pdefcap" data-i18n-placeholder="sp.defaultCap" autocomplete="off">
     <button class="btn" id="pcapsave" data-i18n="common.save"></button>
   </div>
+  <div class="psplit"></div>
+  <h4 style="margin-bottom:10px" data-i18n="ap.title"></h4>
+  <div class="prow">
+    <select id="apmode"></select>
+    <button class="btn" id="apsave" data-i18n="common.save"></button>
+  </div>
+  <textarea id="appat" rows="5" spellcheck="false" data-i18n-placeholder="ap.patternsPh"></textarea>
+  <small class="rhint" data-i18n="ap.hint"></small>
   <small class="phint" id="phint" data-i18n="p.hint"></small>
   <div class="acts">
     <button class="btn" style="margin-right:auto;color:var(--bad);display:none" id="pdel" data-i18n="common.delete"></button>

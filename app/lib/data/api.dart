@@ -71,6 +71,7 @@ class Agent {
     this.providerId = '',
     this.model = '',
     this.effort = '',
+    this.approval = '',
     this.dailyCapMicro,
   });
 
@@ -87,6 +88,9 @@ class Agent {
   /// How hard the model should think: '' (send nothing) / low / medium / high.
   final String effort;
 
+  /// When this one has to ask first: '' (follow the platform) / off / match / all.
+  final String approval;
+
   /// Daily spend cap in micro-dollars. null = no cap of its own, so the
   /// platform default applies.
   final int? dailyCapMicro;
@@ -100,6 +104,7 @@ class Agent {
     providerId: (j['provider_id'] as String?) ?? '',
     model: (j['model'] as String?) ?? '',
     effort: (j['effort'] as String?) ?? '',
+    approval: (j['approval'] as String?) ?? '',
     dailyCapMicro: (j['daily_cap_micro'] as num?)?.toInt(),
   );
 }
@@ -125,6 +130,19 @@ class Message {
   final int at;
   final String? tool;
   final Map<Object?, Object?> args;
+}
+
+/// The platform-wide answer to "when does an Agent have to ask first".
+class ApprovalPolicy {
+  const ApprovalPolicy({this.mode = 'match', this.patterns = const []});
+
+  final String mode;
+  final List<String> patterns;
+
+  static ApprovalPolicy fromJson(Map<String, Object?> j) => ApprovalPolicy(
+    mode: (j['mode'] as String?) ?? 'match',
+    patterns: ((j['patterns'] as List?) ?? const []).map((e) => '$e').toList(),
+  );
 }
 
 /// A skill: how to do one kind of job. Same shape as a SKILL.md file.
@@ -745,6 +763,17 @@ class Api {
 
   /// The platform-wide daily cap for agents that have none of their own.
   Future<void> setDefaultCap(int? micro) => _json('PUT', '/api/usage/cap', {'daily_cap_micro': micro});
+
+  // ---- Approvals ----
+  Future<ApprovalPolicy> approvalPolicy() async =>
+      ApprovalPolicy.fromJson((await _json('GET', '/api/approvals/policy')) as Map<String, Object?>);
+
+  Future<void> setApprovalPolicy(String mode, List<String> patterns) =>
+      _json('PUT', '/api/approvals/policy', {'mode': mode, 'patterns': patterns});
+
+  /// Answer one waiting call. The id only exists while the stream that asked is open,
+  /// so a late click gets an ApiException rather than a silent yes.
+  Future<void> answerApproval(String id, bool ok) => _json('POST', '/api/approvals/$id', {'ok': ok});
 
   /// Sends a message and yields events as they arrive.
   ///

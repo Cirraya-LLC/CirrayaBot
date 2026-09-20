@@ -78,10 +78,19 @@ class GroupAvatar extends StatelessWidget {
 }
 
 class EntryView extends StatelessWidget {
-  const EntryView({super.key, required this.entry, required this.names, required this.colorOf});
+  const EntryView({
+    super.key,
+    required this.entry,
+    required this.names,
+    required this.colorOf,
+    this.onApprove,
+  });
 
   final Entry entry;
   final List<String> names;
+
+  /// Answer a tool call that is waiting for a person. Null where nothing can wait.
+  final void Function(Ran card, bool ok)? onApprove;
 
   /// Agent name → colour, for the `@name` pills.
   final Color Function(String name) colorOf;
@@ -98,7 +107,7 @@ class EntryView extends StatelessWidget {
         ),
       ),
     ),
-    Ran r => _ToolCard(r),
+    Ran r => _ToolCard(r, onApprove),
     Said s => _Bubble(said: s, names: names, colorOf: colorOf),
   };
 }
@@ -248,8 +257,9 @@ class MessageBody extends StatelessWidget {
 }
 
 class _ToolCard extends StatelessWidget {
-  const _ToolCard(this.ran);
+  const _ToolCard(this.ran, this.onApprove);
   final Ran ran;
+  final void Function(Ran card, bool ok)? onApprove;
 
   @override
   Widget build(BuildContext context) {
@@ -261,7 +271,14 @@ class _ToolCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: C.tool,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: ran.running ? colour.withValues(alpha: 0.5) : C.line),
+        // Waiting on a person is the one state worth shouting about, so it takes the border.
+        border: Border.all(
+          color: ran.approvalId != null
+              ? C.warn
+              : ran.running
+              ? colour.withValues(alpha: 0.5)
+              : C.line,
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -301,6 +318,30 @@ class _ToolCard extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
                 child: Image.memory(ran.image!, gaplessPlayback: true),
               ),
+            ),
+          ],
+          if (ran.approvalId != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Text(tr('ap.asks'), style: TextStyle(fontSize: 11.5, color: C.warn)),
+                const Spacer(),
+                TextButton(
+                  onPressed: onApprove == null ? null : () => onApprove!(ran, false),
+                  child: Text(tr('ap.deny')),
+                ),
+                const SizedBox(width: 6),
+                FilledButton(
+                  onPressed: onApprove == null ? null : () => onApprove!(ran, true),
+                  child: Text(tr('ap.approve')),
+                ),
+              ],
+            ),
+          ] else if (ran.approved != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              tr(ran.approved! ? 'ap.approved' : 'ap.denied'),
+              style: TextStyle(fontSize: 11.5, color: ran.approved! ? C.dim2 : C.warn),
             ),
           ],
           if (ran.output.isNotEmpty) ...[

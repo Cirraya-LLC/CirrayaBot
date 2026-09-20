@@ -37,6 +37,10 @@ class _ProvidersPageState extends State<ProvidersPage> {
   final _priceIn = TextEditingController();
   final _priceOut = TextEditingController();
   final _defaultCap = TextEditingController();
+
+  /// The platform-wide approval rule, and the pattern list "match" uses.
+  final _patterns = TextEditingController();
+  String _approvalMode = 'match';
   bool _auto = true;
   bool _busy = false;
   String _protocol = 'chat';
@@ -51,7 +55,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   @override
   void dispose() {
-    for (final c in [_name, _url, _key, _tokens, _priceIn, _priceOut, _defaultCap]) {
+    for (final c in [_name, _url, _key, _tokens, _priceIn, _priceOut, _defaultCap, _patterns]) {
       c.dispose();
     }
     super.dispose();
@@ -61,6 +65,9 @@ class _ProvidersPageState extends State<ProvidersPage> {
     try {
       _rows = await widget.api.providers();
       _defaultCap.text = dollarsText((await widget.api.usage()).defaultCapMicro);
+      final policy = await widget.api.approvalPolicy();
+      _approvalMode = policy.mode;
+      _patterns.text = policy.patterns.join('\n');
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
     } on ApiException catch (e) {
       _say(e.message, bad: true);
@@ -164,6 +171,16 @@ class _ProvidersPageState extends State<ProvidersPage> {
     await _act(tr('prov.saving'), () async {
       await widget.api.setDefaultCap(cap.value);
       _say(tr('prov.capSaved', {'cap': cap.value == null ? tr('prov.noCap') : moneyText(cap.value)}), good: true);
+    });
+  }
+
+  Future<void> _saveApprovals() async {
+    await _act(tr('prov.saving'), () async {
+      await widget.api.setApprovalPolicy(
+        _approvalMode,
+        _patterns.text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList(),
+      );
+      _say(tr('ap.saved'), good: true);
     });
   }
 
@@ -317,6 +334,38 @@ class _ProvidersPageState extends State<ProvidersPage> {
                         TextButton(onPressed: _busy ? null : _saveDefaultCap, child: Text(tr('common.save'))),
                       ],
                     ),
+                    const SizedBox(height: 14),
+                    const Divider(height: 1),
+                    const SizedBox(height: 12),
+                    // Also not an upstream's business: when any Agent has to ask a person first.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            initialValue: _approvalMode,
+                            isExpanded: true,
+                            decoration: InputDecoration(labelText: tr('ap.title')),
+                            items: [
+                              for (final m in const ['off', 'match', 'all'])
+                                DropdownMenuItem(value: m, child: Text(tr('ap.mode${m[0].toUpperCase()}${m.substring(1)}'))),
+                            ],
+                            onChanged: (v) => setState(() => _approvalMode = v ?? 'match'),
+                          ),
+                        ),
+                        const SizedBox(width: 9),
+                        TextButton(onPressed: _busy ? null : _saveApprovals, child: Text(tr('common.save'))),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _patterns,
+                      minLines: 4,
+                      maxLines: 8,
+                      decoration: InputDecoration(labelText: tr('ap.patterns')),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(tr('ap.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
                     const SizedBox(height: 10),
                     Text(_hint, style: TextStyle(fontSize: 11.5, color: _hintColor)),
                     const SizedBox(height: 16),

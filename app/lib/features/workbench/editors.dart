@@ -31,6 +31,14 @@ const _effortLevels = <MapEntry<String, String>>[
   MapEntry('high', 'ed.effortHigh'),
 ];
 
+/// When this one has to ask a person first. '' = whatever the platform says.
+const _approvalModes = <MapEntry<String, String>>[
+  MapEntry('', 'ed.approvalDefault'),
+  MapEntry('off', 'ed.approvalOff'),
+  MapEntry('match', 'ed.approvalMatch'),
+  MapEntry('all', 'ed.approvalAll'),
+];
+
 class _AgentEditor extends StatefulWidget {
   const _AgentEditor({required this.bench, this.agent});
   final Workbench bench;
@@ -54,6 +62,7 @@ class _AgentEditorState extends State<_AgentEditor> {
 
   /// '' = send nothing, which is what every model got before this setting existed.
   late String _effort = const ['low', 'medium', 'high'].contains(widget.agent?.effort) ? widget.agent!.effort : '';
+  late String _approval = const ['off', 'match', 'all'].contains(widget.agent?.approval) ? widget.agent!.approval : '';
   List<Provider> _providers = const [];
   List<String> _models = const [];
   String _model = '';
@@ -161,6 +170,7 @@ class _AgentEditorState extends State<_AgentEditor> {
       'provider_id': _providerId,
       'model': _chosenModel,
       'effort': _effort,
+      'approval': _approval,
       'daily_cap_micro': cap.value,
     };
     await _run(() async {
@@ -292,6 +302,17 @@ class _AgentEditorState extends State<_AgentEditor> {
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(tr('ed.effortHint'), style: TextStyle(fontSize: 11, color: C.dim)),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              initialValue: _approval,
+              isExpanded: true,
+              decoration: InputDecoration(labelText: tr('ed.approval')),
+              items: [
+                for (final m in _approvalModes)
+                  DropdownMenuItem(value: m.key, child: Text(tr(m.value))),
+              ],
+              onChanged: (v) => setState(() => _approval = v ?? ''),
             ),
             const SizedBox(height: 10),
             TextField(
