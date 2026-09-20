@@ -179,6 +179,10 @@ async function drawHistory(c, ticket) {
   if (ticket !== shown) return false                  // two quick clicks: the earlier one arrived late, drop it
   const log = $('#log'); log.innerHTML = ''
   for (const e of hist) {
+    if (e.role === 'tool') {
+      finishTool(toolLine(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, toolLabel(e.name, e.args)), e.output)
+      continue
+    }
     // 'User' is the speaker the server stores for the person in group logs (data, not UI text)
     if (c.kind === 'group') bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User').innerHTML = fmt(e.text)
     else bubble(c.id, e.role === 'user').innerHTML = fmt(e.content)
@@ -245,6 +249,23 @@ function bubble(botId, mine) {
     <div class="bub"></div></div>`
   log.appendChild(el); log.scrollTop = log.scrollHeight
   return el.querySelector('.bub')
+}
+
+function toolLabel(name, args = {}) {
+  return name === 'bash' ? args.command
+    : name === 'read_file' ? t('tool.read', { path: args.path })
+    : name === 'write_file' ? t('tool.write', { path: args.path })
+    : name === 'browser' ? browserLabel(args) : name
+}
+
+/** Fill in a card once its command has finished. Screenshots only exist in the live stream. */
+function finishTool(el, output, image) {
+  el.classList.remove('run'); el.querySelector('pre').textContent = output ?? ''
+  if (image?.startsWith('data:image/')) {
+    const img = document.createElement('img'); img.src = image; img.alt = t('tool.screenshot')
+    img.onclick = () => window.open().document.write(`<img src="${image}" style="max-width:100%">`)
+    el.appendChild(img)
+  }
 }
 
 function toolLine(botId, label) {
@@ -356,21 +377,10 @@ async function send() {
             // Close the current bubble when a tool starts; later text gets a new one, otherwise
             // "say → run → say" merges into one bubble above the command.
             bubs.delete(d.botId)
-            const label = d.name === 'bash' ? d.args.command
-              : d.name === 'read_file' ? t('tool.read', { path: d.args.path })
-              : d.name === 'write_file' ? t('tool.write', { path: d.args.path })
-              : d.name === 'browser' ? browserLabel(d.args) : d.name
-            tools.set(key, toolLine(d.botId, label))
+            tools.set(key, toolLine(d.botId, toolLabel(d.name, d.args)))
           } else {
             const el = tools.get(key)
-            if (el) {
-              el.classList.remove('run'); el.querySelector('pre').textContent = d.output ?? ''
-              if (d.image?.startsWith('data:image/')) {
-                const img = document.createElement('img'); img.src = d.image; img.alt = t('tool.screenshot')
-                img.onclick = () => window.open().document.write(`<img src="${d.image}" style="max-width:100%">`)
-                el.appendChild(img)
-              }
-            }
+            if (el) finishTool(el, d.output, d.image)
           }
         }
       }

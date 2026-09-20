@@ -48,7 +48,7 @@ create table if not exists messages (
   id       bigserial primary key,
   scope    text not null check (scope in ('dm','group')),
   scope_id text not null,
-  role     text not null check (role in ('user','assistant')),
+  role     text not null check (role in ('user','assistant','tool')),
   speaker  text not null default '',
   content  text not null,
   at       timestamptz not null default now()
@@ -155,6 +155,11 @@ alter table agents add column if not exists daily_cap_micro bigint;
 -- or low / medium / high. Three levels on purpose: each provider spells it differently and a
 -- per-provider vocabulary would need updating every time one of them moves.
 alter table agents add column if not exists effort text not null default '';
+
+-- A tool call is a message too, so reopening a conversation still shows which commands ran.
+-- Its content is JSON {name, args, output}; only the model's own history filters them out.
+alter table messages drop constraint if exists messages_role_check;
+alter table messages add constraint messages_role_check check (role in ('user','assistant','tool'));
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -247,10 +252,22 @@ export async function addMessage(scope, scopeId, { role, speaker = '', content }
     [scope, scopeId, role, speaker, content])
 }
 
-/** The latest `limit` messages, returned oldest first (the model wants old to new). */
-export async function recent(scope, scopeId, limit = 200) {
+/** A finished tool call, kept so the transcript still shows the work after a reload. */
+export async function addTool(scope, scopeId, speaker, { name, args, output }) {
+  await q('insert into messages (scope, scope_id, role, speaker, content) values ($1,$2,$3,$4,$5)',
+    [scope, scopeId, 'tool', speaker, JSON.stringify({ name, args, output })])
+}
+
+/**
+ * The latest `limit` messages, returned oldest first (the model wants old to new).
+ * Tool rows are for the transcript only: the model builds its own tool messages inside a turn,
+ * and feeding these back would hand it a second, malformed copy of its own work.
+ */
+export async function recent(scope, scopeId, limit = 200, { tools = false } = {}) {
   const { rows } = await q(
-    'select role, speaker, content, at from messages where scope = $1 and scope_id = $2 order by id desc limit $3',
+    `select role, speaker, content, at from messages
+     where scope = $1 and scope_id = $2 ${tools ? '' : "and role <> 'tool'"}
+     order by id desc limit $3`,
     [scope, scopeId, limit])
   return rows.reverse()
 }
@@ -282,7 +299,7 @@ export async function clearMessages(scope, scopeId) {
 export async function lastMessages() {
   const { rows } = await q(`
     select distinct on (scope, scope_id) scope, scope_id, role, speaker, content, at
-    from messages order by scope, scope_id, id desc`)
+    from messages where role <> 'tool' order by scope, scope_id, id desc`)
   return new Map(rows.map(r => [`${r.scope}:${r.scope_id}`, r]))
 }
 

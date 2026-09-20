@@ -106,13 +106,25 @@ class Agent {
 
 /// One line in the transcript. [speaker] is empty for the person using the
 /// app; in a group it is the Agent's display name.
+///
+/// A stored tool call is a line too ([tool] set): the label is built where the
+/// rest of the tool labels are built, so history and the live stream read alike.
 class Message {
-  const Message({required this.mine, required this.speaker, required this.text, required this.at});
+  const Message({
+    required this.mine,
+    required this.speaker,
+    required this.text,
+    required this.at,
+    this.tool,
+    this.args = const {},
+  });
 
   final bool mine;
   final String speaker;
   final String text;
   final int at;
+  final String? tool;
+  final Map<Object?, Object?> args;
 }
 
 /// A skill: how to do one kind of job. Same shape as a SKILL.md file.
@@ -526,6 +538,7 @@ class Api {
       return j.map((e) {
         final m = e as Map<String, Object?>;
         final speaker = (m['speaker'] as String?) ?? '';
+        if (m['role'] == 'tool') return _toolMessage(m, speaker);
         return Message(
           mine: speaker == userSpeaker,
           speaker: speaker,
@@ -537,6 +550,7 @@ class Api {
     final j = await _list('/api/dm/${c.id}');
     return j.map((e) {
       final m = e as Map<String, Object?>;
+      if (m['role'] == 'tool') return _toolMessage(m, c.name);
       return Message(
         mine: m['role'] == 'user',
         speaker: m['role'] == 'user' ? userSpeaker : c.name,
@@ -579,6 +593,15 @@ class Api {
   }
 
   Future<void> updateAgent(String id, Map<String, Object?> body) => _json('PATCH', '/api/bots/$id', body);
+
+  Message _toolMessage(Map<String, Object?> m, String speaker) => Message(
+    mine: false,
+    speaker: speaker.isEmpty ? '' : speaker,
+    text: (m['output'] as String?) ?? '',
+    at: (m['at'] as num?)?.toInt() ?? 0,
+    tool: (m['name'] as String?) ?? '',
+    args: (m['args'] as Map?) ?? const {},
+  );
 
   // ---- Chat history export / import ----
   // The exported file is exactly what import takes back.

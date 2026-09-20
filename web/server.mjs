@@ -79,8 +79,21 @@ async function listConversations(lang) {
   return items.sort((a, b) => b.at - a.at)
 }
 
+/**
+ * One transcript line for the UI. A tool row carries JSON, so unpack it here rather than
+ * making both frontends parse it; a row that somehow isn't JSON is dropped to text.
+ */
+function transcriptRow(m, text) {
+  if (m.role !== 'tool') return { role: m.role, at: m.at, ...text }
+  try {
+    const { name, args, output } = JSON.parse(m.content)
+    return { role: 'tool', speaker: m.speaker, at: m.at, name, args: args ?? {}, output: output ?? '' }
+  } catch { return { role: m.role, at: m.at, ...text } }
+}
+
 const MAX_HANDOFFS = 5       // max handoffs between agents in one round, so they can't chat forever
 const FETCH_MAX = 300        // how many candidate rows to pull from the DB; the real trimming is by context budget
+const TOOL_TRACE = 400       // how much tool output the transcript keeps, same as the live stream sends
 
 /**
  * The group discussions an agent remembers — every group he's in, not just the current one.
@@ -584,6 +597,10 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       if (res?.image) shot = res.image
       // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored
       onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {} })
+      // Keep the call in the transcript, cut to the same length the live stream shows — reopening a
+      // conversation should show the same cards, not more and not fewer.
+      if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.bot?.name ?? '',
+        { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE) })
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
     }
     // A screenshot can't go into a tool result (Chat protocol tool messages only take text), so it follows as a user message.
@@ -707,7 +724,7 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
       await askSolo(providers.get(bot.id), bot, text,
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
         d => emit('delta', { botId: bot.id, text: d }),
-        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, 400) }), signal, lang)
+        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang)
       emit('end', { botId: bot.id })
     } else {
       // Group chat: colleagues relay. Who speaks first — whoever the user @-ed; if nobody, the group's lead;
@@ -727,7 +744,7 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
             { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
               group: await db.getMemory('group', gid) },
             d => emit('delta', { botId: speaker.id, text: d }),
-            t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, 400) }),
+            t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }),
             gid, signal, lang)
         } catch (e) {
           emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
@@ -1064,8 +1081,8 @@ const server = createServer(async (req, res) => {
     // Direct chat history: the frontend wants {role, content, at}
     const dm = url.pathname.match(/^\/api\/dm\/([a-z0-9-]+)$/)
     if (dm && req.method === 'GET')
-      return send(200, (await db.recent('dm', dm[1], FETCH_MAX))
-        .map(m => ({ role: m.role, content: m.content, at: m.at })))
+      return send(200, (await db.recent('dm', dm[1], FETCH_MAX, { tools: true }))
+        .map(m => transcriptRow(m, { content: m.content })))
     if (dm && req.method === 'DELETE') { await db.clearMessages('dm', dm[1]); return send(200, { ok: true }) }
 
     if (url.pathname === '/api/bots' && req.method === 'GET') return send(200, await loadBots(lang))
@@ -1440,8 +1457,8 @@ const server = createServer(async (req, res) => {
 
     const gr = url.pathname.match(/^\/api\/groups\/([\w-]+)\/messages$/)
     if (gr && req.method === 'GET')
-      return send(200, (await db.recent('group', gr[1], FETCH_MAX))
-        .map(m => ({ speaker: m.speaker, text: m.content, at: m.at })))
+      return send(200, (await db.recent('group', gr[1], FETCH_MAX, { tools: true }))
+        .map(m => transcriptRow(m, { speaker: m.speaker, text: m.content })))
     if (gr && req.method === 'DELETE') { await db.clearMessages('group', gr[1]); return send(200, { ok: true }) }
 
     // Static files

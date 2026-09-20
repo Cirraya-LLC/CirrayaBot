@@ -955,9 +955,6 @@ left panel preview refresh).
 
 - **The token is stored in plain text in JSON.** Moving it into Keychain / Credential Manager needs a
   native branch for each.
-- **Tool cards aren't persisted** — **the web UI has the same issue**: the `messages` table only stores
-  the final text, so reopening a conversation doesn't show which commands ran. Keeping a trace needs a
-  new kind in `messages`.
 - Phones aren't an "adaptation": the 308px sidebar and three columns are desktop assumptions;
   navigation needs to be redone.
 
@@ -1137,6 +1134,34 @@ editing it whenever one of them moves.
 Verified against the real deployment with a throwaway fake upstream that recorded the request bodies:
 all three protocols sent the right shape (messages: `budget_tokens 4096` with `max_tokens 12288`), and
 under a fake 400 the turn still completed (retried bare) and the next turn never sent it again.
+
+## 2.20.5 Tool calls stay in the transcript (2026-09-20)
+
+Reopening a conversation used to show only the final text: which commands ran left with the stream, so
+"what did it actually do" could only be answered while you were watching.
+
+- **A tool call is a `messages` row**, `role = 'tool'`, content `{name, args, output}` as JSON. Not a new
+  table: the conversation list sorts by recent activity in one query, and a second table would make that
+  a merge again (2.18.1's reason, still the reason).
+- **`recent()` hides tool rows unless asked** (`{tools:true}`). The model builds its own tool messages
+  inside a turn; feeding these back hands it a second, malformed copy of its own work. Only the two
+  history endpoints ask for them — the model path, export and the conversation previews don't.
+- **Written where the card is emitted** (`runAgent`, the `done` phase), so all three callers — DM, group
+  first speaker, group relay — get it from one line, and the ordering is free: tools land between the
+  question and the answer because that's when they happen.
+- **Cut to the same length the live stream sends** (`TOOL_TRACE`, 400). More on reload than while
+  watching would be its own small lie. Screenshots are still never stored.
+- Both frontends build the card label from `name` + `args` in one place now (`toolLabel` /
+  `_label`), so a reloaded card reads exactly like a live one. A card from history is never `running`.
+
+An existing database needs the check constraint relaxed, not just the column: `create table if not
+exists` won't touch it, so the migration drops and re-adds `messages_role_check`.
+
+Verified on the live deployment: asked the Operator to run `uname -r`, reloaded `/api/dm/operator` — the
+tool row is there between question and answer with its output; the conversation preview and the export
+still show only text; a follow-up turn ("what command did you just run?") answered correctly, so the
+model context is unchanged. In the browser the reloaded card renders above the answer, zero console
+errors. `app/test/workbench_test.dart` pins the client mapping (green on new code, throws on old).
 
 ## 2.21 Scheduled tasks (2026-09-19)
 
