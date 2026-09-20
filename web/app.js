@@ -17,6 +17,72 @@ const listJoin = xs => xs.join(t('common.sep'))
 const quote = s => t('common.quote', { s })
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
 
+// ═══ Appearance: system / light / dark ═══
+// The <head> script has already applied the stored choice; this only keeps it
+// in sync afterwards. "system" stays live — the listener flips the attribute
+// when the OS does, with no reload.
+const media = matchMedia('(prefers-color-scheme: light)')
+const readTheme = () => { try { return localStorage.getItem('ma_theme') || 'system' } catch { return 'system' } }
+const paintTheme = () => {
+  const choice = readTheme()
+  document.documentElement.dataset.theme = choice === 'system' ? (media.matches ? 'light' : 'dark') : choice
+}
+media.addEventListener('change', paintTheme)
+$('#theme').innerHTML = ['system', 'light', 'dark']
+  .map(v => `<option value="${v}">${esc(t('theme.' + v))}</option>`).join('')
+$('#theme').value = readTheme()
+$('#theme').onchange = e => {
+  try { localStorage.setItem('ma_theme', e.target.value) } catch {}
+  paintTheme()
+}
+
+// ═══ Collapsing the sidebar ═══
+// Collapsed it is still the conversation list: same avatars, same recency
+// order. Names come back on hover or focus, from one floating tip — the list
+// scrolls, so a tip inside a row would be clipped by it.
+const railOn = () => document.documentElement.classList.contains('rail')
+function setRail(on) {
+  document.documentElement.classList.toggle('rail', on)
+  try { localStorage.setItem('ma_rail', on ? '1' : '0') } catch {}
+  $('#collapseicon').textContent = on ? '\u00bb' : '\u00ab'
+  const label = t(on ? 'side.expand' : 'side.collapse')
+  $('#collapse').querySelector('span').textContent = label
+  $('#collapse').dataset.tip = label
+  hideTip()
+}
+$('#collapse').onclick = () => setRail(!railOn())
+$('#railnew').onclick = () => $('#newconv').click()
+// A search box you cannot type in is a dead control, so the rail's magnifier
+// opens the sidebar and puts the cursor in the real one.
+$('#railsearch').onclick = () => { setRail(false); $('#q').focus() }
+document.addEventListener('keydown', e => {
+  // Not while the Agent's browser is open: there Ctrl+B belongs to their page.
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== 'b') return
+  if (!$('#bwfull').hidden) return
+  e.preventDefault(); setRail(!railOn())
+})
+
+const tip = $('#tip')
+const hideTip = () => { tip.hidden = true }
+function showTip(el) {
+  const text = el.dataset.tip || (el.dataset.tipKey ? t(el.dataset.tipKey) : '')
+  if (!text || !railOn()) return
+  const r = el.getBoundingClientRect()
+  tip.textContent = text
+  tip.style.top = `${r.top + r.height / 2}px`
+  tip.style.left = `${r.right + 8}px`
+  tip.hidden = false
+}
+for (const ev of ['mouseover', 'focusin']) $('aside').addEventListener(ev, e => {
+  const el = e.target.closest?.('[data-tip],[data-tip-key]')
+  el ? showTip(el) : hideTip()
+})
+for (const ev of ['mouseleave', 'focusout']) $('aside').addEventListener(ev, hideTip)
+window.addEventListener('blur', hideTip)
+
+// Paints the toggle's icon and label for the state the <head> script restored.
+setRail(railOn())
+
 let BOTS = [], CONVS = [], cur = null, busy = false, filter = ''
 const bot = id => BOTS.find(b => b.id === id)
 
@@ -60,6 +126,10 @@ function renderConvs() {
     const on = cur && cur.kind === c.kind && cur.id === c.id
     const el = document.createElement('div')
     el.className = 'conv' + (on ? ' on' : '')
+    // Reachable by keyboard, and collapsed the name is all there is to go on.
+    el.tabIndex = 0
+    el.setAttribute('role', 'button')
+    el.dataset.tip = c.name
     el.innerHTML = `${avatar(c)}
       <div class="cbody">
         <div class="crow">
@@ -70,6 +140,7 @@ function renderConvs() {
         <div class="cprev">${esc(c.preview) || `<span style="color:var(--dim2)">${esc(t('side.noMessages'))}</span>`}</div>
       </div>`
     el.onclick = () => openConv(c)
+    el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openConv(c) } }
     box.appendChild(el)
   }
 }
@@ -588,8 +659,9 @@ const spendOf = id => USAGE.agents.find(a => a.id === id)
 
 async function loadUsage() {
   USAGE = await fetch(api('/api/usage')).then(r => r.json()).catch(() => USAGE)
-  $('#spendfoot').firstElementChild.nextElementSibling.textContent =
-    t('sp.footer', { day: money(USAGE.day?.cost_micro ?? 0), month: money(USAGE.month?.cost_micro ?? 0) })
+  const spent = t('sp.footer', { day: money(USAGE.day?.cost_micro ?? 0), month: money(USAGE.month?.cost_micro ?? 0) })
+  $('#spendfoot').firstElementChild.nextElementSibling.textContent = spent
+  $('#spendfoot').dataset.tip = spent   // collapsed, the figure only shows in the tip
   if (cur) renderSpend(cur)
 }
 

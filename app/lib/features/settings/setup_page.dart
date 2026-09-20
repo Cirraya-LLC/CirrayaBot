@@ -120,7 +120,7 @@ class _SetupPageState extends State<SetupPage> {
                       DropdownButton<Lang>(
                         value: currentLang.value,
                         underline: const SizedBox.shrink(),
-                        style: const TextStyle(fontSize: 12.5, color: C.dim),
+                        style: TextStyle(fontSize: 12.5, color: C.dim),
                         items: [
                           for (final l in Lang.values) DropdownMenuItem(value: l, child: Text(l.label)),
                         ],
@@ -133,7 +133,7 @@ class _SetupPageState extends State<SetupPage> {
                   const SizedBox(height: 6),
                   Text(
                     tr('setup.intro'),
-                    style: const TextStyle(fontSize: 12.5, color: C.dim, height: 1.6),
+                    style: TextStyle(fontSize: 12.5, color: C.dim, height: 1.6),
                   ),
                   const SizedBox(height: 20),
                   TextField(
@@ -181,7 +181,7 @@ class _SetupPageState extends State<SetupPage> {
                   const SizedBox(height: 18),
                   Text(
                     tr('setup.footer'),
-                    style: const TextStyle(fontSize: 11, color: C.dim2, height: 1.6),
+                    style: TextStyle(fontSize: 11, color: C.dim2, height: 1.6),
                   ),
                 ],
               ),

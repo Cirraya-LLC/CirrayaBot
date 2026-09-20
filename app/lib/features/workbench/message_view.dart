@@ -69,7 +69,7 @@ class GroupAvatar extends StatelessWidget {
             Positioned(
               right: 0,
               bottom: 0,
-              child: Text('+${count - 3}', style: const TextStyle(fontSize: 9, color: C.dim)),
+              child: Text('+${count - 3}', style: TextStyle(fontSize: 9, color: C.dim)),
             ),
         ],
       ),
@@ -94,7 +94,7 @@ class EntryView extends StatelessWidget {
         child: Text(
           n.text,
           textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 11.5, color: C.dim2),
+          style: TextStyle(fontSize: 11.5, color: C.dim2),
         ),
       ),
     ),
@@ -132,7 +132,7 @@ class _Bubble extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 720),
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 11),
           decoration: BoxDecoration(
-            color: said.mine ? const Color(0xFF1D2A4A) : C.bubble,
+            color: said.mine ? C.bubbleMine : C.bubble,
             borderRadius: BorderRadius.circular(13),
           ),
           child: MessageBody(
@@ -179,9 +179,9 @@ class MessageBody extends StatelessWidget {
               margin: const EdgeInsets.symmetric(vertical: 6),
               padding: const EdgeInsets.all(11),
               decoration: BoxDecoration(
-                color: const Color(0xFF141418),
+                color: C.codeBlock,
                 borderRadius: BorderRadius.circular(9),
-                border: Border.all(color: C.line),
+                border: Border.all(color: C.codeBlockLine),
               ),
               child: SelectableText(
                 c.code,
@@ -198,7 +198,7 @@ class MessageBody extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 1),
               child: SelectableText.rich(
                 TextSpan(children: [for (final s in p.spans) _span(s)]),
-                style: const TextStyle(fontSize: 14, height: 1.62, color: C.ink),
+                style: TextStyle(fontSize: 14, height: 1.62, color: C.ink),
               ),
             ),
           },
@@ -226,7 +226,7 @@ class MessageBody extends StatelessWidget {
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 1),
         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-        decoration: BoxDecoration(color: const Color(0x22FFFFFF), borderRadius: BorderRadius.circular(6)),
+        decoration: BoxDecoration(color: C.tint, borderRadius: BorderRadius.circular(6)),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -238,7 +238,7 @@ class MessageBody extends StatelessWidget {
             const SizedBox(width: 5),
             Text(
               m.name,
-              style: TextStyle(fontSize: 12.5, color: C.ink, fontFamilyFallback: AppTheme.textFallback),
+              style: TextStyle(fontSize: 12.5, color: C.tintInk, fontFamilyFallback: AppTheme.textFallback),
             ),
           ],
         ),
@@ -259,7 +259,7 @@ class _ToolCard extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 6),
       padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
       decoration: BoxDecoration(
-        color: const Color(0xFF141418),
+        color: C.tool,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: ran.running ? colour.withValues(alpha: 0.5) : C.line),
       ),
@@ -274,7 +274,7 @@ class _ToolCard extends StatelessWidget {
                 decoration: BoxDecoration(color: colour, shape: BoxShape.circle),
               ),
               const SizedBox(width: 7),
-              Text(tr('wb.ran', {'name': ran.speaker}), style: const TextStyle(fontSize: 11.5, color: C.dim)),
+              Text(tr('wb.ran', {'name': ran.speaker}), style: TextStyle(fontSize: 11.5, color: C.dim)),
               const SizedBox(width: 7),
               Expanded(
                 child: Text(
@@ -290,7 +290,7 @@ class _ToolCard extends StatelessWidget {
                 ),
               ),
               if (ran.running)
-                const SizedBox(width: 11, height: 11, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.dim)),
+                SizedBox(width: 11, height: 11, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.dim)),
             ],
           ),
           if (ran.image != null) ...[

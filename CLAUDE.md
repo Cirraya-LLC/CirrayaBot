@@ -1403,6 +1403,77 @@ burn a night's budget in silence, and the only way to find out was the upstream'
 **Left deliberately**: no per-turn or per-routine cap (daily only), no history screen (the rows
 are there, nobody has asked to browse them), no retention — `usage` grows one row per call.
 
+## 2.26 Collapsible sidebar, animated, and a light theme (2026-09-20)
+
+One palette, two themes, in **one place per client**: the `:root` / `:root[data-theme="light"]`
+token block at the top of `web/index.html`, and `Palette.dark` / `Palette.light` in
+`app/lib/theme/app_theme.dart`. No rule below either of those names a colour or a theme.
+
+**Light is not the dark theme inverted.** The surface *relationships* are kept — composer, tool
+cards and bubbles sit above the canvas, input wells sit below it — but the base flips: in dark
+the chrome is lighter than the canvas, in light the chrome is tinted grey and the content is
+white. Two things this cost, both found by looking at it:
+
+- **A white bubble on an off-white canvas is invisible.** The canvas is pinned at white and the
+  bubble is tinted (`--bub`), which is what every light IM does.
+- **A code block sits on a bubble, not on the canvas**, so its hairline needs to be darker than
+  the one used everywhere else — hence `--cbline`, dark's is just `--line`.
+
+**Contrast was measured, not eyeballed** (every text/surface pair actually used, WCAG AA 4.5:1).
+Two existing values failed and were changed: dark `--dim2` was `#6a6a74` (3.3:1 on the sidebar),
+and **white on the accent reads 3.2:1** — so there is now `--onacc`, near-black in dark and white
+in light. Dark's dimmest kept is 4.56:1, light's 4.70:1.
+
+### The rail
+
+Collapsing animates **one number**, the aside's width (308 → 72). Everything inside keeps its
+308px layout and is clipped, so no row reflows mid-animation: the labels fade, the avatars do not
+move. **72px is not arbitrary** — at 8px list padding + 9px (web) / 11px (Flutter) row padding,
+the avatar is *already* centred in a 72px rail, so collapsing moves nothing at all.
+
+- The top row is two layers cross-faded, each **pinned to the width it belongs to** so neither
+  drifts while the aside animates.
+- **Collapsed, the selection is a ring on the avatar**, not a row background — a row-wide
+  highlight is just a band cut off by the rail's edge. `box-shadow` / `BoxShadow` costs no layout.
+- The rail's magnifier expands the sidebar and focuses the real search box. A search field you
+  cannot type in is a dead control.
+- Ctrl/⌘+B toggles it. On the web it is skipped while the Agent's browser is open, where Ctrl+B
+  belongs to their page; in the client that view is a pushed route, so it is out of the subtree.
+
+**Pitfalls, all hit:**
+
+- **`.convs` scrolls, so a tooltip inside a row is clipped by it.** One `position:fixed` tip for
+  the whole rail, positioned from `getBoundingClientRect()`. Not `title=`: that never shows on
+  keyboard focus, and collapsed the name is the only thing left to identify a row by.
+- **A bare text node never fades** — the fade rule selects `.fitem > span`. "Cirraya" stayed
+  visible in the rail until it was wrapped.
+- **The theme icon has to render.** `◐` comes out as a smudge on a box without that glyph; it is
+  two CSS shapes now (a bordered circle plus a half-fill gradient).
+- **Flutter: Material's hit targets are 48px and two do not fit a 72px rail.** `PopupMenuButton`
+  with `child:` sizes to what you give it; with `icon:` it does not. The symptom was a full-height
+  `RIGHT OVERFLOWED` stripe **with nothing in the app's stdout** — the Dart error goes to the VM
+  service, so look at the pixels, not the log.
+
+### Flutter specifics
+
+- `C.*` are **getters over a current palette**, set by the app root in `build`. The consequence:
+  **a widget reading one of them must not be `const`**, or Flutter reuses the canonical instance
+  and it never repaints on a theme change. 68 `const`s came off; the analyzer lists every one.
+- **Read the system brightness with `MediaQuery.platformBrightnessOf(context)`**, not
+  `PlatformDispatcher.instance` — `runApp`'s `View` provides the MediaQuery, so the dependency is
+  real (live updates, no observer) *and* a test can override it. The observer version passed
+  analysis, worked in production, and was untestable.
+- **A `testWidgets` in a file whose other tests talk to a real `HttpServer` breaks them**: it
+  installs the fake-async binding for the whole file. Hence `test/sidebar_test.dart`.
+- Widget tests need a real surface (`tester.view.physicalSize`); a faked `MediaQuery` over the
+  default 800x600 makes three columns overflow and buries the actual failure. And a second
+  `pumpWidget` of the same page **reuses the State** unless you change the key.
+
+Both reduced-motion settings are honoured (`prefers-reduced-motion` → `--dur: 0ms`;
+`MediaQuery.disableAnimations` → `Duration.zero`): the end state, with no travel through it.
+`test/sidebar_test.dart` asserts the width is *between* the two at 100ms — a before/after check
+would pass on a version with no transition at all.
+
 ## 3. What runs now
 
 ```bash
