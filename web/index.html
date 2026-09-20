@@ -177,6 +177,8 @@
   .s2mem textarea{background:#151519;border:1px solid var(--line);border-radius:9px;color:var(--ink);
                   font:12.5px/1.6 ui-monospace,Menlo,monospace;padding:9px 11px;height:150px;resize:none;outline:none}
   .s2mem .row{display:flex;gap:8px;align-items:center}
+  #smem{display:flex;flex-direction:column;gap:7px;border-top:1px solid var(--line);padding-top:11px}
+  #smem textarea{height:105px}
   .btn{background:#2f2f37;border-radius:8px;padding:6px 12px;font-size:12.5px;color:var(--ink)}
   .btn:hover{background:#3a3a44}
   .btn.pri{background:var(--accent);color:#fff}
@@ -283,6 +285,12 @@
     <small id="memtitle" data-i18n="mem.title"></small>
     <textarea id="mem" data-i18n-placeholder="mem.agentPh"></textarea>
     <div class="row"><button class="btn" id="msave" data-i18n="common.save"></button><small id="mstat"></small></div>
+    <div id="smem">
+      <small id="smemtitle" data-i18n="smem.head"></small>
+      <small data-i18n="smem.note"></small>
+      <textarea id="smemta" data-i18n-placeholder="smem.ph"></textarea>
+      <div class="row"><button class="btn" id="smsave" data-i18n="common.save"></button><small id="smstat"></small></div>
+    </div>
     <div class="row"><button class="btn" id="xexp" data-i18n="s2.exportChat"></button><button class="btn" id="ximp" data-i18n="common.import"></button>
       <input type="file" id="xfile" accept="application/json,.json" hidden></div>
   </div>

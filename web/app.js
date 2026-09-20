@@ -543,24 +543,35 @@ $('#pdel').onclick = async () => {
 
 // ═══ Memory: the Agent's own in a DM, the group's in a group ═══
 const memPath = c => `/api/memory/${c.kind === 'group' ? 'group' : 'agent'}/${c.id}`
+// The Agent's self-notes are a second, separate box below it: he writes them, a human may edit
+// them, and there is no such thing for a group — only a person writes a group's memory.
+const selfPath = c => `/api/memory/agent/${c.id}/self`
+const stillOpen = c => cur?.kind === c.kind && cur.id === c.id
 async function loadMemory(c) {
   $('#memtitle').textContent = c.kind === 'group'
     ? t('mem.groupTitle', { name: c.name }) : t('mem.agentTitle', { name: c.name })
   $('#mem').placeholder = t(c.kind === 'group' ? 'mem.groupPh' : 'mem.agentPh')
   $('#mem').value = ''; $('#mstat').textContent = ''
+  $('#smemta').value = ''; $('#smstat').textContent = ''
+  $('#smem').style.display = c.kind === 'group' ? 'none' : ''
+  $('#smemtitle').textContent = t('smem.title', { name: c.name })
   const r = await fetch(api(memPath(c))).catch(() => null)
-  if (r?.ok && cur?.kind === c.kind && cur.id === c.id) $('#mem').value = (await r.json()).text
+  if (r?.ok && stillOpen(c)) $('#mem').value = (await r.json()).text
+  if (c.kind === 'group') return
+  const s = await fetch(api(selfPath(c))).catch(() => null)
+  if (s?.ok && stillOpen(c)) $('#smemta').value = (await s.json()).text
 }
 $('#cadd').onclick = () => { $('#side2').classList.remove('hide'); $('#mem').focus() }
-$('#msave').onclick = async () => {
-  if (!cur) return
-  $('#mstat').textContent = t('common.saving')
-  const r = await fetch(api(memPath(cur)), { method:'PUT', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ text: $('#mem').value }) }).catch(() => null)
-  if (!r?.ok) { $('#mstat').textContent = t('mem.failed', { msg: r ? await errText(r) : t('mem.offline') }); return }
-  $('#mstat').textContent = t('mem.saved', { time: new Date().toLocaleTimeString(lang) })
-  setTimeout(() => $('#mstat').textContent = '', 4000)
+const saveMem = async (path, box, stat) => {
+  $(stat).textContent = t('common.saving')
+  const r = await fetch(api(path), { method:'PUT', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ text: $(box).value }) }).catch(() => null)
+  if (!r?.ok) { $(stat).textContent = t('mem.failed', { msg: r ? await errText(r) : t('mem.offline') }); return }
+  $(stat).textContent = t('mem.saved', { time: new Date().toLocaleTimeString(lang) })
+  setTimeout(() => $(stat).textContent = '', 4000)
 }
+$('#msave').onclick = () => cur && saveMem(memPath(cur), '#mem', '#mstat')
+$('#smsave').onclick = () => cur && cur.kind !== 'group' && saveMem(selfPath(cur), '#smemta', '#smstat')
 
 // ═══ Chat history import / export (current conversation) ═══
 const xPath = (op, c) => `/api/${op}/${c.kind === 'group' ? 'group' : 'dm'}/${c.id}`

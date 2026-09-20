@@ -1305,6 +1305,37 @@ docs say 66hxhx has a fixed overhead of about 4000 tokens per call), which fight
 request works perfectly on muskapi's claude-haiku-4-5.** When judging "is the feature broken", try
 another upstream first; don't change code to suit this relay.
 
+## 2.24 Self-learning: an agent writes its own memory (2026-09-20)
+
+Same idea as `save_skill`, for facts instead of procedures: the `remember` tool, one short fact per call.
+
+- **Two separate stores, and that separation is the whole point**: `memory:agent:<id>` stays
+  human-only (the existing right-panel box), `memory:agent:<id>:self` is the only thing an agent can
+  write. An agent can never touch what a person wrote for it, never a group's memory, never another
+  agent's — `rememberFromAgent` takes `ctx.bot` and there is no second write path
+- Both go into the system prompt; the self-notes say so plainly: *"you wrote these, they may be wrong
+  or out of date — when you can check something, trust what you check over what is written here."*
+  An agent's own notes are not evidence
+- **Cap 4000 characters / 40 lines, oldest dropped first, and the tool result names the lines it
+  dropped.** An agent that silently forgot something is worse than one that never remembered it.
+  Duplicates (trimmed, case-insensitive) are not stored twice — a fact restated every session would
+  otherwise eat the cap on its own
+- The logic is pure in `web/memory.mjs` (`node web/memory.mjs` self-test); db.mjs only stores
+- API `GET/PUT /api/memory/agent/<id>/self`, a second box in the right panel of a DM (never for a
+  group). A human can edit or clear what an agent wrote — that box is the only place anyone sees it
+- **Verified on the real deployment, artifact first**: the agent called `remember`, the line landed
+  in `memory:agent:chief:self` while `memory:agent:chief` kept its sentinel; a fact put only in the
+  notes and never said in the chat came back correctly in a later turn; seeding 40 notes and adding
+  one dropped exactly `Fact 01` and said so; restating a stored fact answered "already in your notes";
+  in a group the fact landed on the speaker's own key and nowhere else
+
+**Fixed along the way (client, pre-existing):** `Api._send` mapped a fixed list of exceptions to
+`ApiException`, and the "connection closed, retry once" branch had its own **shorter** list. So
+`StateError: Client is closed` — `dispose()` running while a best-effort load (memory, routines,
+skills) was in flight — escaped every `on ApiException` catch in the app. The retry now falls through
+to the one list, and `StateError` is on it. **Two catch lists for the same call always drift, and the
+shorter one is where failures escape.**
+
 ## 3. What runs now
 
 ```bash
@@ -1313,6 +1344,7 @@ docker compose logs -f app
 node web/model.mjs         # self-test for context budgeting / window inference
 node web/schedule.mjs      # self-test for scheduled-task time computation
 node web/skill.mjs         # self-test for SKILL.md read/write
+node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/

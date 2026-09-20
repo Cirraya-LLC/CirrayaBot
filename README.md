@@ -118,6 +118,7 @@ it into the database, and also moves over the groups and chat history of an old 
 ```bash
 node web/model.mjs        # self-test for context budgeting and window inference
 node web/i18n.mjs         # self-test for the server message tables
+node web/memory.mjs       # self-test for an agent's self-notes (cap, duplicates)
 python3 check-bots.py     # check the seed definitions in bots/
 ```
 

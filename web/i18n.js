@@ -87,6 +87,14 @@ const M = {
   'mem.failed': ['Not saved: {msg}', '没保存上：{msg}', '沒有儲存成功：{msg}'],
   'mem.offline': ['Cannot reach the server', '连不上服务器', '無法連線到伺服器'],
   'mem.saved': ['Saved {time}', '已保存 {time}', '已儲存 {time}'],
+  'smem.head': ['Self-notes', '自己记下的', '自己記下的'],
+  'smem.title': ['What {name} remembers', '{name} 自己记下的', '{name} 自己記下的'],
+  'smem.note': ['They wrote these themselves with the remember tool. You can edit or clear them.',
+                '这些是他自己用 remember 工具记下来的，你可以修改或清空。',
+                '這些是他自己用 remember 工具記下來的，你可以修改或清空。'],
+  'smem.ph': ['Nothing yet — they add a line here when something is worth keeping',
+              '还没有 — 遇到值得记住的事，他会自己往这里加一行',
+              '還沒有 — 遇到值得記住的事，他會自己往這裡加一行'],
 
   // import / export
   'x.notJson': ['This file is not JSON', '这个文件不是 JSON', '這個檔案不是 JSON'],

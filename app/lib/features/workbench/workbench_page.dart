@@ -38,10 +38,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   final _search = TextEditingController();
   final _scroll = ScrollController();
   final _memory = TextEditingController();
+  final _selfMemory = TextEditingController();
   final _scaffold = GlobalKey<ScaffoldState>();
   bool _rightOpen = true;
   String _memoryStatus = '';
   String? _memoryShownFor;
+  String _selfMemoryStatus = '';
+  String? _selfMemoryShownFor;
 
   // @ autocomplete: the group members matching what's typed after the @.
   List<Agent> _mentions = const [];
@@ -83,6 +86,11 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       _memory.text = bench.memory;
       _memoryStatus = '';
     }
+    if (bench.selfMemoryFor != _selfMemoryShownFor) {
+      _selfMemoryShownFor = bench.selfMemoryFor;
+      _selfMemory.text = bench.selfMemory;
+      _selfMemoryStatus = '';
+    }
     setState(() {});
   }
 
@@ -110,6 +118,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     _search.dispose();
     _scroll.dispose();
     _memory.dispose();
+    _selfMemory.dispose();
     super.dispose();
   }
 
@@ -904,6 +913,59 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 11, color: C.dim),
                   ),
+                ],
+                // The Agent's own notes: a second, separate store he writes with
+                // the remember tool. Not for groups — only a person writes a
+                // group's memory.
+                if (c != null && !c.isGroup) ...[
+                  const SizedBox(height: 14),
+                  const Divider(height: 1),
+                  const SizedBox(height: 10),
+                  Text(
+                    tr('wb.selfMemory', {'name': c.name}),
+                    style: const TextStyle(fontSize: 11, color: C.dim),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    tr('wb.selfMemoryNote'),
+                    style: const TextStyle(fontSize: 10.5, color: C.dim2, height: 1.5),
+                  ),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _selfMemory,
+                    onChanged: (_) {
+                      if (_selfMemoryStatus.isNotEmpty) setState(() => _selfMemoryStatus = '');
+                    },
+                    maxLines: 4,
+                    minLines: 4,
+                    decoration: InputDecoration(hintText: tr('wb.selfMemoryHint')),
+                    style: const TextStyle(fontSize: 12, height: 1.5),
+                  ),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      onPressed: () async {
+                        String status;
+                        try {
+                          await bench.saveSelfMemory(_selfMemory.text);
+                          status = tr('wb.saved');
+                        } on ApiException catch (e) {
+                          status = tr('wb.notSaved', {'msg': e.message});
+                        }
+                        if (!mounted) return;
+                        setState(() => _selfMemoryStatus = status);
+                      },
+                      child: Text(tr('common.save')),
+                    ),
+                  ),
+                  if (_selfMemoryStatus.isNotEmpty)
+                    Text(
+                      _selfMemoryStatus,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: C.dim),
+                    ),
                 ],
               ],
             ),
