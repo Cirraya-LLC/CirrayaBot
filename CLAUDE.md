@@ -1336,6 +1336,45 @@ skills) was in flight — escaped every `on ApiException` catch in the app. The 
 to the one list, and `StateError` is on it. **Two catch lists for the same call always drift, and the
 shorter one is where failures escape.**
 
+## 2.25 Spending: recorded, priced, capped (2026-09-20)
+
+Before this nothing counted tokens or money: a routine looping unattended with tools could
+burn a night's budget in silence, and the only way to find out was the upstream's own bill.
+
+- **Every model call leaves one row** in `usage` (agent, scope+scope_id like `messages`,
+  provider, model, prompt/completion tokens, `cost_micro`, `estimated`). A turn that uses
+  tools is a dozen calls, so a dozen rows. The insert is **fire-and-forget** (the reply is
+  still streaming), and a row that cannot be written is logged — lost is allowed, silent is not.
+- **All three protocols report usage without asking for it** (measured on the real relays,
+  2026-09-20): chat on a final chunk whose `choices` is `[]`; responses on
+  `response.completed` → `response.usage`; messages splits it — `message_start` has the
+  prompt (**plus cache_read/cache_creation, which are prompt tokens too**), `message_delta`
+  the completion. ⚠️ **Don't add `stream_options: {include_usage: true}` to chat**: the
+  relay already sends usage without it, and the request with it hung for 90s.
+- **An upstream that reports nothing is estimated**, never recorded as 0 — `estimateUsage`
+  in model.mjs, the same counting the context budget uses, with `estimated = true` on the row.
+- **Prices live on the upstream** (`price_in_micro` / `price_out_micro`, micro-dollars per
+  million tokens). **Empty = unknown, stored as null**, and unknown must never render as
+  `$0.00`: the UI shows `—` plus a line saying why. Money is an integer (micro-dollars,
+  1 dollar = 1e6) everywhere including the API; only the screen divides.
+- **The cap is checked before EVERY model call** in `runAgent`, not once per turn — a turn
+  using tools is a dozen calls and the cap exists to stop the dozenth. `agents.daily_cap_micro`,
+  falling back to the platform default in `settings`. "Today" is midnight in the **server's**
+  timezone (`date_trunc('day', now())`).
+- **An unpriced upstream cannot be capped** — there is nothing to measure. The UI says so
+  in the agent editor and the spend panel instead of letting a number there look like a guard.
+- **A routine that hits the cap is not a failure**: `last_status='capped'`, the reason in
+  `last_error`, `failures` untouched — otherwise a cap would disable the task it only meant
+  to pause. The flag travels as `capped: true` on the stream's `error` event.
+- **The sidebar total sums the raw rows, not the per-agent list**: spend by an agent deleted
+  mid-month was still spent, and a month total that quietly shrinks is the lie this feature exists to stop.
+
+`GET /api/usage` answers both the sidebar footer and the open conversation's panel in one call
+(it is polled every 15s). `PUT /api/usage/cap` sets the platform default.
+
+**Left deliberately**: no per-turn or per-routine cap (daily only), no history screen (the rows
+are there, nobody has asked to browse them), no retention — `usage` grows one row per call.
+
 ## 3. What runs now
 
 ```bash
@@ -1359,8 +1398,8 @@ built-in web UI, **not part of the product**, kept only for the record.
 
 1. **Plug in the dsh runtime** to replace our own agent loop, gaining bwrap/Landlock sandboxing, session
    persistence and approvals (see 2.9.x)
-2. **Per-Agent spending cap** — the gap none of the five open-source options filled.
-   The `messages` table is already there; what's missing is recording each round's token counts
+2. ~~**Per-Agent spending cap**~~ **done 2026-09-20, see 2.25** — usage rows, per-upstream
+   prices, and a daily cap checked before every model call
 3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)
 4. Event triggers for scheduled tasks, browser via MCP, a skill marketplace (v1 of scheduled tasks 2.21,
    browser 2.22 and skill library 2.23 are done)

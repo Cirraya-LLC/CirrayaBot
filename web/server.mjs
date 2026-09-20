@@ -40,6 +40,8 @@ const modelSpeaker = s => (s === USER_SPEAKER ? 'User' : s)
 const toBot = (r, lang = 'en') => ({
   id: r.id, name: r.name, description: r.description, persona: r.persona,
   order: r.ord, color: r.color, provider_id: r.provider_id ?? '', model: r.model ?? '',
+  // Money is micro-dollars everywhere in the API (1 dollar = 1e6); null = no cap of its own.
+  daily_cap_micro: r.daily_cap_micro == null ? null : Number(r.daily_cap_micro),
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
   tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
@@ -468,6 +470,51 @@ async function runTool(name, args, ctx) {
   return `Unknown tool ${name}`
 }
 
+// ---------- what it costs ----------
+// Every model call leaves a row, and every call is checked against the agent's daily cap
+// first. Without this a routine looping unattended can spend a night's budget in silence.
+
+/** Micro-dollars as a person reads them. Small amounts need more decimals or they all show as $0.00. */
+const money = m => '$' + (Number(m) / db.MICRO).toFixed(Math.abs(Number(m)) < 10_000 ? 4 : 2)
+
+/** This agent's cap: its own, else the platform default. null = uncapped. */
+async function capFor(bot) {
+  if (bot.daily_cap_micro != null) return Number(bot.daily_cap_micro)
+  const d = await db.defaultCap()
+  return d == null ? null : Number(d)
+}
+
+/**
+ * Refuse the turn when today's spend is already at the cap. Checked before EVERY model call,
+ * not once per turn: a turn using tools is a dozen calls, and the cap is meant to stop the
+ * dozenth. An upstream with no prices can't be measured, so it can't be capped — the UI says
+ * so next to the field instead of letting people think a cap is guarding them.
+ */
+async function checkCap(bot, p) {
+  if (!db.isPriced(p)) return
+  const cap = await capFor(bot)
+  if (cap == null) return
+  const spent = await db.spentToday(bot.id)
+  if (spent < cap) return
+  throw Object.assign(new Say('spend.capped', { name: bot.name, cap: money(cap), spent: money(spent) }, 402),
+    { capped: true })
+}
+
+/**
+ * Write down what a call cost. Deliberately not awaited: the reply is still streaming and a
+ * database round-trip per step would be felt. A row that cannot be written is logged — it may
+ * be lost, but never silently.
+ */
+function noteUsage(ctx, p, usage) {
+  if (!usage) return
+  db.recordUsage({
+    agent_id: ctx.bot.id, scope: ctx.scope ?? 'dm', scope_id: ctx.scopeId ?? ctx.bot.id,
+    provider_id: p.id ?? '', model: p.model ?? '',
+    prompt_tokens: usage.prompt, completion_tokens: usage.completion,
+    cost_micro: db.costOf(p, usage.prompt, usage.completion), estimated: usage.estimated === true,
+  }).catch(e => console.error(`usage row lost for ${ctx.bot.id}:`, e.message))
+}
+
 /** Call the model once. Protocol translation and stream parsing live in protocols.mjs; here we only decide whether to send tools. */
 function callModel(p, messages, onDelta, { bare = false, signal } = {}) {
   return callUpstream(p, messages, CFG.tools && !bare ? TOOL_SPECS : null, onDelta, signal)
@@ -489,6 +536,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
   const lang = ctx.lang ?? 'en'
   let text = ''
   for (let step = 0; step < MAX_STEPS; step++) {
+    await checkCap(ctx.bot, p)
     const fit = fitContext(messages, p.context_tokens)
     if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
     // Retry. Relay gateways hit bad channels at random (200 then an error inside the stream), and in a group chat
@@ -513,7 +561,8 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       }
     }
     if (!r) { step--; continue }
-    const { content, calls } = r
+    const { content, calls, usage } = r
+    noteUsage(ctx, p, usage)
     if (content) text = content
     if (!calls.length) return text
 
@@ -601,7 +650,7 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
     const full = await runAgent(p,
       [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id)) },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang })
+      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id })
     await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
     return full
   })
@@ -617,7 +666,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
         ? { role: 'assistant', content: e.content }                                   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang })
+    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId })
   })
 }
 
@@ -679,7 +728,7 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
             t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, 400) }),
             gid, signal, lang)
         } catch (e) {
-          emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300) })
+          emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
           break
         }
         await db.addMessage('group', gid, { role: 'assistant', speaker: speaker.name, content: reply })
@@ -697,7 +746,7 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
       }
     }
   } catch (e) {
-    emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300) })
+    emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
   }
 }
 
@@ -733,7 +782,7 @@ async function runRoutine(r) {
   if (routineRunning.has(r.id)) return false
   routineRunning.add(r.id)
   const startedAt = Date.now()
-  let error = ''
+  let error = '', capped = false
   try {
     const { bots, groupId } = await resolveTarget(r.target_kind, r.target_id)
     const providers = new Map()
@@ -741,7 +790,8 @@ async function runRoutine(r) {
     // The opening line tells the agent this isn't a human talking live, so the result must be written out for when they come back
     const text = `[Scheduled task "${r.name}", sent automatically — nobody is watching live. When you're done, write up the result clearly.]\n${r.prompt}`
     await converse(bots, groupId, providers, text,
-      (ev, d) => { if (ev === 'error' && !error) error = d.message }, new AbortController().signal)
+      (ev, d) => { if (ev === 'error' && !error) { error = d.message; capped = d.capped === true } },
+      new AbortController().signal)
   } catch (e) {
     error = errorText(e, 'en').slice(0, 300)
   } finally {
@@ -750,12 +800,14 @@ async function runRoutine(r) {
   // Re-read it: someone may have edited it during these minutes (changed the time, paused it); those edits must not be overwritten here
   const cur = await db.getRoutine(r.id)
   if (!cur) return true
-  const failures = error ? cur.failures + 1 : 0
+  // Hitting the spend cap is not the task misbehaving — the reason is recorded, but it must not
+  // count towards the crash-loop counter, or a cap would disable the task it was only meant to pause.
+  const failures = capped ? cur.failures : error ? cur.failures + 1 : 0
   const tripped = failures >= MAX_ROUTINE_FAILURES
-  await db.saveRoutine({ ...cur, last_run_at: startedAt, last_status: error ? 'failed' : 'ok',
+  await db.saveRoutine({ ...cur, last_run_at: startedAt, last_status: capped ? 'capped' : error ? 'failed' : 'ok',
     last_error: tripped ? tr('en', 'routine.tripped', { n: failures, error }) : error,
     failures, enabled: cur.enabled && !tripped })
-  if (error) console.log(`Scheduled task "${r.name}" failed: ${error}`)
+  if (error) console.log(`Scheduled task "${r.name}" ${capped ? 'stopped at the spend cap' : 'failed'}: ${error}`)
   return true
 }
 
@@ -807,6 +859,9 @@ async function checkRoutine(b, cur = null) {
 // api_key never goes back to the browser; we only say whether it's set and what its tail is.
 const safeProvider = (p, lang = 'en') => ({
   id: p.id, name: p.name, base_url: p.base_url, protocol: p.protocol,
+  // Prices per million tokens, micro-dollars. null = never set, so calls here cost "unknown", not 0.
+  price_in_micro: p.price_in_micro == null ? null : Number(p.price_in_micro),
+  price_out_micro: p.price_out_micro == null ? null : Number(p.price_out_micro),
   context_tokens: p.context_tokens, auto_context: p.auto_context,
   ctx_source: tr(lang, p.auto_context ? 'provider.ctxAuto' : 'provider.ctxManual'), is_default: p.is_default,
   key_hint: p.api_key ? `••••${p.api_key.slice(-4)}` : '',
@@ -837,6 +892,19 @@ async function providerFor(bot) {
   if (!base) throw new Say('provider.gone', { name: bot.name })
   if (!bot.model) throw new Say('provider.noModel', { name: bot.name })
   return { ...base, model: bot.model, context_tokens: await contextFor(base, bot.model) }
+}
+
+/**
+ * A price field from a form: a number in micro-dollars per million tokens, or null when the
+ * box is empty. Empty means "we were never told", which is not the same as free — calls on
+ * such an upstream record tokens with no cost, and cannot be capped.
+ */
+function priceField(v, fallback) {
+  if (v === undefined) return fallback ?? null
+  if (v === null || v === '') return null
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0) throw new Say('spend.badPrice')
+  return Math.round(n)
 }
 
 /** Save an upstream. Auto = probe per agent's chosen model at chat time; manual = every model on this upstream uses the number given. */
@@ -923,6 +991,12 @@ async function checkAgent(b, selfId = null) {
     const pid = str(b.provider_id).trim()
     if (pid && !await db.getProvider(pid)) throw new Say('err.noProvider')
     out.provider_id = pid
+  }
+  // Micro-dollars, or null for "no cap of its own" (then the platform default applies).
+  if (b.daily_cap_micro !== undefined) {
+    const v = b.daily_cap_micro
+    if (v !== null && v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) throw new Say('spend.badCap')
+    out.daily_cap_micro = v === null || v === '' ? null : Math.round(Number(v))
   }
   if (b.model !== undefined || !selfId) {
     const model = str(b.model).trim()
@@ -1136,6 +1210,46 @@ const server = createServer(async (req, res) => {
       if (!rm[2] && req.method === 'DELETE') { await db.deleteRoutine(cur.id); return send(200, { ok: true }) }
     }
 
+    // ---- Spending ----
+    // One call answers both the sidebar total and the open conversation's panel: it polls
+    // every 15s, and two endpoints would be two round-trips for one screen.
+    if (url.pathname === '/api/usage' && req.method === 'GET') {
+      const [rows, agents, providers, fallback] = await Promise.all([
+        db.spendSummary(), db.listAgents(), db.listProviders(), db.defaultCap()])
+      const byId = new Map(rows.map(r => [r.agent_id, r]))
+      const def = providers.find(p => p.is_default) ?? providers[0] ?? null
+      const zero = { tokens: 0, cost_micro: 0, calls: 0, unpriced: 0 }
+      const per = agents.map(a => {
+        const p = (a.provider_id ? providers.find(x => x.id === a.provider_id) : def) ?? null
+        const u = byId.get(a.id)
+        return { id: a.id, name: a.name,
+          day: u?.day ?? zero, month: u?.month ?? zero,
+          // The cap actually in force, and whether it can be enforced at all.
+          cap_micro: a.daily_cap_micro != null ? Number(a.daily_cap_micro) : (fallback == null ? null : Number(fallback)),
+          own_cap: a.daily_cap_micro != null,
+          priced: db.isPriced(p) }
+      })
+      // The total sums the raw rows, not the per-agent list: spend by an agent deleted
+      // mid-month was still spent, and a month total that quietly shrinks is the kind of
+      // lie this whole feature exists to prevent.
+      const add = k => rows.reduce((t, a) => ({
+        tokens: t.tokens + a[k].tokens,
+        cost_micro: t.cost_micro + (a[k].cost_micro ?? 0),
+        calls: t.calls + a[k].calls,
+        unpriced: t.unpriced + a[k].unpriced,
+      }), { ...zero })
+      return send(200, { agents: per, day: add('day'), month: add('month'),
+        default_cap_micro: fallback == null ? null : Number(fallback) })
+    }
+    // The platform-wide daily cap, for every agent that has none of its own.
+    if (url.pathname === '/api/usage/cap' && req.method === 'PUT') {
+      const v = (await readBody(req)).daily_cap_micro
+      if (v !== null && v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) return send(400, { error: t('spend.badCap') })
+      const micro = v === null || v === '' ? null : Math.round(Number(v))
+      await db.setDefaultCap(micro)
+      return send(200, { default_cap_micro: micro })
+    }
+
     // ---- Model upstreams ----
     if (url.pathname === '/api/providers' && req.method === 'GET')
       return send(200, (await db.listProviders()).map(p => safeProvider(p, lang)))
@@ -1153,6 +1267,7 @@ const server = createServer(async (req, res) => {
         id: 'p' + Date.now().toString(36), name: b.name.trim(), base_url: base,
         api_key: b.api_key ?? '', model: '', is_default: first,
         protocol: normProtocol(b.protocol),
+        price_in_micro: priceField(b.price_in_micro), price_out_micro: priceField(b.price_out_micro),
       }, { auto: b.auto_context !== false, tokens: b.context_tokens })
       return send(200, safeProvider(row, lang))
     }
@@ -1171,6 +1286,8 @@ const server = createServer(async (req, res) => {
         protocol: b.protocol ? normProtocol(b.protocol) : cur.protocol,
         // Empty key = leave the old one. Otherwise every rename would mean pasting the key again.
         api_key: b.api_key ? b.api_key : cur.api_key,
+        price_in_micro: priceField(b.price_in_micro, cur.price_in_micro),
+        price_out_micro: priceField(b.price_out_micro, cur.price_out_micro),
       }, { auto: b.auto_context ?? cur.auto_context, tokens: b.context_tokens ?? cur.context_tokens })
       return send(200, safeProvider(row, lang))
     }

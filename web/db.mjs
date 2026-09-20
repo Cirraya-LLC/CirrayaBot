@@ -124,6 +124,32 @@ create table if not exists skills (
   updated_at  timestamptz not null default now()
 );
 create unique index if not exists skills_name_idx on skills (lower(name));
+
+-- What every model call cost. One row per call, so a turn that used tools leaves several.
+-- cost_micro is null when the upstream has no prices: "we don't know" and "it was free"
+-- are different answers, and a 0 here would quietly become a 0 on the bill.
+-- estimated = the upstream reported no token counts and we counted them ourselves.
+create table if not exists usage (
+  id                bigserial primary key,
+  at                timestamptz not null default now(),
+  agent_id          text not null,
+  scope             text not null check (scope in ('dm','group')),
+  scope_id          text not null,
+  provider_id       text not null default '',
+  model             text not null default '',
+  prompt_tokens     int  not null default 0,
+  completion_tokens int  not null default 0,
+  cost_micro        bigint,
+  estimated         bool not null default false
+);
+create index if not exists usage_agent_idx on usage (agent_id, at);
+
+-- Prices per million tokens, in micro-dollars ($3/M = 3000000). Null = we were never told,
+-- so calls on this upstream record tokens with no cost and cannot be capped.
+alter table providers add column if not exists price_in_micro  bigint;
+alter table providers add column if not exists price_out_micro bigint;
+-- Daily spend cap, micro-dollars. Null = fall back to the platform default in settings.
+alter table agents add column if not exists daily_cap_micro bigint;
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -157,16 +183,17 @@ export async function getAgent(id) {
 
 export async function upsertAgent(a) {
   const { rows } = await q(`
-    insert into agents (id, name, description, persona, ord, color, provider_id, model)
-    values ($1,$2,$3,$4,$5,$6,$7,$8)
+    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
-      provider_id = excluded.provider_id, model = excluded.model
+      provider_id = excluded.provider_id, model = excluded.model,
+      daily_cap_micro = excluded.daily_cap_micro
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
-     a.provider_id || null, a.model ?? ''])
+     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null])
   return rows[0]
 }
 
@@ -365,17 +392,19 @@ export async function activeProvider() {
 
 export async function saveProvider(p) {
   const { rows } = await q(`
-    insert into providers (id, name, base_url, api_key, model, context_tokens, auto_context, ctx_source, is_default, protocol)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    insert into providers (id, name, base_url, api_key, model, context_tokens, auto_context, ctx_source, is_default, protocol,
+                           price_in_micro, price_out_micro)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
     on conflict (id) do update set
       name = excluded.name, base_url = excluded.base_url, api_key = excluded.api_key,
       model = excluded.model, context_tokens = excluded.context_tokens,
       auto_context = excluded.auto_context, ctx_source = excluded.ctx_source,
-      protocol = excluded.protocol
+      protocol = excluded.protocol,
+      price_in_micro = excluded.price_in_micro, price_out_micro = excluded.price_out_micro
     returning *`,
     [p.id, p.name, p.base_url, p.api_key ?? '', p.model,
      p.context_tokens ?? 128000, p.auto_context ?? true, p.ctx_source ?? '', p.is_default ?? false,
-     p.protocol ?? 'chat'])
+     p.protocol ?? 'chat', p.price_in_micro ?? null, p.price_out_micro ?? null])
   return rows[0]
 }
 
@@ -394,6 +423,70 @@ export async function makeDefault(id) {
 export async function deleteProvider(id) {
   await q('delete from providers where id = $1', [id])
 }
+
+// ---------- spending ----------
+// Money is counted in micro-dollars (1 dollar = 1e6) so it stays an integer everywhere.
+// Prices are per million tokens, also in micro-dollars: $3/M is 3_000_000.
+
+export const MICRO = 1e6
+
+/** Both prices set? Without them nothing on this upstream can be costed, or capped. */
+export const isPriced = p => p?.price_in_micro != null && p?.price_out_micro != null
+
+/** What one call cost, or null when the upstream has no prices — never 0 as a stand-in for "unknown". */
+export function costOf(provider, promptTokens, completionTokens) {
+  if (!isPriced(provider)) return null
+  return Math.round((Number(promptTokens) * Number(provider.price_in_micro) +
+                     Number(completionTokens) * Number(provider.price_out_micro)) / 1e6)
+}
+
+export async function recordUsage(u) {
+  await q(`insert into usage (agent_id, scope, scope_id, provider_id, model,
+                              prompt_tokens, completion_tokens, cost_micro, estimated)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [u.agent_id, u.scope, u.scope_id, u.provider_id ?? '', u.model ?? '',
+     u.prompt_tokens | 0, u.completion_tokens | 0, u.cost_micro ?? null, u.estimated === true])
+}
+
+/**
+ * What this agent has spent since midnight (server time), in micro-dollars.
+ * Only priced calls count: an upstream with no prices cannot be measured, so it
+ * cannot be capped either — the UI says so rather than pretending the number is 0.
+ */
+export async function spentToday(agentId) {
+  const { rows } = await q(
+    `select coalesce(sum(cost_micro), 0)::bigint as spent
+       from usage where agent_id = $1 and at >= date_trunc('day', now())`, [agentId])
+  return Number(rows[0]?.spent ?? 0)
+}
+
+const num = v => (v == null ? null : Number(v))
+
+/** Today and this month, per agent and in total. One query — the sidebar polls this every 15s. */
+export async function spendSummary() {
+  const { rows } = await q(`
+    select agent_id,
+           coalesce(sum(prompt_tokens + completion_tokens) filter (where at >= date_trunc('day', now())), 0)::bigint as day_tokens,
+           sum(cost_micro) filter (where at >= date_trunc('day', now()))::bigint as day_cost,
+           count(*) filter (where at >= date_trunc('day', now()) and cost_micro is null)::int as day_unpriced,
+           count(*) filter (where at >= date_trunc('day', now()))::int as day_calls,
+           coalesce(sum(prompt_tokens + completion_tokens), 0)::bigint as month_tokens,
+           sum(cost_micro)::bigint as month_cost,
+           count(*) filter (where cost_micro is null)::int as month_unpriced,
+           count(*)::int as month_calls
+      from usage where at >= date_trunc('month', now())
+     group by agent_id`)
+  return rows.map(r => ({
+    agent_id: r.agent_id,
+    day:   { tokens: Number(r.day_tokens), cost_micro: num(r.day_cost), calls: r.day_calls, unpriced: r.day_unpriced },
+    month: { tokens: Number(r.month_tokens), cost_micro: num(r.month_cost), calls: r.month_calls, unpriced: r.month_unpriced },
+  }))
+}
+
+// The platform-wide daily cap, used by every agent that has none of its own. Null = no cap.
+const CAP_KEY = 'spend.default_cap_micro'
+export const defaultCap = () => getSetting(CAP_KEY, null)
+export const setDefaultCap = micro => setSetting(CAP_KEY, micro)
 
 // ---------- first-start seed / legacy import ----------
 //

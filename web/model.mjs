@@ -23,6 +23,19 @@ const msgTokens = m => estimateTokens(m.content ?? '') +
   (m.images?.length ?? 0) * 1600                           // roughly one 1280×800 screenshot; estimate high
 
 /**
+ * What a call probably cost, for upstreams that report nothing. Same counting the
+ * context budget uses, so the two never disagree about how big a conversation is.
+ * Marked `estimated` by the caller — an estimate presented as a measurement is worse
+ * than no number at all.
+ */
+export function estimateUsage(messages, content, calls = []) {
+  return {
+    prompt: messages.reduce((n, m) => n + msgTokens(m), 0),
+    completion: estimateTokens(content) + calls.reduce((n, c) => n + estimateTokens(c.name) + estimateTokens(c.args), 0),
+  }
+}
+
+/**
  * Keep messages from the end backwards while they fit.
  * - system (the first) is always kept: it is the persona and the rules; without it the Agent is someone else
  * - an assistant(tool_calls) + tool-result pair is never split: half a pair gets an upstream 400
@@ -129,6 +142,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const pair = [sys, { role: 'assistant', content: null, tool_calls: [{ id: '1' }] }, { role: 'tool', content: 'x' }]
   a(fitContext(pair, 100_000).messages.length === 3, 'leave it alone if it fits')
   a(fitContext([sys, { role: 'tool', content: 'x'.repeat(50_000) }], 3000).messages.length === 1, 'orphan tool is dropped')
+
+  const est = estimateUsage([sys, { role: 'user', content: 'hello there' }], 'hi', [{ name: 'bash', args: '{"command":"ls"}' }])
+  a(est.prompt > 0 && est.completion > estimateTokens('hi'), 'estimate counts the whole prompt and the tool arguments')
 
   a(guessContext('claude-opus-5') === 200_000, 'claude fallback')
   a(guessContext('some-unknown-model') === null, 'unknown means null, never a wild guess')

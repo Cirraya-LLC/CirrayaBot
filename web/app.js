@@ -92,6 +92,7 @@ async function openConv(c) {
     : (c.tag || '')
   $('#in').placeholder = t(c.kind === 'group' ? 'comp.toGroup' : 'comp.toAgent', { name: c.name })
   renderMembers(c)
+  renderSpend(c)
   loadMemory(c)
   loadRoutines()
   loadBotSkills()
@@ -306,6 +307,7 @@ async function send() {
   } catch (e) { if (ticket === shown) note('⚠ ' + (e.message ?? e)) }
   busy = false; $('#send').disabled = false; input.focus()
   CONVS = await (await fetch(api('/api/conversations'))).json(); renderConvs()
+  loadUsage()                                         // the turn just cost something; show it
   // switched away and back mid-reply: the screen shows pre-reply history, reload it
   if (ticket !== shown && cur?.kind === target.kind && cur?.id === target.id) {
     const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id); if (c) openConv(c)
@@ -399,6 +401,11 @@ function editBot(b) {
   $('#bprov').onchange = () => loadModels($('#bprov').value,
     $('#bprov').value === (b?.provider_id ?? '') ? (b?.model ?? '') : '')
   loadModels($('#bprov').value, b?.model ?? '')
+  $('#bcap').value = dollars(b?.daily_cap_micro)
+  // A cap only means something when the upstream has prices; say so rather than let it look guarded.
+  const u = b && spendOf(b.id)
+  $('#bcaphint').textContent = u && !u.priced ? t('sp.unpricedWhy')
+    : USAGE.default_cap_micro != null ? t('sp.capDefault', { cap: money(USAGE.default_cap_micro) }) : ''
   $('#bdel').style.display = b ? '' : 'none'
   $('#bdlg').showModal()
 }
@@ -425,8 +432,10 @@ const chosenModel = () => ($('#bmodel').hidden ? $('#bmodelx').value : $('#bmode
 $('#newbot').onclick = () => editBot(null)
 $('#bcancel').onclick = () => $('#bdlg').close()
 $('#bsave').onclick = async () => {
+  const cap = toMicro($('#bcap').value)
+  if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
-    provider_id:$('#bprov').value, model:chosenModel() }
+    provider_id:$('#bprov').value, model:chosenModel(), daily_cap_micro: cap === '' ? null : cap }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
   const r = bEditing
@@ -491,6 +500,8 @@ function fillProv(p) {
   $('#pproto').value = p?.protocol ?? 'chat'
   $('#pkey').value = ''
   $('#pkey').placeholder = p?.key_hint ? t('p.keySaved', { hint: p.key_hint }) : 'API Key'
+  $('#ppin').value = dollars(p?.price_in_micro)
+  $('#ppout').value = dollars(p?.price_out_micro)
   setCtxMode(p ? (p.auto_context ? 'auto' : 'manual') : 'auto', p?.context_tokens ?? '')
   $('#pdel').style.display = p && PROVS.length > 1 ? '' : 'none'
   hint(p ? (p.auto_context ? p.ctx_source : t('p.ctxTokens', { n: p.context_tokens, src: p.ctx_source })) : '')
@@ -502,6 +513,8 @@ const provBody = () => ({
   protocol: $('#pproto').value,
   api_key: $('#pkey').value,
   auto_context: ctxMode() === 'auto', context_tokens: Number($('#pctxn').value) || undefined,
+  // '' means "not known" and is stored as null — never as a price of zero
+  price_in_micro: toMicro($('#ppin').value), price_out_micro: toMicro($('#ppout').value),
 })
 
 async function loadProvs() {
@@ -509,7 +522,17 @@ async function loadProvs() {
   renderProvs()
 }
 
-$('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null); $('#pdlg').showModal() }
+$('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); $('#pdlg').showModal() }
+$('#pcapsave').onclick = async () => {
+  const micro = toMicro($('#pdefcap').value)
+  if (micro === false) { hint(t('sp.capBad'), 'bad'); return }
+  const r = await fetch(api('/api/usage/cap'), { method:'PUT', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ daily_cap_micro: micro === '' ? null : micro }) })
+  if (!r.ok) { hint((await r.json()).error, 'bad'); return }
+  await loadUsage()
+  hint(t('sp.defaultCap') + ': ' + (micro === '' ? t('sp.noCap') : money(micro)), 'good')
+}
 $('#pclose').onclick = () => $('#pdlg').close()
 $('#pnew').onclick = () => fillProv(null)
 
@@ -524,6 +547,7 @@ $('#ptest').onclick = async () => {
 $('#psave').onclick = async () => {
   const b = provBody()
   if (!b.name || !b.base_url) { hint(t('p.needFields'), 'bad'); return }
+  if (b.price_in_micro === false || b.price_out_micro === false) { hint(t('sp.priceBad'), 'bad'); return }
   hint(t('common.saving'))
   const r = pEditing
     ? await fetch(api(`/api/providers/${pEditing.id}`), { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(b) })
@@ -531,6 +555,7 @@ $('#psave').onclick = async () => {
   const j = await r.json()
   if (!r.ok) { hint(j.error ?? t('p.saveFailed'), 'bad'); return }
   await loadProvs(); fillProv(PROVS.find(p => p.id === j.id) ?? null)
+  await loadUsage()
   hint(t('p.saved', { info: j.auto_context ? j.ctx_source : t('p.ctxShort', { n: j.context_tokens }) }), 'good')
 }
 
@@ -539,6 +564,48 @@ $('#pdel').onclick = async () => {
   const r = await fetch(api(`/api/providers/${pEditing.id}`), { method:'DELETE' })
   if (!r.ok) { hint((await r.json()).error, 'bad'); return }
   await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
+}
+
+// ═══ Spend ═══
+// Money is micro-dollars over the wire (1 dollar = 1e6) so it stays an integer; only the
+// display divides. Small amounts need four decimals or every conversation reads as $0.00.
+let USAGE = { agents: [], day: null, month: null, default_cap_micro: null }
+const money = m => m == null ? '—' : '$' + (m / 1e6).toFixed(Math.abs(m) < 10000 ? 4 : 2)
+const dollars = m => m == null ? '' : String(m / 1e6)
+// '' = leave as is (platform default / unknown); a number = micro-dollars; false = not a number
+const toMicro = v => {
+  const x = String(v ?? '').trim()
+  if (!x) return ''
+  const n = Number(x)
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 1e6) : false
+}
+const tokens = n => n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
+const spendOf = id => USAGE.agents.find(a => a.id === id)
+
+async function loadUsage() {
+  USAGE = await fetch(api('/api/usage')).then(r => r.json()).catch(() => USAGE)
+  $('#spendfoot').firstElementChild.nextElementSibling.textContent =
+    t('sp.footer', { day: money(USAGE.day?.cost_micro ?? 0), month: money(USAGE.month?.cost_micro ?? 0) })
+  if (cur) renderSpend(cur)
+}
+
+/** Per agent in the open conversation: what it spent, and whether a cap can hold it at all. */
+function renderSpend(c) {
+  // `cur` is only {kind,id}; the members live on the conversation row.
+  const full = CONVS.find(x => x.kind === c.kind && x.id === c.id) ?? c
+  const box = $('#spend'); box.innerHTML = ''
+  for (const id of full.kind === 'group' ? (full.members ?? []) : [full.id]) {
+    const u = spendOf(id); if (!u) continue
+    const cap = u.cap_micro == null ? t('sp.noCap')
+      : t(u.own_cap ? 'sp.cap' : 'sp.capDefault', { cap: money(u.cap_micro) })
+    const el = document.createElement('div')
+    el.className = 'spd'
+    el.innerHTML = `${full.kind === 'group' ? `<b>${esc(u.name)}</b> · ` : ''}` +
+      `${esc(t('sp.today'))} <b>${esc(money(u.day.cost_micro))}</b> · ${esc(t('sp.month'))} <b>${esc(money(u.month.cost_micro))}</b>` +
+      `<br>${esc(t('sp.tokens', { n: tokens(u.month.tokens) }))} · ${esc(cap)}` +
+      (u.priced ? '' : `<br><span class="w">${esc(t('sp.unpricedWhy'))}</span>`)
+    box.appendChild(el)
+  }
 }
 
 // ═══ Memory: the Agent's own in a DM, the group's in a group ═══
@@ -843,6 +910,7 @@ function schedText(r) {
 function rtState(r) {
   if (r.running) return `<span class="st run">${esc(t('r.running'))}</span>`
   if (r.last_status === 'failed') return `<span class="st bad" title="${esc(r.last_error)}">${esc(t('r.lastFailed'))}</span>`
+  if (r.last_status === 'capped') return `<span class="st" title="${esc(r.last_error)}">${esc(t('r.lastCapped'))}</span>`
   if (!r.enabled) return `<span class="st">${esc(t('r.paused'))}</span>`
   return ''
 }
@@ -923,6 +991,7 @@ setInterval(async () => {
   CONVS = await fetch(api('/api/conversations')).then(r => r.json()).catch(() => CONVS)
   renderConvs()
   loadRoutines()
+  loadUsage()
   const now = cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)
   if (now && now.at !== before && !busy) drawHistory(now, shown)
 }, 15_000)
@@ -933,6 +1002,7 @@ async function reload() {
     (await fetch(api('/api/conversations'))).json(),
   ])
   renderConvs()
+  await loadUsage()
 }
 
 ;(async () => {

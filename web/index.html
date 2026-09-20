@@ -157,6 +157,9 @@
   #bwfull small{color:var(--dim2);font-size:11.5px}
   /* Scheduled tasks */
   .s2h.sub{border-top:1px solid var(--line);margin-top:8px;padding-top:14px}
+  .spd{padding:2px 18px 6px;font-size:12px;color:var(--dim)}
+  .spd b{color:var(--ink);font-weight:600}
+  .spd .w{color:var(--warn)}
   .rt{display:flex;flex-direction:column;gap:2px;padding:7px 18px;cursor:pointer}
   .rt:hover{background:#212127}
   .rt b{font-size:13px;font-weight:500;display:flex;gap:6px;align-items:center}
@@ -242,6 +245,7 @@
     <button class="fitem" id="skills"><b>✦</b> <span data-i18n="side.skills"></span></button>
     <label class="fitem"><b>🌐</b> <select id="lang" data-i18n-aria-label="common.language"
       style="flex:1;background:none;border:0;color:inherit;font:inherit;outline:none;cursor:pointer"></select></label>
+    <div class="fitem" id="spendfoot" style="cursor:default"><b>$</b> <span></span></div>
     <div class="fitem" style="cursor:default"><b>C</b> Cirraya</div>
   </div>
 </aside>
@@ -273,6 +277,8 @@
   <div class="s2h" data-i18n="s2.members"></div>
   <div id="members"></div>
   <button class="addm" id="addmem"><b>＋</b> <span data-i18n="s2.addMember"></span></button>
+  <div class="s2h sub" data-i18n="s2.spend"></div>
+  <div id="spend"></div>
   <div class="s2h sub" data-i18n="s2.browser"></div>
   <div id="bws"></div>
   <div id="s2skills"><div class="s2h sub" data-i18n="s2.skills"></div>
@@ -376,6 +382,8 @@
     <select id="bmodel" data-i18n-title="b.modelTitle"></select>
     <input type="text" id="bmodelx" data-i18n-placeholder="b.modelPh" autocomplete="off" hidden>
   </div>
+  <input type="text" id="bcap" data-i18n-placeholder="sp.capPh" autocomplete="off">
+  <small class="rhint" id="bcaphint"></small>
   <div class="acts">
     <button class="btn" style="margin-right:auto;color:#e06c75" id="bdel" data-i18n="common.delete"></button>
     <button class="btn" id="bcancel" data-i18n="common.cancel"></button>
@@ -401,6 +409,16 @@
     <label><input type="radio" name="pctx" value="manual"> <span data-i18n="p.ctxManual"></span></label>
     <input type="number" id="pctxn" placeholder="128000" min="2000" step="1000" disabled>
     <button class="btn" id="ptest" data-i18n="p.test"></button>
+  </div>
+  <div class="prow">
+    <input type="text" id="ppin" data-i18n-placeholder="sp.priceIn" autocomplete="off">
+    <input type="text" id="ppout" data-i18n-placeholder="sp.priceOut" autocomplete="off">
+  </div>
+  <small class="rhint" data-i18n="sp.priceHint"></small>
+  <div class="psplit"></div>
+  <div class="prow">
+    <input type="text" id="pdefcap" data-i18n-placeholder="sp.defaultCap" autocomplete="off">
+    <button class="btn" id="pcapsave" data-i18n="common.save"></button>
   </div>
   <small class="phint" id="phint" data-i18n="p.hint"></small>
   <div class="acts">

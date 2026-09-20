@@ -70,6 +70,7 @@ class Agent {
     required this.color,
     this.providerId = '',
     this.model = '',
+    this.dailyCapMicro,
   });
 
   final String id;
@@ -82,6 +83,10 @@ class Agent {
   final String providerId;
   final String model;
 
+  /// Daily spend cap in micro-dollars. null = no cap of its own, so the
+  /// platform default applies.
+  final int? dailyCapMicro;
+
   static Agent fromJson(Map<String, Object?> j) => Agent(
     id: (j['id'] as String?) ?? '',
     name: (j['name'] as String?) ?? '',
@@ -90,6 +95,7 @@ class Agent {
     color: (j['color'] as String?) ?? '',
     providerId: (j['provider_id'] as String?) ?? '',
     model: (j['model'] as String?) ?? '',
+    dailyCapMicro: (j['daily_cap_micro'] as num?)?.toInt(),
   );
 }
 
@@ -216,6 +222,8 @@ class Provider {
     required this.ctxSource,
     required this.isDefault,
     required this.keyHint,
+    this.priceInMicro,
+    this.priceOutMicro,
   });
 
   final String id;
@@ -230,6 +238,14 @@ class Provider {
   final bool isDefault;
   final String keyHint;
 
+  /// Price per million tokens, in micro-dollars. null = never set, so calls on
+  /// this upstream are counted in tokens but have no cost — and no cap can
+  /// hold them.
+  final int? priceInMicro;
+  final int? priceOutMicro;
+
+  bool get priced => priceInMicro != null && priceOutMicro != null;
+
   static Provider fromJson(Map<String, Object?> j) => Provider(
     id: (j['id'] as String?) ?? '',
     name: (j['name'] as String?) ?? '',
@@ -240,7 +256,118 @@ class Provider {
     ctxSource: (j['ctx_source'] as String?) ?? '',
     isDefault: (j['is_default'] as bool?) ?? false,
     keyHint: (j['key_hint'] as String?) ?? '',
+    priceInMicro: (j['price_in_micro'] as num?)?.toInt(),
+    priceOutMicro: (j['price_out_micro'] as num?)?.toInt(),
   );
+}
+
+/// What one agent has spent over a period. [costMicro] is null when the
+/// upstream has no prices: unknown, which is not the same as free.
+class Spend {
+  const Spend({this.tokens = 0, this.costMicro, this.calls = 0, this.unpriced = 0});
+
+  final int tokens;
+  final int? costMicro;
+  final int calls;
+  final int unpriced;
+
+  static Spend fromJson(Map<String, Object?>? j) => j == null
+      ? const Spend()
+      : Spend(
+          tokens: (j['tokens'] as num?)?.toInt() ?? 0,
+          costMicro: (j['cost_micro'] as num?)?.toInt(),
+          calls: (j['calls'] as num?)?.toInt() ?? 0,
+          unpriced: (j['unpriced'] as num?)?.toInt() ?? 0,
+        );
+}
+
+class AgentSpend {
+  const AgentSpend({
+    required this.id,
+    required this.name,
+    required this.day,
+    required this.month,
+    required this.capMicro,
+    required this.ownCap,
+    required this.priced,
+  });
+
+  final String id;
+  final String name;
+  final Spend day;
+  final Spend month;
+
+  /// The cap in force — the agent's own, or the platform default. null = none.
+  final int? capMicro;
+  final bool ownCap;
+
+  /// Whether this agent's upstream has prices. Without them nothing here can
+  /// be costed, so no cap applies either.
+  final bool priced;
+
+  static AgentSpend fromJson(Map<String, Object?> j) => AgentSpend(
+    id: (j['id'] as String?) ?? '',
+    name: (j['name'] as String?) ?? '',
+    day: Spend.fromJson(j['day'] as Map<String, Object?>?),
+    month: Spend.fromJson(j['month'] as Map<String, Object?>?),
+    capMicro: (j['cap_micro'] as num?)?.toInt(),
+    ownCap: (j['own_cap'] as bool?) ?? false,
+    priced: (j['priced'] as bool?) ?? false,
+  );
+}
+
+class Usage {
+  const Usage({this.agents = const [], this.day = const Spend(), this.month = const Spend(), this.defaultCapMicro});
+
+  final List<AgentSpend> agents;
+  final Spend day;
+  final Spend month;
+  final int? defaultCapMicro;
+
+  AgentSpend? of(String id) {
+    for (final a in agents) {
+      if (a.id == id) return a;
+    }
+    return null;
+  }
+
+  static Usage fromJson(Map<String, Object?> j) => Usage(
+    agents: [
+      for (final a in (j['agents'] as List?) ?? const [])
+        if (a is Map<String, Object?>) AgentSpend.fromJson(a),
+    ],
+    day: Spend.fromJson(j['day'] as Map<String, Object?>?),
+    month: Spend.fromJson(j['month'] as Map<String, Object?>?),
+    defaultCapMicro: (j['default_cap_micro'] as num?)?.toInt(),
+  );
+}
+
+/// One dollar in micro-dollars — money is an integer everywhere but the screen.
+const micro = 1000000;
+
+/// Money as a person reads it. Small amounts need four decimals or every
+/// conversation reads as $0.00; null is unknown, which must not look like zero.
+String moneyText(int? m) => m == null
+    ? '\u2014'
+    : '\$${(m / micro).toStringAsFixed(m.abs() < 10000 ? 4 : 2)}';
+
+/// A dollars field as typed: '' keeps "unset", a bad number is null.
+/// Returns (ok, micro) — ok false means the text is not a number.
+({bool ok, int? value}) parseDollars(String text) {
+  final t = text.trim();
+  if (t.isEmpty) return (ok: true, value: null);
+  final n = double.tryParse(t);
+  if (n == null || n < 0) return (ok: false, value: null);
+  return (ok: true, value: (n * micro).round());
+}
+
+/// A cap or price for a text box: micro-dollars back to a plain number.
+/// Trailing `.0` is dropped — a price box that reads "10.0" invites someone to
+/// wonder whether it means something different from the "10" they typed.
+String dollarsText(int? m) {
+  if (m == null) return '';
+  final s = (m / micro).toString();
+  return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
 }
 
 /// How the server names the person using the app in stored transcripts.
@@ -583,6 +710,13 @@ class Api {
 
   Future<Map<String, Object?>> testProvider(Map<String, Object?> body) async =>
       _map('POST', '/api/providers/test', body);
+
+  /// What every agent has spent today and this month, plus the totals. One
+  /// call feeds both the sidebar footer and the open conversation's panel.
+  Future<Usage> usage() async => Usage.fromJson(await _map('GET', '/api/usage'));
+
+  /// The platform-wide daily cap for agents that have none of their own.
+  Future<void> setDefaultCap(int? micro) => _json('PUT', '/api/usage/cap', {'daily_cap_micro': micro});
 
   /// Sends a message and yields events as they arrive.
   ///

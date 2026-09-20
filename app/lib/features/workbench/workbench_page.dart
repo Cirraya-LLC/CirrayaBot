@@ -346,6 +346,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
           }),
           _footItem(Icons.auto_awesome_outlined, tr('wb.skillLibrary'), () => _openSkills()),
           _footItem(Icons.dns_outlined, tr('wb.server'), widget.onEditServer),
+          _footRow(
+            Icons.savings_outlined,
+            tr('wb.spendFooter', {
+              'day': moneyText(bench.usage.day.costMicro ?? 0),
+              'month': moneyText(bench.usage.month.costMicro ?? 0),
+            }),
+          ),
           // The app root persists the choice and rebuilds everything.
           PopupMenuButton<Lang>(
             tooltip: tr('common.language'),
@@ -662,11 +669,51 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     await bench.loadSkills();
   }
 
+  /// What this agent has spent, the cap in force, and — when the upstream has
+  /// no prices — why neither number can be trusted to hold it back.
+  Widget _spendTile(String id, {required bool group}) {
+    final u = bench.usage.of(id);
+    if (u == null) return const SizedBox.shrink();
+    final cap = u.capMicro == null
+        ? tr('wb.noCap')
+        : tr(u.ownCap ? 'wb.cap' : 'wb.capDefault', {'cap': moneyText(u.capMicro)});
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (group) Text(u.name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+          Text(
+            tr('wb.spendLine', {'day': moneyText(u.day.costMicro), 'month': moneyText(u.month.costMicro)}),
+            style: const TextStyle(fontSize: 12, color: C.dim),
+          ),
+          Text(
+            '${tr('wb.spendTokens', {'n': _tokens(u.month.tokens)})} · $cap',
+            style: const TextStyle(fontSize: 11.5, color: C.dim2),
+          ),
+          if (!u.priced)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(tr('wb.unpriced'), style: const TextStyle(fontSize: 11, color: C.warn)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  static String _tokens(int n) => n >= 10000
+      ? '${(n / 1000).round()}k'
+      : n >= 1000
+      ? '${(n / 1000).toStringAsFixed(1)}k'
+      : '$n';
+
   Widget _routineTile(Conversation c, Routine r) {
     final (label, color, bg) = r.running
         ? (tr('wb.running'), const Color(0xFF8FB6FF), const Color(0xFF1E2D45))
         : r.lastStatus == 'failed'
         ? (tr('wb.lastFailed'), C.code, const Color(0xFF3A2226))
+        : r.lastStatus == 'capped'
+        ? (tr('wb.lastCapped'), C.warn, const Color(0xFF3A3122))
         : !r.enabled
         ? (tr('wb.paused'), C.dim, const Color(0xFF2A2A31))
         : ('', C.dim, Colors.transparent);
@@ -690,7 +737,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                 if (label.isNotEmpty) ...[
                   const SizedBox(width: 6),
                   Tooltip(
-                    message: r.lastStatus == 'failed' ? r.lastError : '',
+                    message: r.lastStatus == 'failed' || r.lastStatus == 'capped' ? r.lastError : '',
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                       decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(5)),
@@ -779,6 +826,9 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     ),
                   ),
                 if (c != null) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.spend'))),
+                  for (final id in ids) _spendTile(id, group: c.isGroup),
                   const Divider(height: 22),
                   Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.browser'))),
                   // Keyed by agent: switching conversations must not show the
