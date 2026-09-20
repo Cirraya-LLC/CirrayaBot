@@ -1110,6 +1110,34 @@ dropdown)" (「模型上游不应该带model model是要自己选择的（提供
   they used to sit in two adjacent Rows and looked like one bar. Now one `Wrap(spacing: 8)`, with the
   status text on its own line
 
+### 2.20.4 Reasoning effort per agent (2026-09-20)
+
+The boss: besides its own upstream and model, each agent gets a **reasoning effort**. `agents.effort`:
+empty (send nothing at all, what every model got before) / `low` / `medium` / `high`. **Three levels on
+purpose** — every provider spells this differently, and putting their vocabularies in the UI would mean
+editing it whenever one of them moves.
+
+- Translated per protocol in `protocols.mjs`, beside the other protocol differences: chat →
+  `reasoning_effort`, responses → `reasoning: {effort}`, messages → **extended thinking**
+  `thinking: {type:'enabled', budget_tokens}` (low/medium/high = 1024/4096/8192).
+  **Anthropic's budget must stay strictly below `max_tokens`, so max_tokens grows with it**
+  (8192 + budget) — one shared ceiling would let the thinking eat the answer. Thinking also rules out
+  `temperature` / `top_p` / `top_k` and a forced `tool_choice`; this file sends none of them, and the
+  self-test pins that.
+- ⚠️ **An upstream that rejects the parameter must not cost the agent its turn.** On a 4xx whose body
+  blames it (`blamesEffort`), `callUpstream` retries once without it and remembers the (upstream, model)
+  pair for the life of the process, logging one `[effort] …` line so a person can see why the setting
+  does nothing. Safe to retry there — a non-2xx means not one byte has reached `onDelta` yet, so this
+  never touches `runAgent`'s own backoff/image-drop retries. A model that merely **ignores** the field
+  is fine and needs nothing.
+- The memory is per process, so a restart tries again — which is what you want after fixing an upstream.
+- **`POST /api/bots` destructures a fixed field list**, so a new field is dropped at creation unless you
+  add it there too (it still has this bug for `daily_cap_micro`: a cap can only be set by PATCH).
+
+Verified against the real deployment with a throwaway fake upstream that recorded the request bodies:
+all three protocols sent the right shape (messages: `budget_tokens 4096` with `max_tokens 12288`), and
+under a fake 400 the turn still completed (retried bare) and the next turn never sent it again.
+
 ## 2.21 Scheduled tasks (2026-09-19)
 
 The boss: "scheduled tasks, a skill library, browser operation and so on — we definitely need all of

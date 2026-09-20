@@ -16,6 +16,19 @@ const upstreamFail = (key, vars, httpStatus) =>
 export const PROTOCOLS = ['chat', 'responses', 'messages']
 export const normProtocol = p => PROTOCOLS.includes(p) ? p : 'chat'
 
+// Reasoning effort, per agent. Three levels only: every provider spells this differently, and
+// putting their vocabularies in the UI would mean editing it whenever one of them moves.
+// '' = send nothing at all, which is what every model got before this existed.
+export const EFFORTS = ['low', 'medium', 'high']
+export const normEffort = e => EFFORTS.includes(e) ? e : ''
+
+// Anthropic has no "effort": extended thinking takes a token budget, which must be at least
+// 1024 and strictly below max_tokens. So max_tokens grows with the budget — sharing one
+// ceiling would let the thinking eat the answer. (Thinking also rules out temperature /
+// top_p / top_k and a forced tool_choice; this file sends none of those.)
+const THINK_BUDGET = { low: 1024, medium: 4096, high: 8192 }
+const ANSWER_TOKENS = 8192
+
 // ---------- request translation ----------
 
 /** Chat-shaped tool definitions → the shape each protocol wants */
@@ -95,13 +108,15 @@ export function toAnthropic(messages) {
   return { system, messages: out }
 }
 
-function buildRequest(p, messages, tools) {
+export function buildRequest(p, messages, tools, effort = '') {
   const protocol = normProtocol(p.protocol)
+  effort = normEffort(effort)
   const base = p.base_url.replace(/\/+$/, '')
   const bearer = p.api_key ? { authorization: `Bearer ${p.api_key}` } : {}
   if (protocol === 'responses') return {
     url: `${base}/responses`, headers: bearer,
     body: { model: p.model, input: toResponsesInput(messages), stream: true, store: false,
+            ...effort ? { reasoning: { effort } } : {},
             ...tools?.length ? { tools: toolsFor(protocol, tools), tool_choice: 'auto' } : {} },
   }
   if (protocol === 'messages') {
@@ -110,14 +125,18 @@ function buildRequest(p, messages, tools) {
       url: `${base}/messages`,
       // Only x-api-key: the official API uses it, and an extra Bearer makes some gateways treat it as a bad credential
       headers: { ...p.api_key ? { 'x-api-key': p.api_key } : {}, 'anthropic-version': '2023-06-01' },
-      body: { model: p.model, max_tokens: 8192, stream: true, messages: msgs,
+      body: { model: p.model, max_tokens: ANSWER_TOKENS + (effort ? THINK_BUDGET[effort] : 0),
+              stream: true, messages: msgs,
+              ...effort ? { thinking: { type: 'enabled', budget_tokens: THINK_BUDGET[effort] } } : {},
               ...system ? { system } : {},
               ...tools?.length ? { tools: toolsFor(protocol, tools) } : {} },
     }
   }
   return {
     url: `${base}/chat/completions`, headers: bearer,
-    body: { model: p.model, messages: toChatMessages(messages), stream: true, ...tools?.length ? { tools, tool_choice: 'auto' } : {} },
+    body: { model: p.model, messages: toChatMessages(messages), stream: true,
+            ...effort ? { reasoning_effort: effort } : {},
+            ...tools?.length ? { tools, tool_choice: 'auto' } : {} },
   }
 }
 
@@ -185,13 +204,39 @@ function messagesFrame(f, st, onDelta) {
 
 const FRAME = { chat: chatFrame, responses: responsesFrame, messages: messagesFrame }
 
+/**
+ * Does this 4xx body blame the effort/thinking parameter? Only asked when we actually sent one,
+ * so the worst a false positive can do is cost one retry — and the real error is then reported
+ * by that retry anyway.
+ */
+export const blamesEffort = text => /reasoning[_ ]?effort|budget_tokens|thinking|reasoning|\beffort\b/i.test(String(text ?? ''))
+
+// (upstream, model) pairs whose upstream rejected the effort parameter. Remembered for the life
+// of the process: a setting one upstream refuses must not cost the agent a turn every turn.
+const noEffort = new Set()
+const effortKey = p => `${p.id ?? p.base_url}|${p.model}`
+
 /** Call the upstream once. Returns this step's text and the tools it wants to call. */
 export async function callUpstream(p, messages, tools, onDelta, signal) {
   const protocol = normProtocol(p.protocol)
-  const { url, headers, body } = buildRequest(p, messages, tools)
-  const res = await fetch(url, {
-    method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal,
-  })
+  const key = effortKey(p)
+  const effort = noEffort.has(key) ? '' : normEffort(p.effort)
+  const send = eff => {
+    const { url, headers, body } = buildRequest(p, messages, tools, eff)
+    return fetch(url, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal,
+    })
+  }
+  let res = await send(effort)
+  // A model that ignores the parameter is fine; one that rejects it must not break the agent.
+  // Safe to retry here — a non-2xx means not one byte has reached onDelta yet.
+  if (!res.ok && effort && res.status >= 400 && res.status < 500) {
+    const detail = (await res.text()).slice(0, 400)
+    if (!blamesEffort(detail)) throw upstreamFail('protocol.upstreamStatus', { status: res.status, body: detail.slice(0, 200) }, res.status)
+    noEffort.add(key)
+    console.warn(`[effort] ${key} rejected reasoning effort "${effort}"; not sending it again this run — ${detail.slice(0, 160)}`)
+    res = await send('')
+  }
   if (!res.ok) throw upstreamFail('protocol.upstreamStatus', { status: res.status, body: (await res.text()).slice(0, 200) }, res.status)
 
   const slots = new Map()
@@ -316,6 +361,29 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const u4 = meter()
   chatFrame({ choices: [{ delta: { content: 'hi' } }] }, u4, () => {})
   a(!u4.used.reported, 'an upstream that says nothing must not look like zero tokens')
+
+  // Reasoning effort: one setting, three different spellings downstream.
+  const one = [{ role: 'user', content: 'hi' }]
+  const req = (protocol, effort) => buildRequest({ base_url: 'http://x', model: 'm', protocol }, one, null, effort).body
+
+  a(req('chat', 'high').reasoning_effort === 'high', 'chat: reasoning_effort')
+  a(req('responses', 'low').reasoning.effort === 'low', 'responses: reasoning.effort')
+  const an2 = req('messages', 'medium')
+  a(an2.thinking.type === 'enabled' && an2.thinking.budget_tokens === 4096, 'messages: extended thinking with a budget')
+  a(an2.max_tokens > an2.thinking.budget_tokens, 'messages: the thinking budget must stay below max_tokens')
+  a(req('messages', 'high').max_tokens > req('messages', 'high').thinking.budget_tokens, 'messages: still true at the top level')
+  a(an2.temperature === undefined && an2.top_p === undefined, 'messages: thinking rules out temperature/top_p, so we send neither')
+
+  for (const protocol of PROTOCOLS) {
+    const off = req(protocol, '')
+    a(!('reasoning_effort' in off) && !('reasoning' in off) && !('thinking' in off), `${protocol}: empty effort sends nothing`)
+    a(JSON.stringify(off) === JSON.stringify(req(protocol, 'nonsense')), `${protocol}: an unknown level is the same as none`)
+  }
+  a(req('messages', '').max_tokens === 8192, 'messages: max_tokens unchanged when thinking is off')
+
+  a(blamesEffort('Unsupported parameter: \'reasoning_effort\''), 'spots a rejected chat effort')
+  a(blamesEffort('`thinking.budget_tokens` must be less than `max_tokens`'), 'spots a rejected thinking budget')
+  a(!blamesEffort('model_not_found'), 'an unrelated 400 is not blamed on effort')
 
   console.log('protocols.mjs self-test passed')
 }

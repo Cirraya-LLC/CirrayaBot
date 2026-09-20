@@ -401,6 +401,9 @@ function editBot(b) {
   $('#bprov').onchange = () => loadModels($('#bprov').value,
     $('#bprov').value === (b?.provider_id ?? '') ? (b?.model ?? '') : '')
   loadModels($('#bprov').value, b?.model ?? '')
+  $('#beffort').innerHTML = ['', 'low', 'medium', 'high']
+    .map(e => `<option value="${e}">${esc(t(e ? `b.effort${e[0].toUpperCase()}${e.slice(1)}` : 'b.effortNone'))}</option>`).join('')
+  $('#beffort').value = ['low', 'medium', 'high'].includes(b?.effort) ? b.effort : ''
   $('#bcap').value = dollars(b?.daily_cap_micro)
   // A cap only means something when the upstream has prices; say so rather than let it look guarded.
   const u = b && spendOf(b.id)
@@ -435,7 +438,8 @@ $('#bsave').onclick = async () => {
   const cap = toMicro($('#bcap').value)
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
-    provider_id:$('#bprov').value, model:chosenModel(), daily_cap_micro: cap === '' ? null : cap }
+    provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value,
+    daily_cap_micro: cap === '' ? null : cap }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
   const r = bEditing

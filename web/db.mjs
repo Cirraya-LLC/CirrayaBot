@@ -150,6 +150,11 @@ alter table providers add column if not exists price_in_micro  bigint;
 alter table providers add column if not exists price_out_micro bigint;
 -- Daily spend cap, micro-dollars. Null = fall back to the platform default in settings.
 alter table agents add column if not exists daily_cap_micro bigint;
+
+-- Reasoning effort, per agent: '' (send nothing, what every model did before this existed)
+-- or low / medium / high. Three levels on purpose: each provider spells it differently and a
+-- per-provider vocabulary would need updating every time one of them moves.
+alter table agents add column if not exists effort text not null default '';
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -183,17 +188,17 @@ export async function getAgent(id) {
 
 export async function upsertAgent(a) {
   const { rows } = await q(`
-    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
-      daily_cap_micro = excluded.daily_cap_micro
+      daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
-     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null])
+     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? ''])
   return rows[0]
 }
 

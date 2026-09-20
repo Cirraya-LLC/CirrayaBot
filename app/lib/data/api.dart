@@ -70,6 +70,7 @@ class Agent {
     required this.color,
     this.providerId = '',
     this.model = '',
+    this.effort = '',
     this.dailyCapMicro,
   });
 
@@ -83,6 +84,9 @@ class Agent {
   final String providerId;
   final String model;
 
+  /// How hard the model should think: '' (send nothing) / low / medium / high.
+  final String effort;
+
   /// Daily spend cap in micro-dollars. null = no cap of its own, so the
   /// platform default applies.
   final int? dailyCapMicro;
@@ -95,6 +99,7 @@ class Agent {
     color: (j['color'] as String?) ?? '',
     providerId: (j['provider_id'] as String?) ?? '',
     model: (j['model'] as String?) ?? '',
+    effort: (j['effort'] as String?) ?? '',
     dailyCapMicro: (j['daily_cap_micro'] as num?)?.toInt(),
   );
 }

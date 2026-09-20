@@ -23,6 +23,14 @@ Future<void> showGroupEditor(BuildContext context, Workbench bench, {Conversatio
   builder: (_) => _GroupEditor(bench: bench, group: group),
 );
 
+/// Reasoning effort: the stored value and the string that names it. '' = send nothing.
+const _effortLevels = <MapEntry<String, String>>[
+  MapEntry('', 'ed.effortDefault'),
+  MapEntry('low', 'ed.effortLow'),
+  MapEntry('medium', 'ed.effortMedium'),
+  MapEntry('high', 'ed.effortHigh'),
+];
+
 class _AgentEditor extends StatefulWidget {
   const _AgentEditor({required this.bench, this.agent});
   final Workbench bench;
@@ -43,6 +51,9 @@ class _AgentEditorState extends State<_AgentEditor> {
   /// Daily spend cap, in dollars as typed. Empty = the platform default.
   late final _cap = TextEditingController(text: dollarsText(widget.agent?.dailyCapMicro));
   late String _providerId = widget.agent?.providerId ?? '';
+
+  /// '' = send nothing, which is what every model got before this setting existed.
+  late String _effort = const ['low', 'medium', 'high'].contains(widget.agent?.effort) ? widget.agent!.effort : '';
   List<Provider> _providers = const [];
   List<String> _models = const [];
   String _model = '';
@@ -149,6 +160,7 @@ class _AgentEditorState extends State<_AgentEditor> {
       'persona': persona,
       'provider_id': _providerId,
       'model': _chosenModel,
+      'effort': _effort,
       'daily_cap_micro': cap.value,
     };
     await _run(() async {
@@ -265,6 +277,21 @@ class _AgentEditorState extends State<_AgentEditor> {
                         ),
                 ),
               ],
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              initialValue: _effort,
+              isExpanded: true,
+              decoration: InputDecoration(labelText: tr('ed.effort')),
+              items: [
+                for (final e in _effortLevels)
+                  DropdownMenuItem(value: e.key, child: Text(tr(e.value))),
+              ],
+              onChanged: (v) => setState(() => _effort = v ?? ''),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(tr('ed.effortHint'), style: const TextStyle(fontSize: 11, color: C.dim)),
             ),
             const SizedBox(height: 10),
             TextField(

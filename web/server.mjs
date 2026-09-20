@@ -7,7 +7,7 @@
 import { env, ROOT } from './env.mjs'
 import * as db from './db.mjs'
 import { fitContext, listModels, probeContext } from './model.mjs'
-import { callUpstream, normProtocol, PROTOCOLS } from './protocols.mjs'
+import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
@@ -42,6 +42,8 @@ const toBot = (r, lang = 'en') => ({
   order: r.ord, color: r.color, provider_id: r.provider_id ?? '', model: r.model ?? '',
   // Money is micro-dollars everywhere in the API (1 dollar = 1e6); null = no cap of its own.
   daily_cap_micro: r.daily_cap_micro == null ? null : Number(r.daily_cap_micro),
+  // How hard this agent's model should think. '' = say nothing, which is what it did before.
+  effort: r.effort ?? '',
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
   tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
@@ -891,7 +893,7 @@ async function providerFor(bot) {
   const base = bot.provider_id ? await db.getProvider(bot.provider_id) : await requireProvider()
   if (!base) throw new Say('provider.gone', { name: bot.name })
   if (!bot.model) throw new Say('provider.noModel', { name: bot.name })
-  return { ...base, model: bot.model, context_tokens: await contextFor(base, bot.model) }
+  return { ...base, model: bot.model, effort: normEffort(bot.effort), context_tokens: await contextFor(base, bot.model) }
 }
 
 /**
@@ -998,6 +1000,12 @@ async function checkAgent(b, selfId = null) {
     if (v !== null && v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) throw new Say('spend.badCap')
     out.daily_cap_micro = v === null || v === '' ? null : Math.round(Number(v))
   }
+  // '' = send nothing (the default, and what models that don't know the parameter want anyway)
+  if (b.effort !== undefined) {
+    const e = str(b.effort).trim()
+    if (e && !EFFORTS.includes(e)) throw new Say('agent.effort', { list: EFFORTS.join(' / ') })
+    out.effort = e
+  }
   if (b.model !== undefined || !selfId) {
     const model = str(b.model).trim()
     if (!model) throw new Say('agent.modelRequired')
@@ -1064,7 +1072,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/bots' && req.method === 'POST') {
       const b = await readBody(req)
-      const { name, description = '', persona, provider_id = '', model } = await checkAgent(b)
+      const { name, description = '', persona, provider_id = '', model, effort = '' } = await checkAgent(b)
       const id = str(b.id)
       // The id is an internal identifier (container name, mount directory); people see the name.
       // Chinese names can't produce a valid slug, which is fine — just generate one; don't bother the user about it.
@@ -1072,7 +1080,7 @@ const server = createServer(async (req, res) => {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) slug = 'agent-' + Math.random().toString(36).slice(2, 8)
       if (await db.getAgent(slug)) return send(409, { error: t('agent.idExists', { id: slug }) })
       const n = (await db.listAgents()).length
-      await db.upsertAgent({ id: slug, name, description, persona, provider_id, model, ord: n + 1, color: db.nextColor(n) })
+      await db.upsertAgent({ id: slug, name, description, persona, provider_id, model, effort, ord: n + 1, color: db.nextColor(n) })
       return send(200, { id: slug })
     }
 

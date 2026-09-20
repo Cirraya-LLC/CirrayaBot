@@ -58,6 +58,7 @@ export const serverStrings = {
   'agent.personaEmpty': ['The role description cannot be empty', '职责说明不能为空', '職責說明不能為空'],
   'agent.color':        ['Color must be #RRGGBB', '颜色要是 #RRGGBB', '顏色必須是 #RRGGBB'],
   'agent.order':        ['order must be an integer', 'order 要是整数', 'order 必須是整數'],
+  'agent.effort':       ['Reasoning effort must be empty or one of {list}', '推理强度只能留空，或者是 {list}', '推理強度只能留空，或是 {list}'],
   'agent.modelRequired': ['Pick a model', '要选一个模型', '請選一個模型'],
   'agent.modelLong':    ['The model name is too long', '模型名太长了', '模型名稱太長了'],
 
