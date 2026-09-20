@@ -1072,7 +1072,10 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/bots' && req.method === 'POST') {
       const b = await readBody(req)
-      const { name, description = '', persona, provider_id = '', model, effort = '' } = await checkAgent(b)
+      // Spread what checkAgent returned: a hand-copied field list here silently drops
+      // anything added to the editor later (daily_cap_micro did exactly that).
+      const checked = await checkAgent(b)
+      const { name } = checked
       const id = str(b.id)
       // The id is an internal identifier (container name, mount directory); people see the name.
       // Chinese names can't produce a valid slug, which is fine — just generate one; don't bother the user about it.
@@ -1080,7 +1083,7 @@ const server = createServer(async (req, res) => {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) slug = 'agent-' + Math.random().toString(36).slice(2, 8)
       if (await db.getAgent(slug)) return send(409, { error: t('agent.idExists', { id: slug }) })
       const n = (await db.listAgents()).length
-      await db.upsertAgent({ id: slug, name, description, persona, provider_id, model, effort, ord: n + 1, color: db.nextColor(n) })
+      await db.upsertAgent({ description: '', provider_id: '', model: '', effort: '', ...checked, id: slug, ord: n + 1, color: db.nextColor(n) })
       return send(200, { id: slug })
     }
 
