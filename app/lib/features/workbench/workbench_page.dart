@@ -30,6 +30,7 @@ import 'message_view.dart';
 /// padding) is already centred in the rail.
 const double _wide = 308;
 const double _rail = 72;
+const double _side2 = 290;
 
 class WorkbenchPage extends StatefulWidget {
   const WorkbenchPage({
@@ -297,12 +298,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       // Too narrow for three columns: the right panel slides over instead of
       // disappearing. Hiding it outright left its toggle doing nothing, and a
       // new macOS window starts at 800 wide — so on a Mac it never showed.
-      endDrawer: narrow ? Drawer(width: 290, shape: const RoundedRectangleBorder(), child: _right()) : null,
+      endDrawer: narrow ? Drawer(width: _side2, shape: const RoundedRectangleBorder(), child: _right()) : null,
       body: Row(
         children: [
           _sidebar(),
           Expanded(child: _centre()),
-          if (_rightOpen && !narrow) _right(),
+          if (!narrow) _rightPane(),
         ],
       ),
     ),
@@ -948,11 +949,30 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   }
 
   // ── right ─────────────────────────────────────────────────────────────
+  /// The panel closing is the same move as the sidebar collapsing: animate the
+  /// width, pin the contents at [_side2] and clip them, so nothing inside
+  /// re-lays-out on the way out. ExcludeFocus because a 0px panel must not
+  /// still be reachable by Tab.
+  Widget _rightPane() => AnimatedContainer(
+    key: const ValueKey('rightpane'),
+    duration: _motion(context),
+    curve: Curves.easeInOutCubic,
+    width: _rightOpen ? _side2 : 0,
+    child: ClipRect(
+      child: OverflowBox(
+        alignment: Alignment.centerLeft,
+        minWidth: _side2,
+        maxWidth: _side2,
+        child: ExcludeFocus(excluding: !_rightOpen, child: _right()),
+      ),
+    ),
+  );
+
   Widget _right() {
     final c = bench.current;
     final ids = c == null ? <String>[] : (c.isGroup ? c.members : [c.id]);
     return Container(
-      width: 290,
+      width: _side2,
       decoration: BoxDecoration(
         color: C.side,
         border: Border(left: BorderSide(color: C.line)),

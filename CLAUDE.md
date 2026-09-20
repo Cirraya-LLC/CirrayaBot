@@ -1479,6 +1479,22 @@ the avatar is *already* centred in a 72px rail, so collapsing moves nothing at a
   `RIGHT OVERFLOWED` stripe **with nothing in the app's stdout** — the Dart error goes to the VM
   service, so look at the pixels, not the log.
 
+### The right panel
+
+Closing it is the same move (width 290 → 0, contents pinned and clipped, `AnimatedContainer` +
+`ClipRect` + `OverflowBox` on the client). It used to leave the tree outright, so it appeared and
+vanished with no travel at all.
+
+- ⚠️ **A child's own `width:100%` beats `.side2>*` on specificity** and then reflows itself down to
+  whatever the panel has animated to. `.addm` did exactly that: mid-close, "New scheduled task"
+  wrapped onto three lines while everything around it slid out cleanly. The pin rule is `#side2>*`
+  — an id, so nothing inside can outrank it.
+- **A 0px panel must not still be reachable by Tab**: the web flips `visibility` with a
+  `transition-delay` of the full duration (so it only hides once closed, and comes back at once),
+  the client uses `ExcludeFocus`.
+- `test/sidebar_test.dart` pins the travel for both panels. It cannot pass on the old code at all —
+  there was no widget to find.
+
 ### Flutter specifics
 
 - `C.*` are **getters over a current palette**, set by the app root in `build`. The consequence:
