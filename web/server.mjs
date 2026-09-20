@@ -965,7 +965,10 @@ async function providerFor(bot) {
   const base = bot.provider_id ? await db.getProvider(bot.provider_id) : await requireProvider()
   if (!base) throw new Say('provider.gone', { name: bot.name })
   if (!bot.model) throw new Say('provider.noModel', { name: bot.name })
-  return { ...base, model: bot.model, effort: normEffort(bot.effort), context_tokens: await contextFor(base, bot.model) }
+  // An agent's own effort wins; empty means "whatever the platform says", and the
+  // platform's own empty means send nothing — what every model got before this existed.
+  const effort = normEffort(bot.effort) || normEffort(await db.defaultEffort())
+  return { ...base, model: bot.model, effort, context_tokens: await contextFor(base, bot.model) }
 }
 
 /**
@@ -1337,6 +1340,17 @@ const server = createServer(async (req, res) => {
       const micro = v === null || v === '' ? null : Math.round(Number(v))
       await db.setDefaultCap(micro)
       return send(200, { default_cap_micro: micro })
+    }
+
+    // The platform-wide reasoning effort, for every agent that has none of its own.
+    if (url.pathname === '/api/settings/effort' && req.method === 'GET')
+      return send(200, { effort: normEffort(await db.defaultEffort()), levels: EFFORTS })
+
+    if (url.pathname === '/api/settings/effort' && req.method === 'PUT') {
+      const e = str((await readBody(req)).effort).trim()
+      if (e && !EFFORTS.includes(e)) return send(400, { error: t('agent.effort', { list: EFFORTS.join(' / ') }) })
+      await db.setDefaultEffort(e)
+      return send(200, { effort: e })
     }
 
     // ---- Approvals ----

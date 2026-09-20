@@ -41,6 +41,9 @@ class _ProvidersPageState extends State<ProvidersPage> {
   /// The platform-wide approval rule, and the pattern list "match" uses.
   final _patterns = TextEditingController();
   String _approvalMode = 'match';
+
+  /// The platform-wide reasoning effort. '' = send nothing at all.
+  String _effort = '';
   bool _auto = true;
   bool _busy = false;
   String _protocol = 'chat';
@@ -68,6 +71,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       final policy = await widget.api.approvalPolicy();
       _approvalMode = policy.mode;
       _patterns.text = policy.patterns.join('\n');
+      _effort = await widget.api.defaultEffort();
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
     } on ApiException catch (e) {
       _say(e.message, bad: true);
@@ -171,6 +175,13 @@ class _ProvidersPageState extends State<ProvidersPage> {
     await _act(tr('prov.saving'), () async {
       await widget.api.setDefaultCap(cap.value);
       _say(tr('prov.capSaved', {'cap': cap.value == null ? tr('prov.noCap') : moneyText(cap.value)}), good: true);
+    });
+  }
+
+  Future<void> _saveEffort() async {
+    await _act(tr('prov.saving'), () async {
+      await widget.api.setDefaultEffort(_effort);
+      _say(tr('ef.saved'), good: true);
     });
   }
 
@@ -334,6 +345,31 @@ class _ProvidersPageState extends State<ProvidersPage> {
                         TextButton(onPressed: _busy ? null : _saveDefaultCap, child: Text(tr('common.save'))),
                       ],
                     ),
+                    const SizedBox(height: 10),
+                    // Not an upstream's business either: how hard every model thinks.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            initialValue: _effort,
+                            isExpanded: true,
+                            decoration: InputDecoration(labelText: tr('ef.title')),
+                            items: [
+                              for (final e in const ['', 'low', 'medium', 'high'])
+                                DropdownMenuItem(
+                                  value: e,
+                                  child: Text(tr(e.isEmpty ? 'ef.none' : 'ed.effort${e[0].toUpperCase()}${e.substring(1)}')),
+                                ),
+                            ],
+                            onChanged: (v) => setState(() => _effort = v ?? ''),
+                          ),
+                        ),
+                        const SizedBox(width: 9),
+                        TextButton(onPressed: _busy ? null : _saveEffort, child: Text(tr('common.save'))),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(tr('ef.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
                     const SizedBox(height: 14),
                     const Divider(height: 1),
                     const SizedBox(height: 12),

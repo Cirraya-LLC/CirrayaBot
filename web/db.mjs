@@ -515,6 +515,12 @@ const CAP_KEY = 'spend.default_cap_micro'
 export const defaultCap = () => getSetting(CAP_KEY, null)
 export const setDefaultCap = micro => setSetting(CAP_KEY, micro)
 
+// The platform-wide reasoning effort, used by every agent that has none of its own.
+// '' = send nothing at all, which is what every model got before this existed.
+const EFFORT_KEY = 'model.default_effort'
+export const defaultEffort = () => getSetting(EFFORT_KEY, '')
+export const setDefaultEffort = e => setSetting(EFFORT_KEY, e)
+
 // ---------- first-start seed / legacy import ----------
 //
 // Runs once, only when the database is empty. After that, bots/ and the workspace json

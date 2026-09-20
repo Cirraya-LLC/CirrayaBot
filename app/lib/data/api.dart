@@ -764,6 +764,15 @@ class Api {
   /// The platform-wide daily cap for agents that have none of their own.
   Future<void> setDefaultCap(int? micro) => _json('PUT', '/api/usage/cap', {'daily_cap_micro': micro});
 
+  /// The platform-wide reasoning effort, for every Agent that has none of its own.
+  Future<String> defaultEffort() async {
+    final j = (await _json('GET', '/api/settings/effort')) as Map<String, Object?>;
+    return (j['effort'] as String?) ?? '';
+  }
+
+  Future<void> setDefaultEffort(String effort) =>
+      _json('PUT', '/api/settings/effort', {'effort': effort});
+
   // ---- Approvals ----
   Future<ApprovalPolicy> approvalPolicy() async =>
       ApprovalPolicy.fromJson((await _json('GET', '/api/approvals/policy')) as Map<String, Object?>);

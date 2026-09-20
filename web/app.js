@@ -639,7 +639,21 @@ async function loadProvs() {
 }
 
 $('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
-  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); $('#pdlg').showModal() }
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); $('#pdlg').showModal() }
+
+async function loadEffort() {
+  const r = await (await fetch(api('/api/settings/effort'))).json().catch(() => null)
+  if (!r) return
+  $('#pdefeff').innerHTML = ['', ...(r.levels ?? ['low', 'medium', 'high'])]
+    .map(e => `<option value="${e}">${esc(t(e ? `b.effort${e[0].toUpperCase()}${e.slice(1)}` : 'ef.none'))}</option>`).join('')
+  $('#pdefeff').value = r.effort ?? ''
+}
+$('#peffsave').onclick = async () => {
+  const r = await fetch(api('/api/settings/effort'), { method:'PUT', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ effort: $('#pdefeff').value }) })
+  if (!r.ok) { hint((await r.json()).error, 'bad'); return }
+  hint(t('ef.saved'), 'good')
+}
 
 async function loadPolicy() {
   const pol = await (await fetch(api('/api/approvals/policy'))).json().catch(() => null)
