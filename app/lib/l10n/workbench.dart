@@ -111,4 +111,11 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.wd4': ['Thu', '周四', '週四'],
   'wb.wd5': ['Fri', '周五', '週五'],
   'wb.wd6': ['Sat', '周六', '週六'],
+
+  // A tool call waiting for a person
+  'ap.asks': ['Waiting for you', '等你决定', '等你決定'],
+  'ap.approve': ['Approve', '批准', '批准'],
+  'ap.deny': ['Deny', '拒绝', '拒絕'],
+  'ap.approved': ['Approved', '已批准', '已批准'],
+  'ap.denied': ['Denied', '已拒绝', '已拒絕'],
 };

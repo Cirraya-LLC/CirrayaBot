@@ -724,6 +724,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     entry: bench.entries[i],
                     names: bench.agentNames,
                     colorOf: (n) => C.parse(bench.agentByName(n)?.color ?? ''),
+                    onApprove: bench.answer,
                   ),
                 ),
         ),

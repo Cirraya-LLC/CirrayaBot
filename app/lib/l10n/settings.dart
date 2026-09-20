@@ -150,4 +150,25 @@ const Map<String, List<String>> settingsStrings = {
   'skills.nobody': ['not installed on anyone yet', '还没装给任何人', '還沒裝給任何人'],
   'skills.listSep': [', ', '、', '、'],
   'skills.savedBy': [' · saved by {name}', ' · {name} 自己存的', ' · {name} 自己存的'],
+
+  // Approvals, platform-wide
+  'ap.title': ['Asking before acting', '动手前先问', '動手前先問'],
+  'ap.modeOff': ['Never ask', '从不询问', '從不詢問'],
+  'ap.modeMatch': ['Ask when a command matches the list', '命中下面的清单就问', '命中下面的清單就問'],
+  'ap.modeAll': [
+    'Ask before every command, write and browser action',
+    '每条命令、每次写文件和浏览器操作都问',
+    '每條命令、每次寫檔案與瀏覽器操作都問',
+  ],
+  'ap.patterns': ['Patterns, one per line', '规则，一行一条', '規則，一行一條'],
+  'ap.hint': [
+    'Patterns are regular expressions, matched against the command itself \u2014 not against file '
+        'contents. An Agent can override this for itself. Scheduled tasks have nobody to ask, so '
+        'anything that would ask is refused there.',
+    '规则是正则表达式，只匹配命令本身，不匹配文件内容。单个 Agent 可以自己覆盖这个设置。'
+        '定时任务没人可问，所以在那里会直接拒绝。',
+    '規則是正規表示式，只比對命令本身，不比對檔案內容。單個 Agent 可以自己覆寫這個設定。'
+        '定時任務沒人可問，所以在那裡會直接拒絕。',
+  ],
+  'ap.saved': ['Approval settings saved', '审批设置已保存', '審批設定已儲存'],
 };

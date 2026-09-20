@@ -111,6 +111,22 @@ they then get `bash` / read file / write file, executed **inside their own conta
 > And any external text an Agent reads (web pages, logs, coworkers' messages) may be a prompt
 > injection. This is a switch a person deliberately flips, not a default.
 
+### Asking before acting
+
+An Agent asks you first before running anything that matches a pattern list — `rm -rf`, `sudo`,
+`git push`, piping a download into a shell, and so on. The card in the transcript grows **Deny**
+and **Approve** buttons and the turn waits for you. Under **Model upstreams** you can switch the
+whole platform to *never ask* or *ask every time*, and edit the list; each Agent can override it
+for itself in its editor.
+
+The patterns are regular expressions matched against the command itself, never against the
+contents of a file being written. A refusal goes back to the Agent as the result of that call, so
+it reports it and moves on instead of retrying. **Scheduled tasks have nobody to ask, so anything
+that would ask is refused there** — a task will never sit waiting for a person who isn't looking.
+
+The point of doing it here rather than in the persona: a sentence in a persona is something one
+prompt injection can rewrite. A tool that doesn't run isn't.
+
 ## Exposing it to the internet
 
 Set `BIND_ADDR=0.0.0.0` in `.env`, then `docker compose up -d`.
@@ -135,6 +151,7 @@ it into the database, and also moves over the groups and chat history of an old 
 node web/model.mjs        # self-test for context budgeting and window inference
 node web/i18n.mjs         # self-test for the server message tables
 node web/memory.mjs       # self-test for an agent's self-notes (cap, duplicates)
+node web/approve.mjs      # self-test for which tool calls need a person first
 python3 check-bots.py     # check the seed definitions in bots/
 ```
 

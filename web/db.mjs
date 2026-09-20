@@ -156,6 +156,10 @@ alter table agents add column if not exists daily_cap_micro bigint;
 -- per-provider vocabulary would need updating every time one of them moves.
 alter table agents add column if not exists effort text not null default '';
 
+-- When this agent has to ask before acting: '' (follow the platform setting),
+-- 'off', 'match' (only commands the pattern list catches) or 'all'.
+alter table agents add column if not exists approval text not null default '';
+
 -- A tool call is a message too, so reopening a conversation still shows which commands ran.
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
 alter table messages drop constraint if exists messages_role_check;
@@ -193,17 +197,18 @@ export async function getAgent(id) {
 
 export async function upsertAgent(a) {
   const { rows } = await q(`
-    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
-      daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort
+      daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
+      approval = excluded.approval
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
-     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? ''])
+     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? ''])
   return rows[0]
 }
 

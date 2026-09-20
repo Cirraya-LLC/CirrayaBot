@@ -115,4 +115,11 @@ const Map<String, List<String>> editorStrings = {
   'ed.kindOnce': ['Just once', '只一次', '只一次'],
   'ed.enabled': ['Enabled', '启用', '啟用'],
   'ed.runNow': ['Run now', '现在跑一次', '立即執行一次'],
+
+  // Approvals, per Agent
+  'ed.approval': ['Asking first', '动手前先问', '動手前先問'],
+  'ed.approvalDefault': ['Follow the platform setting', '跟随平台设置', '跟隨平台設定'],
+  'ed.approvalOff': ['Never ask', '从不询问', '從不詢問'],
+  'ed.approvalMatch': ['Ask on risky commands', '命中清单才问', '命中清單才問'],
+  'ed.approvalAll': ['Ask every time', '每次都问', '每次都問'],
 };

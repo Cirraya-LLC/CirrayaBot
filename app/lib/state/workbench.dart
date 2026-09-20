@@ -43,6 +43,13 @@ class Ran extends Entry {
   /// A browser screenshot, when the tool took one. Only lives for this reply —
   /// history stores text, so reopening the conversation shows the card without it.
   Uint8List? image;
+
+  /// Set while the card is waiting for a person to allow or refuse it. The id is
+  /// only good for as long as the stream that asked is open.
+  String? approvalId;
+
+  /// What the person answered, once they have. Shown instead of the buttons.
+  bool? approved;
 }
 
 class Note extends Entry {
@@ -342,6 +349,12 @@ class Workbench extends ChangeNotifier {
               final card = Ran(speaker: name, color: colour, label: _label(ev.data['name'], args));
               pending[key] = card;
               add(card);
+            } else if (phase == 'ask') {
+              pending[key]?.approvalId = ev.data['id'] as String?;
+            } else if (phase == 'answered') {
+              pending[key]
+                ?..approvalId = null
+                ..approved = ev.data['ok'] == true;
             } else {
               final card = pending.remove(key);
               card
@@ -374,6 +387,22 @@ class Workbench extends ChangeNotifier {
     // Left and came back while it was answering: what's on screen is the
     // history from before the reply landed. Read it again.
     if (ticket != _shown && current?.id == c.id) await open(current!);
+  }
+
+  /// Allow or refuse a waiting call. The buttons go the moment we answer, so the
+  /// same card can't be answered twice while the request is in flight.
+  Future<void> answer(Ran card, bool ok) async {
+    final id = card.approvalId;
+    if (id == null) return;
+    card.approvalId = null;
+    notifyListeners();
+    try {
+      await api.answerApproval(id, ok);
+      card.approved = ok;
+    } on ApiException catch (e) {
+      entries.add(Note('⚠ ${e.message}'));
+    }
+    notifyListeners();
   }
 
   /// A stored line becomes a bubble or a finished tool card. A card from history

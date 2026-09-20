@@ -11,13 +11,14 @@ import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './pr
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
+import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 const WEB = join(ROOT, 'web')
 const WORKROOT = join(ROOT, 'workspace')
@@ -44,6 +45,8 @@ const toBot = (r, lang = 'en') => ({
   daily_cap_micro: r.daily_cap_micro == null ? null : Number(r.daily_cap_micro),
   // How hard this agent's model should think. '' = say nothing, which is what it did before.
   effort: r.effort ?? '',
+  // When this one has to ask before acting. '' = follow the platform setting.
+  approval: r.approval ?? '',
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
   tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
@@ -94,6 +97,44 @@ function transcriptRow(m, text) {
 const MAX_HANDOFFS = 5       // max handoffs between agents in one round, so they can't chat forever
 const FETCH_MAX = 300        // how many candidate rows to pull from the DB; the real trimming is by context budget
 const TOOL_TRACE = 400       // how much tool output the transcript keeps, same as the live stream sends
+
+// Approvals. The research behind this product is blunt about it: a persona saying "you may not change
+// production config" stops nothing, so the boundary has to be outside the model. An agent asks before
+// acting when the platform (or its own setting) says so; the answer comes back over the open stream.
+// Approvals. The rule lives in approve.mjs so it can be checked on its own; here we only resolve
+// the policy and wait for the human.
+async function approvalPolicy() {
+  const s = await db.getSetting('approvals', null)
+  return {
+    mode: APPROVAL_MODES.includes(s?.mode) ? s.mode : 'match',
+    patterns: Array.isArray(s?.patterns) ? s.patterns.filter(x => String(x).trim()) : RISKY,
+  }
+}
+
+// id -> the function that answers it. A pending approval only exists while its stream is open.
+const pendingApprovals = new Map()
+
+/**
+ * Ask, and wait. Nothing times out on its own: the client hanging up aborts the turn, which is the
+ * only way an interactive approval can end unanswered. A scheduled task has nobody to ask, so it is
+ * refused straight away rather than stalling a task nobody is watching.
+ */
+function askApproval(ctx, onTool, name, args) {
+  if (ctx.unattended) return Promise.resolve(false)
+  const id = randomUUID()
+  onTool?.({ phase: 'ask', id, name, args })
+  return new Promise(resolve => {
+    const answer = ok => {
+      if (!pendingApprovals.delete(id)) return
+      ctx.signal?.removeEventListener('abort', onAbort)
+      onTool?.({ phase: 'answered', id, name, args, ok })
+      resolve(ok)
+    }
+    const onAbort = () => answer(false)
+    pendingApprovals.set(id, answer)
+    ctx.signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
 
 /**
  * The group discussions an agent remembers — every group he's in, not just the current one.
@@ -592,7 +633,17 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       let args = {}
       try { args = JSON.parse(c.args || '{}') } catch { args = {} }
       onTool?.({ phase: 'run', name: c.name, args })
-      const res = await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
+      const allowed = !needsApproval(c.name, args, ctx.approval ?? { mode: 'off' })
+        || await askApproval(ctx, onTool, c.name, args)
+      // Hanging up while a card waits is not a refusal — recording one would leave the transcript
+      // saying the user said no to something they never saw an answer for.
+      if (ctx.signal?.aborted) throw new Say('chat.aborted')
+      // The refusal goes back as the tool result so the agent adapts instead of retrying: it is the
+      // only thing it will ever see about this call.
+      const res = allowed
+        ? await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
+        : `Refused${ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
+Do not try this again. Do it another way, or say why you cannot.`
       const out = typeof res === 'string' ? res : res.text
       if (res?.image) shot = res.image
       // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored
@@ -658,7 +709,7 @@ function dropImages(messages, note = '(a screenshot was here; the current model 
 }
 
 // One-on-one
-function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
+function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate) {
   return withAgent(bot.id, async () => {
     const prior = (await db.recent('dm', bot.id, FETCH_MAX))
       .map(m => ({ role: m.role, content: m.content }))
@@ -669,14 +720,14 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang) {
     const full = await runAgent(p,
       [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id)) },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id })
+      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, ...gate })
     await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
     return full
   })
 }
 
 // One person speaking once in a group chat: he sees the WHOLE group log, with other people's words prefixed by name
-function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang) {
+function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate) {
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
     const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead) }]
@@ -685,7 +736,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
         ? { role: 'assistant', content: e.content }                                   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId })
+    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, ...gate })
   })
 }
 
@@ -716,15 +767,19 @@ function findMention(text, peers) {
  * Sending from the UI and a scheduled task firing both go through this one function — two implementations would drift apart.
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
-async function converse(bots, groupId, providers, text, emit, signal, lang = 'en') {
+async function converse(bots, groupId, providers, text, emit, signal, lang = 'en', { unattended = false } = {}) {
   try {
+    const policy = await approvalPolicy()
+    // Per agent: its own setting wins, otherwise the platform's. Resolved here so one turn can't
+    // change its mind halfway through because someone saved the settings dialog.
+    const gateFor = b => ({ unattended, approval: { ...policy, mode: b.approval || policy.mode } })
     if (!groupId && bots.length === 1) {
       const bot = bots[0]
       emit('start', { botId: bot.id })
       await askSolo(providers.get(bot.id), bot, text,
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
         d => emit('delta', { botId: bot.id, text: d }),
-        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang)
+        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang, gateFor(bot))
       emit('end', { botId: bot.id })
     } else {
       // Group chat: colleagues relay. Who speaks first — whoever the user @-ed; if nobody, the group's lead;
@@ -745,7 +800,7 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
               group: await db.getMemory('group', gid) },
             d => emit('delta', { botId: speaker.id, text: d }),
             t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }),
-            gid, signal, lang)
+            gid, signal, lang, gateFor(speaker))
         } catch (e) {
           emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
           break
@@ -810,7 +865,7 @@ async function runRoutine(r) {
     const text = `[Scheduled task "${r.name}", sent automatically — nobody is watching live. When you're done, write up the result clearly.]\n${r.prompt}`
     await converse(bots, groupId, providers, text,
       (ev, d) => { if (ev === 'error' && !error) { error = d.message; capped = d.capped === true } },
-      new AbortController().signal)
+      new AbortController().signal, 'en', { unattended: true })
   } catch (e) {
     error = errorText(e, 'en').slice(0, 300)
   } finally {
@@ -1023,6 +1078,12 @@ async function checkAgent(b, selfId = null) {
     if (e && !EFFORTS.includes(e)) throw new Say('agent.effort', { list: EFFORTS.join(' / ') })
     out.effort = e
   }
+  // '' = follow the platform setting; see APPROVAL_MODES.
+  if (b.approval !== undefined) {
+    const a = str(b.approval).trim()
+    if (a && !APPROVAL_MODES.includes(a)) throw new Say('agent.approval', { list: APPROVAL_MODES.join(' / ') })
+    out.approval = a
+  }
   if (b.model !== undefined || !selfId) {
     const model = str(b.model).trim()
     if (!model) throw new Say('agent.modelRequired')
@@ -1100,7 +1161,7 @@ const server = createServer(async (req, res) => {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) slug = 'agent-' + Math.random().toString(36).slice(2, 8)
       if (await db.getAgent(slug)) return send(409, { error: t('agent.idExists', { id: slug }) })
       const n = (await db.listAgents()).length
-      await db.upsertAgent({ description: '', provider_id: '', model: '', effort: '', ...checked, id: slug, ord: n + 1, color: db.nextColor(n) })
+      await db.upsertAgent({ description: '', provider_id: '', model: '', effort: '', approval: '', ...checked, id: slug, ord: n + 1, color: db.nextColor(n) })
       return send(200, { id: slug })
     }
 
@@ -1276,6 +1337,32 @@ const server = createServer(async (req, res) => {
       const micro = v === null || v === '' ? null : Math.round(Number(v))
       await db.setDefaultCap(micro)
       return send(200, { default_cap_micro: micro })
+    }
+
+    // ---- Approvals ----
+    // The platform default, and the pattern list "match" uses.
+    if (url.pathname === '/api/approvals/policy' && req.method === 'GET')
+      return send(200, { ...await approvalPolicy(), modes: APPROVAL_MODES, seeded: RISKY })
+
+    if (url.pathname === '/api/approvals/policy' && req.method === 'PUT') {
+      const b = await readBody(req)
+      const mode = str(b.mode).trim()
+      if (!APPROVAL_MODES.includes(mode)) return send(400, { error: t('agent.approval', { list: APPROVAL_MODES.join(' / ') }) })
+      const patterns = (Array.isArray(b.patterns) ? b.patterns : String(b.patterns ?? '').split('\n'))
+        .map(x => String(x).trim()).filter(Boolean).slice(0, 200)
+      const policy = { mode, patterns }
+      await db.setSetting('approvals', policy)
+      return send(200, policy)
+    }
+
+    // Answering one. The id only exists while the stream that asked is still open, so a stale
+    // click is a 404 rather than a silent yes.
+    const ap = url.pathname.match(/^\/api\/approvals\/([\w-]+)$/)
+    if (ap && req.method === 'POST') {
+      const answer = pendingApprovals.get(ap[1])
+      if (!answer) return send(404, { error: t('approval.gone') })
+      answer((await readBody(req)).ok === true)
+      return send(200, { ok: true })
     }
 
     // ---- Model upstreams ----

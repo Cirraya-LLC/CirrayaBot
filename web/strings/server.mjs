@@ -59,6 +59,8 @@ export const serverStrings = {
   'agent.color':        ['Color must be #RRGGBB', '颜色要是 #RRGGBB', '顏色必須是 #RRGGBB'],
   'agent.order':        ['order must be an integer', 'order 要是整数', 'order 必須是整數'],
   'agent.effort':       ['Reasoning effort must be empty or one of {list}', '推理强度只能留空，或者是 {list}', '推理強度只能留空，或是 {list}'],
+  'agent.approval':     ['The approval mode must be empty or one of {list}', '审批模式只能留空，或者是 {list}', '審批模式只能留空，或是 {list}'],
+  'approval.gone':      ['That request is no longer waiting for an answer', '这条请求已经不在等待回答了', '這條請求已經不在等待回答了'],
   'agent.modelRequired': ['Pick a model', '要选一个模型', '請選一個模型'],
   'agent.modelLong':    ['The model name is too long', '模型名太长了', '模型名稱太長了'],
 
