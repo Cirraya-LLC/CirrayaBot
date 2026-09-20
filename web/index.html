@@ -47,7 +47,7 @@
     --avink:#0e0e10;        /* the letter on an Agent's own colour: same in both themes */
     /* Sidebar: laid out at --wide always, clipped to --rail when collapsed, so
        nothing inside ever reflows. --rail puts the 38px avatar dead centre. */
-    --wide:308px; --rail:72px;
+    --wide:308px; --rail:72px; --side2:290px;
     --dur:200ms; --dur2:130ms; --ease:cubic-bezier(.4,0,.2,1);
   }
   :root[data-theme="light"]{
@@ -226,9 +226,19 @@
   .mention small{color:var(--dim2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
   /* ═══ Right: members ═══ */
-  .side2{width:290px;flex:none;background:var(--side);border-left:1px solid var(--line);
-         display:flex;flex-direction:column}
-  .side2.hide{display:none}
+  /* Same trick as the aside: animate the width only, keep the contents pinned at
+     --side2 and clipped, so nothing inside reflows on the way out. */
+  .side2{width:var(--side2);flex:none;background:var(--side);border-left:1px solid var(--line);
+         display:flex;flex-direction:column;overflow:hidden;
+         transition:width var(--dur) var(--ease),border-left-width var(--dur) var(--ease)}
+  /* An id, because a child's own width:100% (.addm) would otherwise win on
+     specificity and reflow itself down to the animating width. */
+  #side2>*{width:var(--side2);flex:none}
+  /* visibility flips only once it has finished closing — a 0px panel must not
+     still be reachable by Tab, and hiding it up front would kill the animation. */
+  .side2.hide{width:0;border-left-width:0;visibility:hidden;
+              transition:width var(--dur) var(--ease),border-left-width var(--dur) var(--ease),
+                         visibility 0s linear var(--dur)}
   .s2h{padding:16px 18px 8px;font-size:13px;font-weight:600}
   .mem{display:flex;align-items:center;gap:10px;padding:8px 18px;font-size:13.5px}
   .mem .av{width:26px;height:26px;font-size:11px}

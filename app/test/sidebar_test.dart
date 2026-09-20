@@ -73,4 +73,39 @@ void main() {
       b.dispose();
     }
   });
+
+  // Same rule for the right panel: it used to leave the tree outright, so it
+  // appeared and vanished with no travel at all.
+  testWidgets('closing the right panel travels too', (tester) async {
+    tester.view.physicalSize = const Size(1320, 840);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final bench = Workbench(const Settings(baseUrl: 'http://127.0.0.1:1', token: 't'));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark().copyWith(platform: TargetPlatform.macOS),
+        home: WorkbenchPage(
+          bench: bench,
+          onEditServer: () {},
+          collapsed: false,
+          onCollapsed: (_) {},
+        ),
+      ),
+    );
+    await tester.pump();
+
+    double width() => tester.getSize(find.byKey(const ValueKey('rightpane'))).width;
+    expect(width(), 290);
+    await tester.tap(find.byTooltip(tr('wb.hideRight')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(width(), greaterThan(0), reason: 'still on its way out');
+    expect(width(), lessThan(290), reason: 'has started moving');
+    await tester.pumpAndSettle();
+    expect(width(), 0);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    bench.dispose();
+  });
 }
