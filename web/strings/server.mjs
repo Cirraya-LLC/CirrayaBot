@@ -107,6 +107,14 @@ export const serverStrings = {
     '连上了，但这次一个字都没返回（多半是中转的坏通道，再试一次）',
     '連上了，但這次一個字都沒有回傳（多半是中繼的壞通道，再試一次）'],
 
+  // Spending
+  'spend.capped': [
+    '{name} has reached today\u2019s spend cap of {cap} (already {spent}). Raise it in "Edit agent", or wait until tomorrow.',
+    '{name} 已经达到今天的花费上限 {cap}（已花 {spent}）。要么在「编辑 Agent」里调高，要么等明天。',
+    '{name} 已達到今天的花費上限 {cap}（已花 {spent}）。請在「編輯 Agent」裡調高，或等明天。'],
+  'spend.badCap': ['The daily cap must be a number, or empty for no cap', '每日上限要是一个数字，留空表示不限', '每日上限必須是數字，留空表示不限制'],
+  'spend.badPrice': ['A price must be a number, or empty when you don\u2019t know it', '价格要是一个数字，不知道就留空', '價格必須是數字，不知道就留空'],
+
   // Chat history import
   'import.badFile': ['This is not a chat history file exported by this app', '不是本产品导出的聊天记录文件', '不是本產品匯出的聊天紀錄檔案'],
   'import.badRow':  ['Message {n} is malformed (it needs role and content)', '第 {n} 条格式不对（要有 role 和 content）', '第 {n} 則格式不對（需要 role 和 content）'],

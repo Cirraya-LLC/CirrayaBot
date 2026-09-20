@@ -86,6 +86,22 @@ here, instead of half an hour later as "some Agent isn't talking".
 
 With several upstreams, click the small dot on the left to switch which one is in use.
 
+## What it costs, and holding it back
+
+Every model call is recorded: tokens, and money when the upstream has prices. The left column's
+footer shows today's and this month's total; the right panel shows it per Agent in the open
+conversation, with the cap in force.
+
+- **Prices** go on the upstream, per million tokens (`Input $/M` / `Output $/M`). Leave them
+  empty if you don't know them: calls are still counted in tokens, but they have no cost —
+  and no cap can hold them. Unknown is shown as `—`, never as `$0.00`.
+- **The daily cap** is per Agent (Edit Agent → *Daily spend cap $*), falling back to a
+  platform-wide default set next to the prices. It is checked before every model call, so a
+  turn that runs a dozen tools stops at the dozenth, not after it. Past the cap the Agent
+  refuses the turn with a message saying so; a scheduled task records the reason and is **not**
+  counted as a failure, so a cap pauses it rather than disabling it. The day resets at midnight
+  in the server's timezone.
+
 ## Letting Agents actually do things
 
 By default Agents can only talk. Set `AGENT_TOOLS=on` in `.env` and run `docker compose up -d`;

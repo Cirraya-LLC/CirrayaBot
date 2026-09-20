@@ -61,6 +61,10 @@ class Workbench extends ChangeNotifier {
   late final Timer _poller;
   List<Routine> routines = const [];
 
+  /// What everyone has spent. Reloaded with the conversation list, so the
+  /// sidebar total and the panel never disagree about which moment they show.
+  Usage usage = const Usage();
+
   /// Skills installed on the open Agent (empty for groups — skills live on people).
   List<Skill> skills = const [];
 
@@ -106,6 +110,11 @@ class Workbench extends ChangeNotifier {
       conversations = results[0] as List<Conversation>;
       agents = results[1] as List<Agent>;
       error = null;
+      // Best effort: a spend panel that failed to load must not take the
+      // conversation list down with it.
+      try {
+        usage = await api.usage();
+      } on ApiException catch (_) {}
 
       final id = current?.id;
       if (keepSelection && id != null) {

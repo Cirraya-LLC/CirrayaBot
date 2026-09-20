@@ -70,4 +70,23 @@ void main() {
     api.close();
     await server.close(force: true);
   });
+
+  // Money is an integer (micro-dollars) everywhere but the screen. The two things
+  // that must not blur: "we don't know" is not zero, and a cent of spend must not
+  // round away to $0.00 in a panel whose whole job is showing what was spent.
+  test('money reads as money, and unknown does not read as free', () {
+    expect(moneyText(null), '\u2014');
+    expect(moneyText(0), '\$0.0000');
+    expect(moneyText(1234), '\$0.0012');
+    expect(moneyText(2500000), '\$2.50');
+
+    expect(parseDollars('').value, isNull); //      empty = not set
+    expect(parseDollars('  ').ok, isTrue);
+    expect(parseDollars('2.50').value, 2500000);
+    expect(parseDollars('abc').ok, isFalse); //     a typo must not become a cap of 0
+    expect(parseDollars('-1').ok, isFalse);
+    expect(dollarsText(parseDollars('0.15').value), '0.15');
+    expect(dollarsText(10000000), '10'); //          not '10.0' in a box you retype
+    expect(dollarsText(null), '');
+  });
 }

@@ -39,6 +39,9 @@ class _AgentEditorState extends State<_AgentEditor> {
 
   /// Typed model name — only used when the upstream will not list its models.
   late final _manualModel = TextEditingController(text: widget.agent?.model ?? '');
+
+  /// Daily spend cap, in dollars as typed. Empty = the platform default.
+  late final _cap = TextEditingController(text: dollarsText(widget.agent?.dailyCapMicro));
   late String _providerId = widget.agent?.providerId ?? '';
   List<Provider> _providers = const [];
   List<String> _models = const [];
@@ -90,12 +93,21 @@ class _AgentEditorState extends State<_AgentEditor> {
 
   String get _chosenModel => (_models.isEmpty ? _manualModel.text : _model).trim();
 
+  /// The upstream in force for this agent has no prices, so a cap cannot bite.
+  bool get _capUseless {
+    final chosen = _providerId.isEmpty
+        ? _providers.where((p) => p.isDefault).firstOrNull ?? _providers.firstOrNull
+        : _providers.where((p) => p.id == _providerId).firstOrNull;
+    return chosen != null && !chosen.priced;
+  }
+
   @override
   void dispose() {
     _name.dispose();
     _desc.dispose();
     _persona.dispose();
     _manualModel.dispose();
+    _cap.dispose();
     super.dispose();
   }
 
@@ -125,6 +137,11 @@ class _AgentEditorState extends State<_AgentEditor> {
       setState(() => _error = tr(_modelsLoading ? 'ed.modelsLoading' : 'ed.pickModel'));
       return;
     }
+    final cap = parseDollars(_cap.text);
+    if (!cap.ok) {
+      setState(() => _error = tr('ed.badCap'));
+      return;
+    }
     final a = widget.agent;
     final body = <String, Object?>{
       'name': name,
@@ -132,6 +149,7 @@ class _AgentEditorState extends State<_AgentEditor> {
       'persona': persona,
       'provider_id': _providerId,
       'model': _chosenModel,
+      'daily_cap_micro': cap.value,
     };
     await _run(() async {
       if (a == null) return widget.bench.api.createAgent(body);
@@ -248,6 +266,18 @@ class _AgentEditorState extends State<_AgentEditor> {
                 ),
               ],
             ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _cap,
+              decoration: InputDecoration(labelText: tr('ed.dailyCap'), hintText: tr('ed.dailyCapHint')),
+            ),
+            // A cap only means something when the upstream has prices — saying so
+            // beats letting someone think a number here is guarding them.
+            if (_capUseless)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(tr('wb.unpriced'), style: const TextStyle(fontSize: 11, color: C.warn)),
+              ),
             if (_error.isNotEmpty) ...[
               const SizedBox(height: 10),
               Text(_error, style: const TextStyle(fontSize: 12, color: C.code)),

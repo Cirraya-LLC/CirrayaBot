@@ -32,6 +32,11 @@ class _ProvidersPageState extends State<ProvidersPage> {
   final _url = TextEditingController();
   final _key = TextEditingController();
   final _tokens = TextEditingController();
+
+  /// Prices per million tokens and the platform-wide cap, in dollars as typed.
+  final _priceIn = TextEditingController();
+  final _priceOut = TextEditingController();
+  final _defaultCap = TextEditingController();
   bool _auto = true;
   bool _busy = false;
   String _protocol = 'chat';
@@ -46,7 +51,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   @override
   void dispose() {
-    for (final c in [_name, _url, _key, _tokens]) {
+    for (final c in [_name, _url, _key, _tokens, _priceIn, _priceOut, _defaultCap]) {
       c.dispose();
     }
     super.dispose();
@@ -55,6 +60,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
   Future<void> _load() async {
     try {
       _rows = await widget.api.providers();
+      _defaultCap.text = dollarsText((await widget.api.usage()).defaultCapMicro);
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
     } on ApiException catch (e) {
       _say(e.message, bad: true);
@@ -69,6 +75,8 @@ class _ProvidersPageState extends State<ProvidersPage> {
     _protocol = p?.protocol ?? 'chat';
     _key.text = '';
     _tokens.text = p == null ? '' : '${p.contextTokens}';
+    _priceIn.text = dollarsText(p?.priceInMicro);
+    _priceOut.text = dollarsText(p?.priceOutMicro);
     _auto = p?.autoContext ?? true;
     _hint = p == null ? '' : (p.autoContext ? p.ctxSource : tr('prov.ctxManual', {'n': p.contextTokens, 'source': p.ctxSource}));
     _hintColor = C.dim;
@@ -91,6 +99,9 @@ class _ProvidersPageState extends State<ProvidersPage> {
     'api_key': _key.text,
     'auto_context': _auto,
     if (!_auto) 'context_tokens': int.tryParse(_tokens.text.trim()) ?? 128000,
+    // null means "not known" — never a price of zero.
+    'price_in_micro': parseDollars(_priceIn.text).value,
+    'price_out_micro': parseDollars(_priceOut.text).value,
   };
 
   /// Every button goes through here: one request at a time (a second click on
@@ -127,6 +138,10 @@ class _ProvidersPageState extends State<ProvidersPage> {
       _say(tr('prov.needFields'), bad: true);
       return;
     }
+    if (!parseDollars(_priceIn.text).ok || !parseDollars(_priceOut.text).ok) {
+      _say(tr('prov.badPrice'), bad: true);
+      return;
+    }
     await _act(tr('prov.saving'), () async {
       final saved = await widget.api.saveProvider(_body, id: _editing?.id);
       _rows = await widget.api.providers();
@@ -137,6 +152,18 @@ class _ProvidersPageState extends State<ProvidersPage> {
             : tr('prov.savedManual', {'n': saved.contextTokens}),
         good: true,
       );
+    });
+  }
+
+  Future<void> _saveDefaultCap() async {
+    final cap = parseDollars(_defaultCap.text);
+    if (!cap.ok) {
+      _say(tr('prov.badPrice'), bad: true);
+      return;
+    }
+    await _act(tr('prov.saving'), () async {
+      await widget.api.setDefaultCap(cap.value);
+      _say(tr('prov.capSaved', {'cap': cap.value == null ? tr('prov.noCap') : moneyText(cap.value)}), good: true);
     });
   }
 
@@ -251,6 +278,43 @@ class _ProvidersPageState extends State<ProvidersPage> {
                         ),
                         const SizedBox(width: 9),
                         TextButton(onPressed: _busy ? null : _test, child: Text(tr('setup.test'))),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _priceIn,
+                            decoration: InputDecoration(labelText: tr('prov.priceIn'), hintText: '1.25'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: _priceOut,
+                            decoration: InputDecoration(labelText: tr('prov.priceOut'), hintText: '10'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(tr('prov.priceHint'), style: const TextStyle(fontSize: 11.5, color: C.dim2)),
+                    const SizedBox(height: 14),
+                    const Divider(height: 1),
+                    const SizedBox(height: 12),
+                    // Not a property of any one upstream: it is what every agent without a
+                    // cap of its own falls back to, so it saves on its own button.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _defaultCap,
+                            decoration: InputDecoration(labelText: tr('prov.defaultCap'), hintText: '5'),
+                          ),
+                        ),
+                        const SizedBox(width: 9),
+                        TextButton(onPressed: _busy ? null : _saveDefaultCap, child: Text(tr('common.save'))),
                       ],
                     ),
                     const SizedBox(height: 10),

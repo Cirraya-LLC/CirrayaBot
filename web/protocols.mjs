@@ -6,6 +6,7 @@
 // come back as one { content, calls }. Switching protocol touches neither the agent loop nor history.
 
 import { Say } from './i18n.mjs'
+import { estimateUsage } from './model.mjs'
 
 // Upstream failures. `upstream` / `upstreamStatus` let callers decide on retries without
 // matching the (translated) message text.
@@ -125,6 +126,8 @@ function buildRequest(p, messages, tools) {
 // calls accumulate by their own index key: tool arguments arrive in fragments.
 
 function chatFrame(f, st, onDelta) {
+  // The usage chunk comes last and carries no choices (choices: []) — measured on a real relay.
+  if (f.usage) st.count(f.usage.prompt_tokens, f.usage.completion_tokens)
   if (f.choices?.[0]?.finish_reason === 'length') st.truncated = true
   const delta = f.choices?.[0]?.delta
   if (delta?.content) { st.content += delta.content; onDelta(delta.content) }
@@ -154,6 +157,9 @@ function responsesFrame(f, st, onDelta) {
     case 'response.function_call_arguments.delta':
       st.call(f.output_index).args += f.delta ?? ''
       break
+    case 'response.completed':
+      st.count(f.response?.usage?.input_tokens, f.response?.usage?.output_tokens)
+      break
     case 'response.failed':
     case 'response.incomplete':
       throw upstreamFail('protocol.upstreamError', { detail: f.response?.error?.message ?? f.response?.incomplete_details?.reason ?? f.type })
@@ -161,6 +167,12 @@ function responsesFrame(f, st, onDelta) {
 }
 
 function messagesFrame(f, st, onDelta) {
+  // Anthropic splits it: the prompt is known at message_start, the completion only at message_delta.
+  // Cache reads/writes are prompt tokens too — leaving them out would make a cached turn look free.
+  const u = f.type === 'message_start' ? f.message?.usage : f.type === 'message_delta' ? f.usage : null
+  if (u) st.count(
+    (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) || null,
+    u.output_tokens)
   if (f.type === 'message_delta' && f.delta?.stop_reason === 'max_tokens') st.truncated = true
   if (f.type === 'content_block_start' && f.content_block?.type === 'tool_use') {
     const c = st.call(f.index)
@@ -186,6 +198,14 @@ export async function callUpstream(p, messages, tools, onDelta, signal) {
   const st = {
     content: '',
     call: k => { if (!slots.has(k)) slots.set(k, { id: '', name: '', args: '' }); return slots.get(k) },
+    // What the upstream says this call cost. Each protocol reports the two halves at a
+    // different moment (and some relays report neither), so take whatever arrives and
+    // remember that it did: a silent 0 would read as "this call was free".
+    used: { prompt: 0, completion: 0, reported: false },
+    count(prompt, completion) {
+      if (Number(prompt) > 0) { st.used.prompt = Number(prompt); st.used.reported = true }
+      if (Number(completion) > 0) { st.used.completion = Number(completion); st.used.reported = true }
+    },
   }
   const onLine = line => {
     if (!line.startsWith('data:')) return             // event: lines don't matter, frames carry their own type
@@ -218,7 +238,11 @@ export async function callUpstream(p, messages, tools, onDelta, signal) {
   const calls = [...slots.values()].filter(c => c.name).map(c => ({ ...c, id: c.id || `call_${Math.random().toString(36).slice(2, 10)}` }))
   // Not a word and no tool call — also a failure (usually a bad channel that didn't even report an error)
   if (!st.content.trim() && !calls.length) throw upstreamFail('protocol.empty')
-  return { content: st.content, calls }
+  // An upstream that said nothing about tokens still cost money: estimate rather than record zero.
+  const usage = st.used.reported
+    ? { prompt: st.used.prompt, completion: st.used.completion, estimated: false }
+    : { ...estimateUsage(messages, st.content, calls), estimated: true }
+  return { content: st.content, calls, usage }
 }
 
 // Self-test: node web/protocols.mjs
@@ -244,7 +268,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a(ri.some(x => x.type === 'function_call_output' && x.output === 'a.txt'), 'responses tool result')
 
   // Stream parsing: argument fragments must be joined
-  const st = { content: '', m: new Map(), call(k) { if (!this.m.has(k)) this.m.set(k, { id: '', name: '', args: '' }); return this.m.get(k) } }
+  const st = { content: '', m: new Map(), call(k) { if (!this.m.has(k)) this.m.set(k, { id: '', name: '', args: '' }); return this.m.get(k) },
+    used: { prompt: 0, completion: 0, reported: false },
+    count(p, c) { if (Number(p) > 0) { this.used.prompt = Number(p); this.used.reported = true }
+                  if (Number(c) > 0) { this.used.completion = Number(c); this.used.reported = true } } }
   messagesFrame({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'x', name: 'bash' } }, st, () => {})
   messagesFrame({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"comm' } }, st, () => {})
   messagesFrame({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: 'and":"ls"}' } }, st, () => {})
@@ -266,5 +293,29 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a(rs.content[1].type === 'input_image' && rs.content[1].image_url === img, 'responses: input_image')
   const am = toAnthropic(withImg).messages[0].content
   a(am[1].type === 'image' && am[1].source.media_type === 'image/jpeg' && am[1].source.data === 'QUJD', 'messages: base64 image block')
+  // Usage: every protocol reports it, each in its own place and at its own moment.
+  const meter = () => ({ used: { prompt: 0, completion: 0, reported: false },
+    count(p, c) { if (Number(p) > 0) { this.used.prompt = Number(p); this.used.reported = true }
+                  if (Number(c) > 0) { this.used.completion = Number(c); this.used.reported = true } },
+    content: '', call: () => ({ id: '', name: '', args: '' }) })
+
+  const u1 = meter()
+  chatFrame({ choices: [], usage: { prompt_tokens: 4388, completion_tokens: 6 } }, u1, () => {})
+  a(u1.used.prompt === 4388 && u1.used.completion === 6 && u1.used.reported, 'chat: usage comes on a chunk with no choices')
+
+  const u2 = meter()
+  responsesFrame({ type: 'response.completed', response: { usage: { input_tokens: 4388, output_tokens: 6 } } }, u2, () => {})
+  a(u2.used.prompt === 4388 && u2.used.completion === 6, 'responses: usage on response.completed')
+
+  const u3 = meter()
+  messagesFrame({ type: 'message_start', message: { usage: { input_tokens: 9, cache_read_input_tokens: 100, cache_creation_input_tokens: 5 } } }, u3, () => {})
+  a(u3.used.prompt === 114 && u3.used.completion === 0, 'messages: cached prompt tokens are still prompt tokens')
+  messagesFrame({ type: 'message_delta', usage: { output_tokens: 5 } }, u3, () => {})
+  a(u3.used.prompt === 114 && u3.used.completion === 5, 'messages: the completion only arrives at message_delta, and must not wipe the prompt')
+
+  const u4 = meter()
+  chatFrame({ choices: [{ delta: { content: 'hi' } }] }, u4, () => {})
+  a(!u4.used.reported, 'an upstream that says nothing must not look like zero tokens')
+
   console.log('protocols.mjs self-test passed')
 }
