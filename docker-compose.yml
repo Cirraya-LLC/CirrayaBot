@@ -53,9 +53,33 @@ services:
       BOT_LLM_PROTOCOL: ${BOT_LLM_PROTOCOL:-}
       BOT_LLM_NAME: ${BOT_LLM_NAME:-}
       BOT_LLM_CONTEXT: ${BOT_LLM_CONTEXT:-}
+      # The studio (below). The app creates the studio's database role from this password,
+      # and is the only thing that holds the token that talks to it.
+      STUDIO_URL: http://studio:8090
+      STUDIO_TOKEN: ${STUDIO_TOKEN:?run ./start.sh first to generate .env}
+      STUDIO_DB_PASSWORD: ${STUDIO_DB_PASSWORD:?run ./start.sh first to generate .env}
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH}:/app/workspace
 
+  # The film studio: asset library, shots, model adapters (studio/). Internal only — no port is
+  # published, agents can't reach it; the app calls it on their behalf. Model keys for
+  # Seedance / GPT image / ComfyUI live here and nowhere else.
+  studio:
+    build: ./studio
+    restart: unless-stopped
+    depends_on:
+      # the app creates the studio's database role on startup
+      app:
+        condition: service_healthy
+    environment:
+      STUDIO_DATABASE_URL: postgres://studio:${STUDIO_DB_PASSWORD}@db:5432/multiagent
+      STUDIO_TOKEN: ${STUDIO_TOKEN}
+    volumes:
+      # Content-addressed files (studio/store.mjs). A named volume: nothing else mounts it,
+      # so it needs no host path, and it works the same under podman.
+      - studiodata:/data
+
 volumes:
   pgdata:
+  studiodata:
