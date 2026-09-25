@@ -48,12 +48,23 @@ const toolsFor = (protocol, tools) => {
 // Images are never stored in the database.
 
 /** Chat Completions: a user message with images gets an array `content` */
-export function toChatMessages(messages) {
-  return messages.map(({ images, ...m }) => images?.length
-    ? { ...m, content: [{ type: 'text', text: String(m.content || ' ') },
-        ...images.map(url => ({ type: 'image_url', image_url: { url } }))] }
-    : m)
+export function toChatMessages(messages, model = '') {
+  const keepReasoning = isDeepseek(model)
+  return messages.map(({ images, reasoning_content, ...m }) => {
+    // DeepSeek in thinking mode wants its own reasoning back on every later request that carries
+    // tools (a 400 otherwise); other upstreams may reject the unknown field, so only there.
+    if (keepReasoning && reasoning_content && m.role === 'assistant') m = { ...m, reasoning_content }
+    return images?.length
+      ? { ...m, content: [{ type: 'text', text: String(m.content || ' ') },
+          ...images.map(url => ({ type: 'image_url', image_url: { url } }))] }
+      : m
+  })
 }
+
+// DeepSeek's own models (deepseek-flash, deepseek-v4-*): thinking on by default, reasoning_content
+// to be passed back, and an effort vocabulary of low / high / max.
+export const isDeepseek = model => /^deepseek/i.test(String(model ?? ''))
+const DEEPSEEK_EFFORT = { low: 'low', medium: 'high', high: 'max' }
 
 /** data:image/jpeg;base64,xxx → an Anthropic image block */
 const anthropicImage = url => {
@@ -134,8 +145,8 @@ export function buildRequest(p, messages, tools, effort = '') {
   }
   return {
     url: `${base}/chat/completions`, headers: bearer,
-    body: { model: p.model, messages: toChatMessages(messages), stream: true,
-            ...effort ? { reasoning_effort: effort } : {},
+    body: { model: p.model, messages: toChatMessages(messages, p.model), stream: true,
+            ...effort ? { reasoning_effort: isDeepseek(p.model) ? DEEPSEEK_EFFORT[effort] : effort } : {},
             ...tools?.length ? { tools, tool_choice: 'auto' } : {} },
   }
 }
@@ -150,6 +161,7 @@ function chatFrame(f, st, onDelta) {
   if (f.choices?.[0]?.finish_reason === 'length') st.truncated = true
   const delta = f.choices?.[0]?.delta
   if (delta?.content) { st.content += delta.content; onDelta(delta.content) }
+  if (delta?.reasoning_content) st.reasoning += delta.reasoning_content
   for (const tc of delta?.tool_calls ?? []) {
     const c = st.call(tc.index ?? 0)
     if (tc.id) c.id = tc.id
@@ -242,6 +254,7 @@ export async function callUpstream(p, messages, tools, onDelta, signal) {
   const slots = new Map()
   const st = {
     content: '',
+    reasoning: '',                                    // chat only: DeepSeek's thinking, which it wants back
     call: k => { if (!slots.has(k)) slots.set(k, { id: '', name: '', args: '' }); return slots.get(k) },
     // What the upstream says this call cost. Each protocol reports the two halves at a
     // different moment (and some relays report neither), so take whatever arrives and
@@ -287,7 +300,7 @@ export async function callUpstream(p, messages, tools, onDelta, signal) {
   const usage = st.used.reported
     ? { prompt: st.used.prompt, completion: st.used.completion, estimated: false }
     : { ...estimateUsage(messages, st.content, calls), estimated: true }
-  return { content: st.content, calls, usage }
+  return { content: st.content, calls, usage, reasoning: st.reasoning }
 }
 
 // Self-test: node web/protocols.mjs
@@ -342,7 +355,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const meter = () => ({ used: { prompt: 0, completion: 0, reported: false },
     count(p, c) { if (Number(p) > 0) { this.used.prompt = Number(p); this.used.reported = true }
                   if (Number(c) > 0) { this.used.completion = Number(c); this.used.reported = true } },
-    content: '', call: () => ({ id: '', name: '', args: '' }) })
+    content: '', reasoning: '', call: () => ({ id: '', name: '', args: '' }) })
 
   const u1 = meter()
   chatFrame({ choices: [], usage: { prompt_tokens: 4388, completion_tokens: 6 } }, u1, () => {})
@@ -384,6 +397,20 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a(blamesEffort('Unsupported parameter: \'reasoning_effort\''), 'spots a rejected chat effort')
   a(blamesEffort('`thinking.budget_tokens` must be less than `max_tokens`'), 'spots a rejected thinking budget')
   a(!blamesEffort('model_not_found'), 'an unrelated 400 is not blamed on effort')
+
+  // DeepSeek (thinking by default): its reasoning goes back to it, and nowhere else.
+  const ds = (model, effort) => buildRequest({ base_url: 'http://x', model, protocol: 'chat' }, [
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: 'ok', reasoning_content: 'thought' },
+  ], null, effort).body
+  a(ds('deepseek-flash').messages[1].reasoning_content === 'thought', 'deepseek: reasoning_content passed back')
+  a(!('reasoning_content' in ds('gpt-5.5').messages[1]), 'others: reasoning_content never sent')
+  a(ds('deepseek-flash', 'medium').reasoning_effort === 'high' && ds('deepseek-flash', 'high').reasoning_effort === 'max'
+    && ds('deepseek-flash', 'low').reasoning_effort === 'low', 'deepseek: effort in its own words (low / high / max)')
+  const u5 = meter()
+  chatFrame({ choices: [{ delta: { reasoning_content: 'th' } }] }, u5, () => {})
+  chatFrame({ choices: [{ delta: { reasoning_content: 'ink', content: 'x' } }] }, u5, () => {})
+  a(u5.reasoning === 'think' && u5.content === 'x', 'chat: reasoning collected apart from the answer')
 
   console.log('protocols.mjs self-test passed')
 }

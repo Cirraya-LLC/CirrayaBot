@@ -14,6 +14,9 @@ import * as comfy from './comfy.mjs'
 import { probe, contactSheet, MAX_ROWS } from './media.mjs'
 import { enqueue } from './notify.mjs'
 import * as keys from './keys.mjs'
+import { normDialogue, promptBlock, speaksOnCamera } from './dialogue.mjs'
+import { ready as ttsReady } from './tts.mjs'
+import { CLOSED_BY_AGENT } from './pipeline.mjs'
 
 export class StudioError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
@@ -62,6 +65,13 @@ async function locOf(p, name) {
   if (!l) fail('no_such_location', `project ${p.id} has no location "${n}" (loc.list shows them)`, 404)
   return l
 }
+async function episodeOf(p, code) {
+  const c = text(code, 40)
+  if (!c) fail('bad_arg', 'which episode? (episode code, e.g. E01)')
+  const e = (await db.q('select * from episodes where project_id = $1 and lower(code) = lower($2)', [p.id, c])).rows[0]
+  if (!e) fail('no_such_episode', `project ${p.id} has no episode ${c} (episode.list shows them)`, 404)
+  return e
+}
 async function sceneOf(p, code) {
   const c = text(code, 40)
   if (!c) fail('bad_arg', 'which scene? (scene code, e.g. S03)')
@@ -100,6 +110,9 @@ const assetView = a => ({
   generation_id: a.generation_id, created_by: a.created_by, created_at: a.created_at,
 })
 const projectView = p => ({ id: p.id, name: p.name, notify_group: p.notify_group, info: p.info })
+// Vertical is what a short drama is. New projects start there; an older project keeps what it had.
+export const DEFAULT_RATIO = '9:16'
+export const ratioOf = info => info?.seedance?.ratio ?? info?.ratio ?? '16:9'
 
 // ---------- storing files ----------
 /** Sniff the real type: the caller's word for it is not evidence. */
@@ -108,19 +121,30 @@ export function sniff(buf) {
   if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg'
   if (buf.length > 12 && buf.subarray(0, 4).toString() === 'RIFF' && buf.subarray(8, 12).toString() === 'WEBP') return 'image/webp'
   if (buf.length > 12 && buf.subarray(4, 8).toString() === 'ftyp') return 'video/mp4'
+  if (buf.length > 3 && buf.subarray(0, 3).toString() === 'ID3') return 'audio/mpeg'
+  if (buf.length > 2 && buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return 'audio/mpeg'
+  if (buf.length > 12 && buf.subarray(0, 4).toString() === 'RIFF' && buf.subarray(8, 12).toString() === 'WAVE') return 'audio/wav'
   return ''
 }
 
-export function makeActions({ store, kick = () => {} }) {
+// kick(projectId): the pipeline should look at this project again. kickWorker(): there is
+// something new for the worker (a take, a cut).
+export function makeActions({ store, kick = () => {}, kickWorker = () => {} }) {
   /** Put bytes in the store and describe them. Returns the columns an asset row needs. */
   async function stash(input, { maxBytes, mime: given } = {}) {
     const r = await store.put(input, { maxBytes })
     const head = await store.read(r.sha256).then(b => b.subarray(0, 32))
     const mime = sniff(head) || given || ''
-    if (!mime) fail('bad_file', 'that is not a PNG, JPEG, WebP or MP4 file')
+    if (!mime) fail('bad_file', 'that is not a PNG, JPEG, WebP, MP4, MP3 or WAV file')
     let meta = { width: null, height: null, duration_ms: null }
     try { meta = await probe(store.path(r.sha256)) } catch (e) { fail('bad_file', `the file can't be read as media: ${e.message}`) }
     return { sha256: r.sha256, bytes: r.bytes, mime, width: meta.width, height: meta.height, duration_ms: meta.duration_ms }
+  }
+
+  /** Text files (subtitles): stored like any other file, but nothing to probe. */
+  async function stashText(str, mime) {
+    const r = await store.put(Buffer.from(str, 'utf8'), { maxBytes: 10 * 1024 ** 2 })
+    return { sha256: r.sha256, bytes: r.bytes, mime, width: null, height: null, duration_ms: null }
   }
 
   async function addAsset(p, file, f) {
@@ -211,7 +235,9 @@ export function makeActions({ store, kick = () => {} }) {
     const name = text(a.name, 80)
     if (!name) fail('name_required', 'a project needs a name')
     if (await db.getProject(a.id)) fail('exists', `project "${a.id}" already exists`, 409)
-    return projectView(await db.createProject({ id: a.id, name, info: obj(a.info, 'info') ?? {}, notify_group: text(a.notify_group, 80) }))
+    const info = obj(a.info, 'info') ?? {}
+    if (!info.ratio && !info.seedance?.ratio) info.ratio = DEFAULT_RATIO
+    return projectView(await db.createProject({ id: a.id, name, info, notify_group: text(a.notify_group, 80) }))
   }
   H['project.edit'] = async a => {
     const p = await db.getProject(text(a.project))
@@ -250,7 +276,7 @@ export function makeActions({ store, kick = () => {} }) {
   H['char.list'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
     const { rows } = await db.q(`
-      select c.name, c.status, coalesce(json_agg(json_build_object('name', l.name, 'status', l.status) order by l.created_at)
+      select c.name, c.status, c.card->'voice' as voice, coalesce(json_agg(json_build_object('name', l.name, 'status', l.status) order by l.created_at)
              filter (where l.id is not null), '[]') as looks
         from characters c left join looks l on l.character_id = c.id
        where c.project_id = $1 group by c.id order by c.created_at`, [p.id])
@@ -284,6 +310,16 @@ export function makeActions({ store, kick = () => {} }) {
     await db.q(`update characters set card = coalesce($2, card), forbidden = coalesce($3, forbidden), updated_at = now() where id = $1`,
       [c.id, obj(a.card, 'card') ?? null, a.forbidden === undefined ? null : list(a.forbidden).slice(0, 40)])
     return { name: c.name, updated: true }
+  }
+  // A voice isn't the look: it can be set on a locked character (the picture stays final).
+  H['char.voice'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const c = await charOf(p, a.name)
+    const voice = text(a.voice, 80)
+    if (!voice) fail('bad_arg', 'which voice? (the speech service\'s name for it, e.g. alloy, nova, onyx)')
+    const v = { voice, instructions: text(a.instructions, 1000) }
+    await db.q(`update characters set card = card || jsonb_build_object('voice', $2::jsonb), updated_at = now() where id = $1`, [c.id, JSON.stringify(v)])
+    return { name: c.name, voice: v }
   }
   H['look.add'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
@@ -499,10 +535,12 @@ export function makeActions({ store, kick = () => {} }) {
   // ---- scenes ----
   H['scene.list'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
-    return (await db.q(`select sc.code, sc.title, sc.locked, count(s.id)::int as shots,
+    const ep = a.episode ? await episodeOf(p, a.episode) : null
+    return (await db.q(`select sc.code, sc.title, sc.locked, e.code as episode, count(s.id)::int as shots,
         count(s.id) filter (where s.status in ('approved','locked'))::int as approved
-        from scenes sc left join shots s on s.scene_id = sc.id where sc.project_id = $1
-        group by sc.id order by sc.ord, sc.created_at`, [p.id])).rows
+        from scenes sc left join shots s on s.scene_id = sc.id left join episodes e on e.id = sc.episode_id
+        where sc.project_id = $1 ${ep ? 'and sc.episode_id = $2' : ''}
+        group by sc.id, e.code order by sc.ord, sc.created_at`, ep ? [p.id, ep.id] : [p.id])).rows
   }
   H['scene.show'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
@@ -517,15 +555,21 @@ export function makeActions({ store, kick = () => {} }) {
     if (!/^[\w.-]{1,40}$/.test(code)) fail('bad_arg', 'a scene code is letters, digits, dot, dash or underscore (e.g. S03)')
     const script = typeof a.script === 'string' ? a.script.trim().slice(0, 200_000) : ''
     if (!script) fail('bad_arg', 'a scene carries its slice of the script (script) — copy it exactly as the user gave it')
+    // A series cuts scenes out of an episode; a project with episodes needs to know which.
+    const hasEpisodes = (await db.q('select 1 from episodes where project_id = $1 limit 1', [p.id])).rowCount
+    const ep = a.episode ? await episodeOf(p, a.episode) : null
+    if (hasEpisodes && !ep) fail('bad_arg', 'which episode is this scene in? (episode, e.g. E01 — episode.list shows them)')
+    if (ep && !['breakdown', 'draft'].includes(ep.stage) && ctx.actor?.kind !== 'human')
+      fail('bad_state', `${ep.code} is past its breakdown (${ep.stage}); new scenes need a person to send it back`, 409)
     const id = db.newId('sc')
     try {
-      await db.q('insert into scenes (id, project_id, code, title, script, ord, created_by) values ($1,$2,$3,$4,$5,$6,$7)',
-        [id, p.id, code, text(a.title, 120), script, Number.isInteger(a.ord) ? a.ord : 0, ctx.actorKey])
+      await db.q('insert into scenes (id, project_id, code, title, script, ord, created_by, episode_id) values ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [id, p.id, code, text(a.title, 120), script, Number.isInteger(a.ord) ? a.ord : 0, ctx.actorKey, ep?.id ?? null])
     } catch (e) {
       if (e.code === '23505') fail('exists', `scene ${code} already exists; its text is the user's and only a person can change it (scene.edit)`, 409)
       throw e
     }
-    return { code, title: text(a.title, 120) }
+    return { code, title: text(a.title, 120), ...ep ? { episode: ep.code } : {} }
   }
   H['scene.edit'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
@@ -546,7 +590,9 @@ export function makeActions({ store, kick = () => {} }) {
     const priority = ['hero', 'normal', 'filler'].includes(d.priority) ? d.priority : 'normal'
     const warn = []
     if (!d.continuity?.in_from && !d.continuity?.out_to) warn.push(`${code}: no continuity written — the reviewer checks continuity against it`)
-    return { code, priority, def: d, warn }
+    const { lines, error } = normDialogue(d.dialogue)
+    if (error) fail('bad_shot', `${code}: ${error}`)
+    return { code, priority, def: { ...d, dialogue: lines }, warn }
   }
   H['shot.plan'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
@@ -556,6 +602,11 @@ export function makeActions({ store, kick = () => {} }) {
     if (!shots.length || shots.length > 60) fail('bad_arg', 'between 1 and 60 shots per plan')
     const checked = shots.map(checkShotDef)
     const out = [], warn = []
+    // Speakers are characters (a voice and a face). An extra who says one line may not be one —
+    // said, not refused.
+    const known = new Set((await db.q('select lower(name) as n from characters where project_id = $1', [p.id])).rows.map(r => r.n))
+    for (const c of checked) for (const l of c.def.dialogue)
+      if (l.speaker && !known.has(l.speaker.toLowerCase())) warn.push(`${c.code}: "${l.speaker}" speaks but is not a character in the bible — their voice will be the default one`)
     for (const [i, c] of checked.entries()) {
       warn.push(...c.warn)
       const cur = (await db.q('select * from shots where project_id = $1 and lower(code) = lower($2)', [p.id, c.code])).rows[0]
@@ -611,7 +662,12 @@ export function makeActions({ store, kick = () => {} }) {
     const lim = seedance.limits(p.info)
     const round = db.newId('rd')
     const info = p.info?.seedance ?? {}
-    const params = { duration: Number(s.def?.duration_s) || 5, ratio: info.ratio ?? '16:9', resolution: info.resolution ?? '720p', audio: info.generate_audio === true }
+    // On-camera dialogue is generated with the picture, so the lips match: the studio adds the lines
+    // and turns sound on itself — a prompt that forgot them can't lose them.
+    const lines = s.def?.dialogue ?? []
+    const params = { duration: Number(s.def?.duration_s) || 5, ratio: ratioOf(p.info), resolution: info.resolution ?? '720p',
+      audio: info.generate_audio === true || speaksOnCamera(lines) }
+    const sent = pr.text + promptBlock(lines, p.info?.lang)
     // The hourly cap is checked and the takes inserted in one transaction, under a per-project
     // lock — two shot.gen calls at once must not both see "36 used" and both add 8.
     const left = await db.tx(async q => {
@@ -626,12 +682,13 @@ export function makeActions({ store, kick = () => {} }) {
       for (let i = 0; i < n; i++) {
         await q(`insert into generations (id, project_id, shot_id, engine, model, kind, prompt, prompt_version, ref_asset_ids, params, requested_by, round)
           values ($1,$2,$3,'seedance',$4,'video',$5,$6,$7,$8,$9,$10)`,
-        [db.newId('gen'), p.id, s.id, model, pr.text, pr.version, pr.ref_asset_ids, params, ctx.actorKey, round])
+        [db.newId('gen'), p.id, s.id, model, sent, pr.version, pr.ref_asset_ids, params, ctx.actorKey, round])
       }
       return r.left
     })
-    kick()
-    return { shot: s.code, round, takes: n, model, prompt_version: pr.version, left_this_hour: left,
+    kickWorker()
+    return { shot: s.code, round, takes: n, model, prompt_version: pr.version, left_this_hour: left, ratio: params.ratio, sound: params.audio,
+      ...sent !== pr.text ? { dialogue: 'the on-camera lines were added to the prompt' } : {},
       note: `queued; at most ${lim.concurrent} run at once. The reviewer is told when they are ready — don't poll.` }
   }
   H['shot.sheet'] = async (a, ctx) => {
@@ -677,12 +734,14 @@ export function makeActions({ store, kick = () => {} }) {
     const pick = Number(a.pick)
     const c = (await db.q('select * from candidates where shot_id = $1 and n = $2', [s.id, pick])).rows[0]
     if (!c) fail('bad_arg', `${s.code} has no candidate #${a.pick}`)
-    await moveShot(s, 'approve', 'pick_asset_id = $4', [c.asset_id])
+    // A person may take a take the crew rejected; the crew approves only what is in review.
+    await moveShot(s, ctx.actor?.kind === 'human' && s.status === 'rejected' ? 'override' : 'approve', 'pick_asset_id = $4', [c.asset_id])
     await db.q('insert into reviews (shot_id, verdict, pick, note, scores, reviewer) values ($1,$2,$3,$4,$5,$6)',
       [s.id, 'approve', pick, text(a.note, 2000), obj(a.scores, 'scores') ?? {}, ctx.actorKey])
     // A person deciding in the workbench is news for the crew (the reviewer may be about to look at
     // the same takes); an agent approving says so in the group itself.
     if (ctx.actor?.kind === 'human') await enqueue(p.id, { kind: 'approved', shot: s.code, pick })
+    kick(p.id)
     return { shot: s.code, status: 'approved', pick }
   }
   H['shot.reject'] = async (a, ctx) => {
@@ -696,14 +755,29 @@ export function makeActions({ store, kick = () => {} }) {
     await db.q('insert into reviews (shot_id, verdict, route, reason, note, scores, attempt, reviewer) values ($1,$2,$3,$4,$5,$6,$7,$8)',
       [s.id, 'reject', route, reason, text(a.note, 2000), obj(a.scores, 'scores') ?? {}, s2.reject_count, ctx.actorKey])
     const to = rejectTarget(s2.reject_count, route)
-    // The routing is the studio's job, not the reviewer's: the owner of the route (or a person, on
-    // the 3rd rejection) is told through the project's group.
-    const reasons = to === 'human' ? (await db.q(`select reason from reviews where shot_id = $1 and verdict = 'reject' order by id`, [s.id])).rows.map(r => r.reason) : []
-    await enqueue(p.id, { kind: 'reject', shot: s.code, attempt: s2.reject_count, route, reason, goes_to: to, reasons,
-      by: ctx.actor?.kind === 'human' ? 'human' : '' })
+    // The routing is the studio's job, not the reviewer's: the route's owner gets a work order
+    // (pipeline.mjs); on the 3rd rejection a person is told in the group, with all three reasons.
+    if (to === 'human') {
+      const reasons = (await db.q(`select reason from reviews where shot_id = $1 and verdict = 'reject' order by id`, [s.id])).rows.map(r => r.reason)
+      await enqueue(p.id, { kind: 'reject', shot: s.code, attempt: s2.reject_count, route, reason, goes_to: to, reasons })
+    }
+    kick(p.id)
     return { shot: s.code, status: 'rejected', attempt: s2.reject_count, route, goes_to: to,
       note: to === 'human' ? `this is rejection #${s2.reject_count}: it goes to a person now, not back to the crew`
-        : `the ${to} will be told; you don't need to @ them` }
+        : `the ${to} gets a work order; you don't need to tell them` }
+  }
+  // A person handing a shot back to the crew — typically after the 3rd rejection landed on them.
+  H['shot.reopen'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const s = await shotOf(p, a.shot ?? a.code)
+    if (s.status !== 'rejected') fail('bad_state', `${s.code} is ${s.status}; only a rejected shot can be reopened`, 409)
+    const route = text(a.route, 10)
+    if (!['prompt', 'asset', 'plan'].includes(route)) fail('bad_arg', 'route is prompt, asset or plan — who gets it back')
+    const note = text(a.note, 2000)
+    if (note.length < 5) fail('bad_arg', 'say what should change (note)')
+    await db.q('insert into reviews (shot_id, verdict, route, reason, attempt, reviewer) values ($1,$2,$3,$4,$5,$6)',
+      [s.id, 'reopen', route, note, s.reject_count, ctx.actorKey])
+    return { shot: s.code, route, note: 'back to the crew; the next rejection comes to a person again' }
   }
   H['shot.lock'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
@@ -718,11 +792,155 @@ export function makeActions({ store, kick = () => {} }) {
       return { scene: sc.code, locked: true, shots: shots.length }
     })
   }
+  // ---- episodes: a series is episodes; each moves through the pipeline (pipeline.mjs) ----
+  const episodeView = e => ({ code: e.code, title: e.title, logline: e.logline, stage: e.stage, rev: e.rev, note: e.note, ord: e.ord })
+  H['episode.list'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    return (await db.q(`select e.*, count(distinct sc.id)::int as scenes, count(s.id)::int as shots,
+        count(s.id) filter (where s.status in ('approved','locked'))::int as approved
+        from episodes e left join scenes sc on sc.episode_id = e.id left join shots s on s.scene_id = sc.id
+        where e.project_id = $1 group by e.id order by e.ord, e.created_at`, [p.id])).rows
+      .map(e => ({ ...episodeView(e), scenes: e.scenes, shots: e.shots, approved: e.approved }))
+  }
+  H['episode.show'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const e = await episodeOf(p, a.episode ?? a.code)
+    const scenes = (await db.q(`select sc.code, sc.title, sc.locked, count(s.id)::int as shots,
+        count(s.id) filter (where s.status in ('approved','locked'))::int as approved
+        from scenes sc left join shots s on s.scene_id = sc.id where sc.episode_id = $1 group by sc.id order by sc.ord, sc.created_at`, [e.id])).rows
+    const cut = (await db.q(`select a.id, a.status, a.error, a.log, a.created_at, a.finished_at, a.video_asset_id, a.srt_asset_id, v.duration_ms
+        from assemblies a left join assets v on v.id = a.video_asset_id where a.episode_id = $1 order by a.created_at desc limit 1`, [e.id])).rows[0] ?? null
+    const orders = (await db.q(`select id, role, kind, subject, status, agent_id, attempts, error, created_at from orders
+        where episode_id = $1 and status in ('open','sent','stuck') order by id`, [e.id])).rows
+    return { ...episodeView(e), script: e.script, ratio: ratioOf(p.info), scenes, cut, orders }
+  }
+  H['episode.add'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const code = text(a.code, 40)
+    if (!/^[\w.-]{1,40}$/.test(code)) fail('bad_arg', 'an episode code is letters, digits, dot, dash or underscore (e.g. E01)')
+    const script = typeof a.script === 'string' ? a.script.trim().slice(0, 200_000) : ''
+    const id = db.newId('ep')
+    const ord = Number.isInteger(a.ord) ? a.ord
+      : (await db.q('select coalesce(max(ord), 0) + 1 as n from episodes where project_id = $1', [p.id])).rows[0].n
+    try {
+      await db.q('insert into episodes (id, project_id, code, title, logline, script, ord, created_by) values ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [id, p.id, code, text(a.title, 120), text(a.logline, 1000), script, ord, ctx.actorKey])
+    } catch (e) { if (e.code === '23505') fail('exists', `episode ${code} already exists`, 409); throw e }
+    return { code, stage: 'draft' }
+  }
+  H['episode.edit'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const e = await episodeOf(p, a.episode ?? a.code)
+    await db.q(`update episodes set title = coalesce($2, title), logline = coalesce($3, logline), script = coalesce($4, script),
+        ord = coalesce($5, ord), updated_at = now() where id = $1`,
+      [e.id, a.title === undefined ? null : text(a.title, 120), a.logline === undefined ? null : text(a.logline, 1000),
+        typeof a.script === 'string' ? a.script.slice(0, 200_000) : null, Number.isInteger(a.ord) ? a.ord : null])
+    return { code: e.code, updated: true }
+  }
+  /** Move an episode, guarded like a shot: only from the stage the caller saw. */
+  async function moveEpisode(e, from, to, set = '', params = []) {
+    if (!from.includes(e.stage)) fail('bad_state', `${e.code} is ${e.stage}; this needs it to be ${from.join(' or ')}`, 409)
+    const r = await db.q(`update episodes set stage = $3, updated_at = now()${set ? `, ${set}` : ''} where id = $1 and stage = $2 returning *`,
+      [e.id, e.stage, to, ...params])
+    if (!r.rows[0]) fail('conflict', `${e.code} changed meanwhile; look at it again`, 409)
+    return r.rows[0]
+  }
+  // A person starts production of an episode: the director gets the breakdown order.
+  H['episode.start'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const e = await episodeOf(p, a.episode ?? a.code)
+    if (!e.script.trim()) fail('bad_state', `${e.code} has no script yet`, 409)
+    await moveEpisode(e, ['draft'], 'breakdown')
+    kick(p.id)
+    return { code: e.code, stage: 'breakdown', note: 'the director has been given the breakdown' }
+  }
+  H['episode.submit'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const e = await episodeOf(p, a.episode ?? a.code)
+    const c = (await db.q(`select count(distinct sc.id)::int as scenes, count(s.id)::int as shots,
+        count(sc.id) filter (where not exists (select 1 from shots x where x.scene_id = sc.id))::int as empty
+        from scenes sc left join shots s on s.scene_id = sc.id where sc.episode_id = $1`, [e.id])).rows[0]
+    if (!c.shots) fail('bad_state', `${e.code} has no shots yet — cut it into scenes (scene.add with episode) and plan them (shot.plan)`, 409)
+    if (c.empty) fail('bad_state', `${e.code}: ${c.empty} scene(s) have no shots; plan them first`, 409)
+    await moveEpisode(e, ['breakdown'], 'breakdown_review')
+    kick(p.id)
+    return { code: e.code, stage: 'breakdown_review', scenes: c.scenes, shots: c.shots, note: 'a person reviews the breakdown next; you will hear if it comes back' }
+  }
+  // A person's decision at a gate: the breakdown, or the finished cut.
+  H['episode.review'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const e = await episodeOf(p, a.episode ?? a.code)
+    const decision = text(a.decision, 10)
+    if (!['approve', 'revise'].includes(decision)) fail('bad_arg', 'decision is approve or revise')
+    const note = text(a.note, 2000)
+    let out
+    if (e.stage === 'breakdown_review') {
+      if (decision === 'approve') out = await moveEpisode(e, ['breakdown_review'], 'production', "note = ''")
+      else {
+        if (note.length < 5) fail('bad_arg', 'say what should change (note)')
+        out = await moveEpisode(e, ['breakdown_review'], 'breakdown', 'rev = rev + 1, note = $4', [note])
+      }
+    } else if (e.stage === 'final_review') {
+      if (decision === 'approve') out = await moveEpisode(e, ['final_review'], 'done')
+      else fail('bad_arg', 'to change a finished cut, reject the shots that need it (shot.reject) — the episode goes back to production by itself')
+    } else fail('bad_state', `${e.code} is ${e.stage}; nothing is waiting for a decision`, 409)
+    kick(p.id)
+    return { code: e.code, stage: out.stage }
+  }
+  // Cut it again now (a person or the director): e.g. after changing a voice. Same takes, new cut.
+  H['episode.assemble'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const e = await episodeOf(p, a.episode ?? a.code)
+    const shots = (await db.q(`select s.code, s.status, (select c.n from candidates c where c.shot_id = s.id and c.asset_id = s.pick_asset_id) as pick
+        from shots s join scenes sc on sc.id = s.scene_id where sc.episode_id = $1 order by sc.ord, sc.created_at, s.ord, s.created_at`, [e.id])).rows
+    if (!shots.length) fail('bad_state', `${e.code} has no shots`, 409)
+    const open = shots.filter(x => !['approved', 'locked'].includes(x.status) || !x.pick)
+    if (open.length) fail('bad_state', `not every shot is approved yet: ${open.map(x => `${x.code} is ${x.status}`).join(', ')}`, 409)
+    const busy = (await db.q(`select id from assemblies where episode_id = $1 and status in ('queued','running')`, [e.id])).rows[0]
+    if (busy) fail('bad_state', `${e.code} is already being cut (${busy.id})`, 409)
+    const id = db.newId('asm')
+    await db.q(`insert into assemblies (id, project_id, episode_id, sig, params, requested_by) values ($1,$2,$3,$4,$5,$6)`,
+      [id, p.id, e.id, shots.map(x => `${x.code}=${x.pick}`).join(','), { burn: a.burn_subtitles !== false }, ctx.actorKey])
+    kickWorker()
+    return { episode: e.code, assembly: id, note: 'queued; a person is told when the cut is ready' }
+  }
+
+  // ---- work orders (pipeline.mjs makes them; notify.mjs delivers them) ----
+  H['order.list'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const mine = ctx.actor?.kind === 'agent'
+    return (await db.q(`select id, role, kind, subject, body, status, attempts, created_at, sent_at from orders
+        where project_id = $1 and status in ('open','sent','stuck') ${mine ? 'and role = $2' : ''} order by id`,
+      mine ? [p.id, ctx.role] : [p.id])).rows
+  }
+  H['order.done'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const o = (await db.q('select * from orders where id = $1 and project_id = $2', [Number(a.id), p.id])).rows[0]
+    if (!o) fail('no_such_order', `no work order #${a.id} in ${p.id} (order.list shows yours)`, 404)
+    if (ctx.actor?.kind === 'agent' && o.role !== ctx.role) fail('forbidden', `order #${o.id} is the ${o.role}'s, not yours`, 403)
+    if (!['open', 'sent', 'stuck'].includes(o.status)) return { id: o.id, status: o.status, note: 'already closed' }
+    // The studio closes what it can see for itself; saying "done" to those would be a claim, not a fact.
+    if (!CLOSED_BY_AGENT.has(o.kind))
+      fail('bad_state', `order #${o.id} (${o.kind} ${o.subject}) closes by itself when the studio sees the work done — it doesn't yet. Do the work; don't close it by hand.`, 409)
+    const note = text(a.note, 1000)
+    if (note.length < 5) fail('bad_arg', 'say what you changed (note) — the next person works from it')
+    await db.q(`update orders set status = 'done', done_at = now(), note = $2 where id = $1`, [o.id, note])
+    kick(p.id)
+    return { id: o.id, status: 'done' }
+  }
+
   // ---- the workbench (web UI): whole views in one call each ----
   H['project.board'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
-    const scenes = (await db.q(`select code, title, locked, length(script)::int as script_chars
-        from scenes where project_id = $1 order by ord, created_at`, [p.id])).rows
+    const ep = a.episode ? await episodeOf(p, a.episode) : null
+    const episodes = (await db.q(`select e.code, e.title, e.stage, count(s.id)::int as shots,
+        count(s.id) filter (where s.status in ('approved','locked'))::int as approved,
+        (select count(*)::int from orders o where o.episode_id = e.id and o.status in ('open','sent','stuck')) as orders
+        from episodes e left join scenes sc on sc.episode_id = e.id left join shots s on s.scene_id = sc.id
+        where e.project_id = $1 group by e.id order by e.ord, e.created_at`, [p.id])).rows
+    const scenes = (await db.q(`select sc.code, sc.title, sc.locked, length(sc.script)::int as script_chars, e.code as episode
+        from scenes sc left join episodes e on e.id = sc.episode_id
+        where sc.project_id = $1 ${ep ? 'and sc.episode_id = $2' : ''} order by sc.ord, sc.created_at`, ep ? [p.id, ep.id] : [p.id])).rows
     const shots = (await db.q(`
       select s.code, sc.code as scene, s.status, s.priority, s.reject_count as rejections, s.prompt_version,
              s.def->>'story_beat' as story_beat, (s.def->>'duration_s')::float8 as duration_s, s.updated_at,
@@ -733,7 +951,7 @@ export function makeActions({ store, kick = () => {} }) {
                where c.shot_id = s.id order by (c.asset_id = s.pick_asset_id) desc nulls last, c.n desc limit 1) as thumb,
              (select count(*)::int from generations g where g.shot_id = s.id and g.status in ('queued','running')) as pending
         from shots s join scenes sc on sc.id = s.scene_id
-       where s.project_id = $1 order by sc.ord, sc.created_at, s.ord, s.created_at`, [p.id])).rows
+       where s.project_id = $1 ${ep ? 'and sc.episode_id = $2' : ''} order by sc.ord, sc.created_at, s.ord, s.created_at`, ep ? [p.id, ep.id] : [p.id])).rows
     const lim = seedance.limits(p.info)
     const q = (await db.q(`select count(*) filter (where created_at > now() - interval '1 hour')::int as used,
         count(*) filter (where status = 'running')::int as running, count(*) filter (where status = 'queued')::int as queued
@@ -744,7 +962,10 @@ export function makeActions({ store, kick = () => {} }) {
         (select count(*)::int from locations where project_id = $1) as locations,
         (select count(*)::int from locations where project_id = $1 and status = 'locked') as locations_locked`, [p.id])).rows[0]
     const cfg = seedance.config()
-    return { project: projectView(p), scenes, shots, bible, seedance_ready: !!(cfg.base && cfg.key), rejects_to_human: REJECTS_TO_HUMAN,
+    const orders = (await db.q(`select role, count(*)::int as n, count(*) filter (where status = 'stuck')::int as stuck
+        from orders where project_id = $1 and status in ('open','sent','stuck') group by role`, [p.id])).rows
+    return { project: projectView(p), episodes, episode: ep?.code ?? null, ratio: ratioOf(p.info), orders,
+      scenes, shots, bible, seedance_ready: !!(cfg.base && cfg.key), rejects_to_human: REJECTS_TO_HUMAN, tts_ready: ttsReady(),
       quota: { used: q.used, per_hour: lim.perHour, concurrent: lim.concurrent, running: q.running, queued: q.queued } }
   }
   H['shot.detail'] = async (a, ctx) => {
@@ -776,5 +997,5 @@ export function makeActions({ store, kick = () => {} }) {
     return { shot: s.code, status: s.status, rejections: s.reject_count, reviews, prompts }
   }
 
-  return { handlers: H, projectOf, assetOf, finishGeneration, addAsset, stash, dataUrl, moveShot }
+  return { handlers: H, projectOf, assetOf, finishGeneration, addAsset, stash, stashText, dataUrl, moveShot, newGeneration }
 }

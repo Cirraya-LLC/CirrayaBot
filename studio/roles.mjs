@@ -16,13 +16,16 @@ export const READ = new Set([
   'char.list', 'char.show', 'char.refs',
   'loc.list', 'loc.show', 'loc.refs',
   'asset.show', 'scene.list', 'scene.show', 'shot.show', 'review.history',
+  'episode.list', 'episode.show',
+  // Your own work orders: list them, close the kind only you can close (actions.mjs checks the role).
+  'order.list', 'order.done',
 ])
 
 // What each role may change. `project.use` is in READ on purpose: it only moves the caller's
 // own "current project" pointer and changes no shared state.
 const WRITE = {
-  director: ['scene.add', 'shot.plan', 'shot.lock'],
-  art: ['char.add', 'char.edit', 'look.add', 'look.edit', 'loc.add', 'loc.edit',
+  director: ['scene.add', 'shot.plan', 'shot.lock', 'episode.submit', 'episode.assemble'],
+  art: ['char.add', 'char.edit', 'char.voice', 'look.add', 'look.edit', 'loc.add', 'loc.edit',
     'asset.gen', 'asset.edit', 'asset.save', 'asset.tag'],
   cinematographer: ['shot.prompt', 'shot.gen'],
   reviewer: ['shot.sheet', 'shot.approve', 'shot.reject'],
@@ -34,6 +37,9 @@ const WRITE = {
 export const HUMAN_ONLY = new Set([
   'char.lock', 'char.unlock', 'loc.lock', 'loc.unlock',
   'project.create', 'project.edit', 'scene.edit', 'crew.set', 'crew.list',
+  // The script is a person's, and so are the gates of the pipeline: starting an episode, passing
+  // its breakdown and its cut, and handing a shot rejected three times back to the crew.
+  'episode.add', 'episode.edit', 'episode.start', 'episode.review', 'shot.reopen',
   // Model keys. Not even a hint of one is readable by an agent.
   'keys.get', 'keys.set', 'keys.test',
   // The workbench's views (the web UI). Reading, but shaped for a screen, not for a model's context.
@@ -74,6 +80,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.equal(deny(agent('d'), 'director', 'shot.plan'), null)
   a.equal(deny(agent('d'), 'director', 'shot.lock'), null)
   a.equal(deny(agent('d'), 'director', 'scene.add'), null)
+  a.equal(deny(agent('d'), 'director', 'episode.submit'), null)
+  a.match(deny(agent('d'), 'director', 'episode.review'), /only be done by a person/, 'the director can\'t pass his own breakdown')
+  a.match(deny(agent('d'), 'director', 'episode.start'), /only be done by a person/)
+  a.equal(deny(agent('a'), 'art', 'char.voice'), null)
+  a.match(deny(agent('c'), 'cinematographer', 'shot.reopen'), /only be done by a person/)
+  a.equal(deny(agent('c'), 'cinematographer', 'order.done'), null, 'closing your own order is checked by role in the action')
   a.match(deny(agent('d'), 'director', 'shot.gen'), /not part of the director/)
   a.match(deny(agent('d'), 'director', 'project.edit'), /only be done by a person/, 'director: project is read-only')
 

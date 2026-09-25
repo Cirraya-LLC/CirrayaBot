@@ -24,6 +24,9 @@ const MOVES = {
   done_no: { from: ['generating'], to: 'prompted' },      // the worker: every take in the round failed
   sheet:   { from: ['review', 'approved', 'rejected', 'locked'], to: null },
   approve: { from: ['review'], to: 'approved' },
+  // A person may approve a take the crew rejected (the 3rd rejection lands on them, and the best
+  // take is sometimes an earlier one). Only actions.mjs's human path uses it.
+  override: { from: ['review', 'rejected'], to: 'approved' },
   reject:  { from: ['review'], to: 'rejected' },
   lock:    { from: ['approved'], to: 'locked' },
 }

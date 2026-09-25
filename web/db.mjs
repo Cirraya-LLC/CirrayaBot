@@ -166,6 +166,11 @@ alter table agents add column if not exists max_steps int;
 
 -- A tool call is a message too, so reopening a conversation still shows which commands ran.
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
+-- A reply's own reasoning, for the upstreams that want it passed back (DeepSeek in thinking mode).
+alter table messages add column if not exists reasoning text not null default '';
+-- Weak isolation (2.31): the members of a group marked shared_machine work on ONE machine, the
+-- group's, with the group's drive as their desk — a film crew passes files all day.
+alter table groups add column if not exists shared_machine bool not null default false;
 alter table messages drop constraint if exists messages_role_check;
 alter table messages add constraint messages_role_check check (role in ('user','assistant','tool'));
 `
@@ -261,9 +266,10 @@ export async function listGroups() {
 
 export async function saveGroup(g) {
   const { rows } = await q(`
-    insert into groups (id, name, members, lead) values ($1,$2,$3,$4)
-    on conflict (id) do update set name = excluded.name, members = excluded.members, lead = excluded.lead
-    returning *`, [g.id, g.name, g.members ?? [], g.lead || null])
+    insert into groups (id, name, members, lead, shared_machine) values ($1,$2,$3,$4,$5)
+    on conflict (id) do update set name = excluded.name, members = excluded.members, lead = excluded.lead,
+      shared_machine = excluded.shared_machine
+    returning *`, [g.id, g.name, g.members ?? [], g.lead || null, g.shared_machine === true])
   return rows[0]
 }
 
@@ -275,9 +281,9 @@ export async function deleteGroup(id) {
 }
 
 // ---------- messages ----------
-export async function addMessage(scope, scopeId, { role, speaker = '', content }) {
-  await q('insert into messages (scope, scope_id, role, speaker, content) values ($1,$2,$3,$4,$5)',
-    [scope, scopeId, role, speaker, content])
+export async function addMessage(scope, scopeId, { role, speaker = '', content, reasoning = '' }) {
+  await q('insert into messages (scope, scope_id, role, speaker, content, reasoning) values ($1,$2,$3,$4,$5,$6)',
+    [scope, scopeId, role, speaker, content, reasoning ?? ''])
 }
 
 /** A finished tool call, kept so the transcript still shows the work after a reload. */
@@ -293,7 +299,7 @@ export async function addTool(scope, scopeId, speaker, { name, args, output }) {
  */
 export async function recent(scope, scopeId, limit = 200, { tools = false } = {}) {
   const { rows } = await q(
-    `select role, speaker, content, at from messages
+    `select role, speaker, content, reasoning, at from messages
      where scope = $1 and scope_id = $2 ${tools ? '' : "and role <> 'tool'"}
      order by id desc limit $3`,
     [scope, scopeId, limit])
@@ -620,6 +626,27 @@ export async function fillAgentModels() {
        and p.id = coalesce(a.provider_id,
              (select id from providers order by is_default desc, created_at limit 1))`)
   return rowCount
+}
+
+/**
+ * DeepSeek Harness is gone (2.31): its key, kept in the Keys panel, becomes an ordinary upstream,
+ * and every deepseek-* agent — which ran on that key — is pointed at it. Idempotent: the settings
+ * row is deleted once moved. Returns the number of agents moved, or null when there was nothing.
+ */
+export async function deepseekKeyToProvider() {
+  const k = await getSetting('keys.deepseek', null)
+  if (!k) return null
+  let moved = 0
+  if (k.api_key) {
+    const any = (await q('select 1 from providers limit 1')).rowCount
+    const exists = (await q(`select 1 from providers where id = 'p-deepseek'`)).rowCount
+    if (!exists) await saveProvider({ id: 'p-deepseek', name: 'DeepSeek', base_url: k.base_url || 'https://api.deepseek.com',
+      api_key: k.api_key, model: '', context_tokens: 1_048_576, auto_context: true, ctx_source: '',
+      is_default: !any, protocol: 'chat' })
+    moved = (await q(`update agents set provider_id = 'p-deepseek' where model ~* '^deepseek'`)).rowCount
+  }
+  await q(`delete from settings where key = 'keys.deepseek'`)
+  return moved
 }
 
 /** .env configures an upstream and the database has none — an upgraded old deployment shouldn't need a trip to the UI first. */

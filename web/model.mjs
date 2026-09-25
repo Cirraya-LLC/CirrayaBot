@@ -72,6 +72,7 @@ const KNOWN = [
   [/claude.*(sonnet|opus)-[45]/, 200_000],
   [/claude/, 200_000],
   [/gemini-(1\.5|2|3)/, 1_000_000],
+  [/^deepseek-(flash|v4)/, 1_048_576],      // V4.1 Flash (api-docs.deepseek.com, 2026-09-10); v4-* now routes to it
   [/deepseek/, 128_000],
   [/qwen|glm|kimi|moonshot/, 131_072],
   [/grok-[45]/, 256_000],

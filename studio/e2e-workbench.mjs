@@ -158,16 +158,19 @@ try {
   assert.deepEqual(board.shots.map(s => s.status), ['approved', 'rejected', 'review', 'prompted', 'planned'])
   assert.equal(board.shots[0].picked, 2)
 
-  // The crew hears it in the group: the approval wakes nobody; the rejection goes to the cinematographer, marked as a person's.
-  let notices = []
-  for (let i = 0; i < 40; i++) {
+  // The crew hears it: the approval is a line in the group, waking nobody; the rejection is a work
+  // order in the cinematographer's own chat, marked as a person's — and the group gets one line about it.
+  let notices = [], order = null
+  for (let i = 0; i < 60; i++) {
     notices = (await ok('GET', `/api/groups/${g.id}/messages`)).filter(m => m.speaker === 'Studio').map(m => m.text)
-    if (notices.some(t => t.includes('人工通过')) && notices.some(t => t.includes('人工打回'))) break
+    order = (await ok('GET', `/api/dm/${C}`)).find(m => m.speaker === 'Studio' && m.content.includes('S01-SH002 被打回'))
+    if (notices.some(t => t.includes('人工通过')) && order) break
     await sleep(500)
   }
   assert.ok(notices.includes('S01-SH001 已由人工通过（第 2 条）。'), notices.join(' | '))
-  assert.ok(notices.some(t => t.startsWith(`@林野${RUN} S01-SH002 被打回（第 1 次，prompt）`) && t.endsWith('（人工打回）')), notices.join(' | '))
-  assert.equal(psql(`select count(*) from studio.audit where actor = 'human' and action in ('shot.approve','shot.reject') and ok`) >= '2', true)
+  assert.ok(order && /S01-SH002 被打回（第 1 次，人工打回）：第 1、2 条发色都偏棕/.test(order.content), 'the fix is an order in the cinematographer\'s chat')
+  assert.ok(notices.some(t => t === `📋 工单 → 林野${RUN}：S01-SH002（改提示词）`), notices.join(' | '))
+  assert.ok(Number(psql(`select count(*) from studio.audit where actor = 'human' and action in ('shot.approve','shot.reject') and ok`)) >= 2)
 
   // Locking a scene from the page: refused until every shot in it is approved.
   assert.equal((await api('POST', '/api/studio/call', { action: 'shot.lock', args: { project: P, scene: 'S01' } })).status, 409)

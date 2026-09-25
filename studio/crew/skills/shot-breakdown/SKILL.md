@@ -7,13 +7,12 @@ description: 把剧本或场次描述拆成可生成的镜头表（shot list）�
 
 ## 流程
 
-1. `studio project info` 读画风和基调；`studio scene show <场次>` 读剧本段落。
-   剧本还没切成场次时，先按场切分，每场 `studio scene add <场次> --title ... --script <该场原文>`，
-   原文一字不改。
-2. 列出本场需要的角色、造型、场景，逐个 `studio char show` / `studio loc show` 确认资产存在且足够。
-   缺了就先 @苏棠 补，写清楚缺什么（哪个角色、哪个造型、需要哪些角度或表情），等补齐再继续。
-3. 拆镜头，写 shots.json，`studio shot plan` 入库。
-4. @林野 交接，标出重点和难点镜头。
+1. `studio project info` 读画风和基调；`studio episode show <集>` 读这一集的剧本。
+2. 按场切分，每场 `studio scene add <场次> --episode <集> --title ... --script <该场原文>`，原文一字不改。
+   场次号全剧唯一，建议带集号：`E01-S01`。
+3. 逐场拆镜头，写 shots.json，`studio shot plan` 入库。**对白写进镜头**（见下）。
+   镜头里写的角色、造型、场景不存在也没关系：片场会自动给美术派单补齐，再请人定稿。
+4. 整集拆完，`studio episode submit <集>`。人确认拆解后片场开始派活，你不用 @ 任何人。
 
 ## 镜头 JSON
 
@@ -29,11 +28,29 @@ description: 把剧本或场次描述拆成可生成的镜头表（shot list）�
   "light": "黄昏逆光",
   "story_beat": "被逼到绝境后第一次反击",
   "continuity": {"in_from": "S03-SH003 结尾蛮吉跪地", "out_to": "S03-SH005 刀光特写"},
-  "priority": "hero"
+  "priority": "hero",
+  "dialogue": [
+    {"speaker": "蛮吉", "text": "今天谁也别想过去！", "kind": "onscreen"},
+    {"kind": "narration", "text": "那一年，他十二岁。"}
+  ]
 }
 ```
 
 `priority` 取值：`hero`（关键镜头，值得多抽卡、用更强模型）/ `normal` / `filler`（过场）。
+
+## 对白
+
+`dialogue` 每一句三种 `kind`：
+
+| kind | 谁说 | 怎么出声 |
+| --- | --- | --- |
+| `onscreen` | 画面里看得见的角色 | Seedance 和画面一起生成，口型同步。片场自动把台词加进提示词、打开声音 |
+| `offscreen` | 看不见的角色（门外、电话里） | TTS，用该角色的声音（`char voice`） |
+| `narration` | 旁白，不写 speaker | TTS，用项目的旁白声音 |
+
+- 每句都会变成字幕。一句不超过一口气（约 20 字），一个镜头最多 12 句——说得更多就该拆镜。
+- 出镜台词的镜头时长要够说完：大约每秒 4 个汉字，再留半秒。
+- 短剧的钩子在前 3 秒：第一场第一个镜头就要有冲突或悬念。
 
 ## 拆镜头原则
 
@@ -48,4 +65,4 @@ description: 把剧本或场次描述拆成可生成的镜头表（shot list）�
 ## 被 route=plan 打回时
 
 说明问题出在镜头设计本身（动作太复杂、时长不合理、衔接冲突）。改镜头定义而不是改 prompt，
-必要时拆成多个镜头，改完 @林野。
+必要时拆成多个镜头，用 `shot plan` 重写。改完片场会自动给摄影派单。
