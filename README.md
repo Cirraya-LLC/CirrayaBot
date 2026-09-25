@@ -1,16 +1,21 @@
 # Multi-Agent — CirrayaBot Studio
 
-An open-source AI film studio: a crew of AI coworkers (director, art director, cinematographer,
-reviewer…) making a film together, and a workbench where a person follows every shot and has the
-final say. Underneath it is a general "AI coworker" platform: a column of crew members and group
-chats on the left. Each Agent has
-its own persona, its own container and its own memory; put them in a group and they
-**hand the work to each other with @mentions** until a job is done, instead of each
-answering on their own.
+An open-source, AI-native short-drama studio: a crew of AI coworkers (director, art director,
+cinematographer, reviewer) making a vertical series episode by episode, and a workbench where a
+person writes the scripts, checks each stage and has the final say. From an episode's script to
+its finished cut — 9:16, dialogue with lip-sync, narration, subtitles — the work moves by
+**work orders**: the studio sees what each shot needs next and tells the one crew member whose job
+it is, in their own chat. Nobody hands work over by hand.
+
+Underneath it is a general "AI coworker" platform: a column of crew members and group chats on the
+left. Each Agent has its own persona, its own machine and its own memory; outside the studio, put
+them in a group and they **hand work to each other with @mentions** until a job is done.
 
 - **One container per Agent** — he is root on his own machine and can install or write
   whatever he likes, but he can't see the platform's code or anyone else's desktop. This is
   where Grok Bot's biggest design flaw (every Bot shares one cloud computer) gets fixed.
+  A group can choose the opposite on purpose — **one shared machine for the whole group**
+  (the film crew's default), so files pass without copying; different groups stay apart.
 - **Group chat is collaboration, not broadcast** — everyone shares one group log, and
   whoever should take over gets @mentioned. Each group has its own shared drive;
   `cp report.md group/` is how you hand something to a coworker.
@@ -58,23 +63,23 @@ The socket has to be running: `systemctl --user enable --now podman.socket`.
 
 ### Modules, and the smallest machine it runs on
 
-Two parts are optional modules, set by `MODULES` in `.env` (comma-separated); change it and rerun
-`./start.sh`, which turns it into compose profiles and tells the app:
+The studio is an optional module, set by `MODULES` in `.env`; change it and rerun `./start.sh`,
+which turns it into a compose profile and tells the app:
 
 | Module | What it is | Disk (its image, on top of the shared base) |
 | --- | --- | --- |
 | *(always)* | PostgreSQL + the platform | ~0.7 GB |
-| `studio` | the film studio: workbench, shots, Seedance / GPT image / ComfyUI, contact sheets (ffmpeg) | ~0.5 GB |
-| `dsh` | DeepSeek Harness, for crew members on `deepseek-*` models | ~0.45 GB |
+| `studio` | the film studio: workbench, episodes, shots, Seedance / GPT image / ComfyUI / speech, contact sheets and cuts (ffmpeg) | ~0.5 GB |
 | `AGENT_TOOLS=on` | each crew member's own container with a shell and a browser | ~1.2 GB (one image) |
 
-The target minimum is **2 cores, 4 GB of memory, ~10 GB of disk** (with both modules, tools off).
+The target minimum is **2 cores, 4 GB of memory, ~10 GB of disk** (studio on, tools off).
 On a first run `start.sh` sizes `.env` to the machine: every service gets a memory ceiling
-(`DB_MEMORY`, `APP_MEMORY`, `STUDIO_MEMORY`, `DSH_MEMORY` — about 3.3 GB in all on a 4 GB box),
+(`DB_MEMORY`, `APP_MEMORY`, `STUDIO_MEMORY` — about 2.5 GB in all on a 4 GB box),
 agent containers get 1 GB / 1 CPU instead of 2 / 2, and below 2 GB it starts the chat alone.
-Values you set yourself are kept. Measured with the end-to-end suites running: ~400 MB for
+Values you set yourself are kept. Measured with the end-to-end suites running: ~300 MB for
 everything at the busiest moment; a contact sheet of eight 1080p HEVC takes peaked the studio at
 ~150 MB. Building leaves a cache about as large as the images: `docker builder prune` returns it.
+(Until 2.31 there was a second module, `dsh`; rerunning `./start.sh` removes it — see below.)
 
 ## Configuring model upstreams
 
@@ -109,19 +114,17 @@ here, instead of half an hour later as "some Agent isn't talking".
 
 With several upstreams, click the small dot on the left to switch which one is in use.
 
-### DeepSeek models run on DeepSeek Harness
+### DeepSeek
 
-An Agent whose model name starts with `deepseek` doesn't use the loop above: each of its turns runs
-in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (the `dsh` service), with the
-platform's tools handed to it over MCP. History, memory, the transcript, approvals, spending and
-the daily cap work exactly as for any other Agent.
+DeepSeek is an ordinary upstream: Chat Completions, `https://api.deepseek.com`, model
+`deepseek-flash` (V4.1 Flash — 1M-token context, tool calls, images). The platform passes DeepSeek's
+reasoning back to it on every later request, as its thinking mode requires, and maps the reasoning
+effort to its own words (medium → high, high → max). Replies stream and contact sheets reach it like
+any other model.
 
-- The key: sidebar → **Keys** → DeepSeek. Without one there, the Agent's own upstream key is used,
-  if that upstream speaks Chat Completions.
-- Replies arrive a message at a time, not token by token. **Images a tool returns (contact sheets,
-  screenshots) are not shown to it**, so don't make a DeepSeek model the film crew's reviewer — the
-  Agent editor warns when you pick one.
-- Usage is priced with the prices of the Agent's upstream.
+An earlier version ran DeepSeek models inside DeepSeek Harness; that is gone. On upgrade the
+DeepSeek key from the old Keys panel becomes an upstream called "DeepSeek" and the Agents that used
+it are pointed at it, and `./start.sh` removes the harness container.
 
 ## What it costs, and holding it back
 
@@ -190,16 +193,18 @@ node web/model.mjs        # self-test for context budgeting and window inference
 node web/i18n.mjs         # self-test for the server message tables
 node web/memory.mjs       # self-test for an agent's self-notes (cap, duplicates)
 node web/approve.mjs      # self-test for which tool calls need a person first
-node web/dsh.mjs          # self-test for driving DeepSeek Harness (turns, MCP, keys)
+node web/protocols.mjs    # self-test for the three API shapes (and DeepSeek's reasoning)
 node studio/keys.mjs      # self-test for the Keys panel's studio side (panel over .env, hints only)
+node studio/pipeline.mjs  # self-test for the pipeline: which work orders a state needs
+node studio/dialogue.mjs  # self-test for dialogue, subtitle timing and .srt
 node studio/crew/import.mjs --self-test   # the crew spec parses the way the importer needs
 python3 check-bots.py     # check the seed definitions in bots/
 ```
 
-The studio has its own self-tests (`node studio/<module>.mjs`) and two end-to-end checks against
-fakes: `studio/e2e.mjs` and `studio/e2e-platform.mjs` — see `CLAUDE.md` 2.28. DeepSeek Harness
-and the Keys panel have one too, against a running deployment: `node deploy/dsh/e2e.mjs <dir>`, and so
-does the workbench: `node studio/e2e-workbench.mjs <dir>` (it leaves a small demo film behind).
+The studio has its own self-tests (`node studio/<module>.mjs`) and end-to-end checks against
+fakes: `studio/e2e.mjs` (the studio alone), `studio/e2e-platform.mjs <dir>` (one whole episode, from
+script to cut, through a running deployment) and `studio/e2e-workbench.mjs <dir>` (the workbench;
+it leaves a small demo film behind) — see `CLAUDE.md` 2.28–2.31.
 
 Without compose, pointing at an existing PostgreSQL:
 
@@ -207,32 +212,55 @@ Without compose, pointing at an existing PostgreSQL:
 DATABASE_URL=postgres://user:pass@127.0.0.1:5432/multiagent node web/server.mjs
 ```
 
-## Film crew (studio)
+## Short dramas (the studio)
 
-An AI film crew runs on top of the platform: a director, an art director, a cinematographer and a
-reviewer (`studio/crew/`), working in a group against the **studio** service — asset library, shots,
-Seedance video, GPT image / ComfyUI stills, contact sheets. The studio holds every model key; agents
-reach it only through the platform's `studio` tool, and each can do only its own job.
+An AI crew runs on top of the platform: a director, an art director, a cinematographer and a
+reviewer (`studio/crew/`), working against the **studio** service — episodes, asset library,
+shots, Seedance video, GPT image / ComfyUI stills, speech, contact sheets, cuts. The studio holds
+every model key; agents reach it only through the platform's `studio` tool, and each can do only
+its own job.
 
-0. With the `studio` module on (the default), the app opens on the **workbench**: a project, its shot
-   board (every shot by state), each shot's takes, contact sheets, prompt versions and review
-   history, the script cut into scenes, the bible (characters and locations) and the project's
-   settings. A person can **approve a take or reject a shot** there, with a reason and who fixes it
-   — the crew is told in its group exactly as when the reviewer does it. Generating stays the crew's.
+**How an episode is made** (Workbench → **Episodes**):
+
+1. You write the episode's script and press **Start production**.
+2. The director gets a work order in his chat, cuts it into scenes and shots — with every line of
+   dialogue on its shot — and submits. You read the breakdown (lines included) and approve it or
+   send it back with a note.
+3. The art director is asked for whatever references the shots need; you lock them in the
+   **Bible**. Only shots whose characters and locations are locked go on to the cinematographer.
+4. The cinematographer writes each prompt and generates. **On-camera lines are added to the
+   Seedance prompt by the studio, with sound on, so the lips match.** The reviewer gets the takes,
+   sees the contact sheet, approves or rejects; a rejection goes to whoever can fix it; the third
+   goes to you (take a take yourself, or hand it back with a note).
+5. When every shot is approved, the studio **cuts the episode by itself**: the takes in order,
+   each trimmed to its shot's length, 9:16 at 720×1280, narration and off-screen lines spoken by
+   TTS in each character's voice, subtitles burned in and as an `.srt`. H.264 — plays everywhere.
+6. You watch it on the episode page and approve it, or reject a shot — it goes back to production
+   and is cut again once that shot passes.
+
+Every order is visible (who has what, and a stuck one says why); the crew group gets a one-line
+report per order. Anything that needs a person — the script, the two gates, locking — is yours.
+
+Setting it up:
+
 1. Model keys: sidebar → **Keys** (each card has a **Test** that costs nothing), or in `.env` before
    `./start.sh`. What the panel holds wins over `.env`; either way the keys live in the studio
-   only — the panel's in the studio's own table, `.env`'s in the studio container's environment.
-   Seedance: ModelArk, or a relay with the same paths. GPT image: OpenAI, or a relay; the base
-   includes `/v1`. ComfyUI on this machine: `http://host.docker.internal:8188`.
-2. Import the crew — 4 Agents, 5 skills, a group, their studio roles:
+   only. Seedance: ModelArk, or a relay with the same paths. GPT image: OpenAI, or a relay (base
+   includes `/v1`). ComfyUI on this machine: `http://host.docker.internal:8188`. **Speech (TTS)**:
+   anything speaking OpenAI's `/audio/speech` — empty means narration stays in the subtitles only.
+2. Import the crew — 4 Agents, 5 skills, a group (one shared machine), their studio roles:
    `docker compose exec app node studio/crew/import.mjs` (safe to rerun; `--dry-run` shows the plan).
-3. In **Edit Agent**, give each one an upstream and a model (the reviewer's must accept images).
-4. In the workbench, create the project and, in **Project settings**, pick the crew's group as its
-   notice group. Locking characters and locations as final is in the **Bible** — only a person can.
+3. In **Edit crew member**, give each one an upstream and a model. Suggested (details in
+   `studio/crew/README.md`): director Claude Opus 5.5 (effort high), art director GPT-5.6 Sol,
+   cinematographer Claude Sonnet 5 (medium), reviewer Claude Opus 5.5 (**must accept images**);
+   `deepseek-flash` is the budget choice for the first three.
+4. In the workbench, create the project (vertical 9:16 by default) and, in **Project settings**,
+   pick the crew's group as its notice group and a narrator voice. Each character's voice is set in
+   the **Bible**.
 
-Then post the script in the group. Generation is limited to 40 videos an hour and 4 at once per
-project (`SEEDANCE_PER_HOUR` / `SEEDANCE_CONCURRENT`, or per project in its settings). Studio files
-live in the `studiodata` volume, its tables in the `studio` schema of the same database.
+Generation is limited to 40 videos an hour and 4 at once per project (`SEEDANCE_PER_HOUR` /
+`SEEDANCE_CONCURRENT`, or per project in its settings). Studio files live in the `studiodata`
+volume, its tables in the `studio` schema of the same database.
 
 ## Desktop client (Windows / macOS)
 
@@ -253,7 +281,11 @@ work in the client, on the same data as the web UI. Details in `app/README.md`.
 ## Known limits
 
 - **Containers have no egress restrictions** — Agents can reach anything on the internet.
-- **DeepSeek Agents don't see images tools return**, and their replies aren't streamed token by token.
+- **Seedance's own voices vary from shot to shot**: on-camera dialogue is generated with the picture
+  (lips match), so the same character may not sound identical in every shot. Narration and
+  off-screen lines use one fixed TTS voice per character.
+- **A shared-machine group shares one browser**, and everyone in it can change everyone's files —
+  that is the point, and the cost.
 - **1080p / 4K takes are 10-bit HEVC**, which many Chrome / Firefox setups can't play: the workbench
   shows the last frame and a download link instead (720p takes, the default, are H.264).
 - **No multi-user**: one token, one data set, no account system.

@@ -11,7 +11,7 @@
 // Self-test: node studio/media.mjs (needs ffmpeg + a DejaVu font; the studio image has both)
 import { spawn } from 'node:child_process'
 import { mkdtemp, rm, readFile, writeFile, access } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // The labels carry character names, which are Chinese more often than not: DejaVu has no CJK and
@@ -33,14 +33,17 @@ function run(cmd, args, timeoutMs = 120_000) {
   })
 }
 
-/** → {width, height, duration_ms (null for stills), codec} */
+/** → {width, height, duration_ms (null for stills), codec, audio: has a sound track} */
 export async function probe(path) {
   const j = JSON.parse(await run('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', path], 30_000))
-  const v = (j.streams ?? []).find(s => s.codec_type === 'video')
-  if (!v) throw new Error('not an image or video ffmpeg can read')
-  const dur = Number(j.format?.duration ?? v.duration)
+  const v = (j.streams ?? []).find(s => s.codec_type === 'video' && s.disposition?.attached_pic !== 1)
+  const au = (j.streams ?? []).find(s => s.codec_type === 'audio')
+  const dur = Number(j.format?.duration ?? v?.duration ?? au?.duration)
+  // Speech from TTS: sound only.
+  if (!v && au) return { width: null, height: null, duration_ms: Number.isFinite(dur) ? Math.round(dur * 1000) : null, codec: au.codec_name, audio: true }
+  if (!v) throw new Error('not an image, video or audio file ffmpeg can read')
   const still = ['png', 'mjpeg', 'webp', 'bmp', 'gif'].includes(v.codec_name) && !(dur > 0.2)
-  return { width: v.width ?? null, height: v.height ?? null, duration_ms: still || !Number.isFinite(dur) ? null : Math.round(dur * 1000), codec: v.codec_name }
+  return { width: v.width ?? null, height: v.height ?? null, duration_ms: still || !Number.isFinite(dur) ? null : Math.round(dur * 1000), codec: v.codec_name, audio: !!au }
 }
 
 const fit = `scale=${CELL_W}:${CELL_H}:force_original_aspect_ratio=decrease,pad=${CELL_W}:${CELL_H}:(ow-iw)/2:(oh-ih)/2:color=0x202020`
@@ -95,6 +98,76 @@ export async function contactSheet({ refs = [], takes = [] }) {
   }
 }
 
+// ---------- assembling an episode ----------
+// Frame sizes per aspect ratio at 720p — what Seedance returns at 720p, and plenty for a phone.
+export const FRAME = { '9:16': [720, 1280], '16:9': [1280, 720], '1:1': [960, 960], '3:4': [720, 960], '4:3': [960, 720], '21:9': [1680, 720] }
+// The subtitle font: the same CJK face as the labels (the image's WenQuanYi Micro Hei), found by
+// libass through fontconfig in the font's own directory.
+const SUB_FONT = process.env.STUDIO_SUB_FONT || 'WenQuanYi Micro Hei'
+
+/**
+ * One episode from its approved takes. Every take is re-encoded to the same size, rate and sound
+ * format first — Seedance returns 10-bit HEVC at some resolutions, H.264 at others, with or without
+ * sound, and concatenating mixed streams gives a file that plays in one player and not another.
+ * The output is H.264 + AAC in MP4 (faststart): what every phone and browser plays.
+ *
+ * segments:  [{path, seconds}]      each take, cut to `seconds` (the shot's length, trim_to)
+ * narration: [{path, at}]           speech clips placed at `at` seconds into the cut
+ * srtPath:   subtitles file or null; burn: draw them into the picture (true) or leave them beside it
+ * Returns the path of the finished file inside `dir` (the caller stores it, then removes dir).
+ */
+export async function assemble({ dir, segments, narration = [], srtPath = null, burn = true, ratio = '9:16', fps = 30 }) {
+  if (!segments.length) throw new Error('nothing to assemble')
+  const [W, H] = FRAME[ratio] ?? FRAME['9:16']
+  const parts = []
+  for (const [i, s] of segments.entries()) {
+    const out = join(dir, `seg${String(i).padStart(3, '0')}.mp4`)
+    const { audio } = await probe(s.path)
+    const secs = Math.max(0.5, Number(s.seconds) || 1).toFixed(3)
+    // A take without sound gets silence of the same length, so every segment has one audio stream.
+    const inputs = audio ? ['-i', s.path] : ['-i', s.path, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
+    await run('ffmpeg', ['-v', 'error', ...inputs, '-t', secs,
+      '-map', '0:v:0', '-map', audio ? '0:a:0' : '1:a:0',
+      '-vf', `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=${fps},format=yuv420p,setsar=1`,
+      '-af', 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000',
+      '-shortest', '-y', out], 600_000)
+    parts.push(out)
+  }
+  const list = join(dir, 'list.txt')
+  await writeFile(list, parts.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'))
+  const body = join(dir, 'body.mp4')
+  await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', body], 300_000)
+  if (!narration.length && !srtPath) return body
+
+  const final = join(dir, 'episode.mp4')
+  const args = ['-v', 'error', '-i', body]
+  for (const n of narration) args.push('-i', n.path)
+  const graph = []
+  if (narration.length) {
+    // Speech on top of the takes' own sound. The takes are ducked while anyone narrates, so the
+    // voice stays clear without the scene going silent.
+    narration.forEach((n, k) => graph.push(`[${k + 1}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=${Math.round(n.at * 1000)}:all=1[n${k}]`))
+    graph.push(`${narration.map((_, k) => `[n${k}]`).join('')}amix=inputs=${narration.length}:normalize=0:duration=longest[voice]`)
+    graph.push('[voice]asplit=2[vmix][vkey]')
+    graph.push('[0:a][vkey]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[bed]')
+    graph.push('[bed][vmix]amix=inputs=2:normalize=0:duration=first[aout]')
+  }
+  if (srtPath && burn) {
+    // ⚠️ libass sizes an SRT against a 384×288 script, not the video: these numbers are in that
+    // space and scale with the frame (12 ≈ 1/24 of the height, MarginV 30 ≈ a tenth up from the bottom).
+    const style = `FontName=${SUB_FONT},FontSize=12,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=30,Alignment=2`
+    const esc = p => p.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")
+    graph.push(`[0:v]subtitles=filename='${esc(srtPath)}':fontsdir='${esc(dirname(FONT))}':force_style='${style}'[vout]`)
+  }
+  if (graph.length) args.push('-filter_complex', graph.join(';'))
+  args.push('-map', srtPath && burn ? '[vout]' : '0:v', '-map', narration.length ? '[aout]' : '0:a')
+  args.push(...srtPath && burn ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20'] : ['-c:v', 'copy'])
+  args.push('-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', '-y', final)
+  await run('ffmpeg', args, 900_000)
+  return final
+}
+
 // ---------- self-test ----------
 if (import.meta.url === `file://${process.argv[1]}`) {
   const a = await import('node:assert/strict')
@@ -136,6 +209,32 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     a.ok(Math.abs(r1 - 0x20) < 12 && Math.abs(g1 - 0x20) < 12 && Math.abs(b1 - 0x20) < 12, `cell 2 of the reference row is blank (got ${r1},${g1},${b1})`)
     const t1 = await rgb(4 + 200, 4 + 184 + 60)
     a.ok(!(Math.abs(t1[0] - t1[1]) < 8 && Math.abs(t1[1] - t1[2]) < 8), `row two starts with a real frame, not a blank (got ${t1})`)
+
+    // An episode: a silent 16:9 H.264 take and a 9:16 10-bit HEVC take with sound, cut to 3 s and
+    // 4 s, one narration clip, Chinese subtitles burned in.
+    const talk = join(dir, 'talk.mp4'), voice = join(dir, 'voice.mp3'), subs = join(dir, 'e.srt')
+    await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=720x1280:rate=24:duration=5', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=5',
+      '-c:v', 'libx265', '-pix_fmt', 'yuv420p10le', '-x265-params', 'log-level=error', '-c:a', 'aac', '-shortest', '-y', talk])
+    await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=1.5', '-y', voice])
+    a.equal((await probe(voice)).audio, true, 'speech is probed as sound')
+    a.equal((await probe(voice)).width, null)
+    await writeFile(subs, '1\n00:00:00,500 --> 00:00:02,500\n蛮吉：走！\n')
+    const edir = await mkdtemp(join(tmpdir(), 'ep-'))
+    const ep = await assemble({ dir: edir, segments: [{ path: v1, seconds: 3 }, { path: talk, seconds: 4 }],
+      narration: [{ path: voice, at: 0.5 }], srtPath: subs, burn: true, ratio: '9:16' })
+    const pe = await probe(ep)
+    a.equal(pe.codec, 'h264', 'plays everywhere'); a.equal(pe.width, 720); a.equal(pe.height, 1280); a.equal(pe.audio, true)
+    a.ok(Math.abs(pe.duration_ms - 7000) < 250, `3 s + 4 s (got ${pe.duration_ms})`)
+    // The subtitle is really in the picture: the bottom band at 1 s differs from the same band in
+    // the version without subtitles.
+    const band = async (file, t) => {
+      const p = spawn('ffmpeg', ['-v', 'error', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'crop=480:80:120:1080,scale=96:16', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'])
+      const c = []; for await (const x of p.stdout) c.push(x)
+      return [...Buffer.concat(c)]
+    }
+    const plain = await band(join(edir, 'body.mp4'), 1), burned = await band(ep, 1)
+    a.ok(Math.max(...plain.map((v, i) => Math.abs(v - burned[i]))) > 80, 'subtitles are drawn into the frame (white text where it was black)')
+    await rm(edir, { recursive: true, force: true })
 
     await a.rejects(contactSheet({ takes: [] }), /no candidates/)
     await a.rejects(contactSheet({ takes: Array(9).fill({ path: v1, n: 1 }) }), /at most 8/)

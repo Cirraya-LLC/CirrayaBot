@@ -109,8 +109,10 @@ async function main(o) {
   let groupId = g?.id ?? '(new)'
   if (g) await act(`update group ${o.group}: add the crew, lead ${lead}`, () =>
     call('PATCH', `/api/groups/${g.id}`, { members: [...new Set([...g.members, ...ids])], lead }))
-  else await act(`create group ${o.group} with the crew, lead ${lead}`, async () => {
-    groupId = (await call('POST', '/api/groups', { name: o.group, members: ids, lead })).id
+  // A new crew group shares one machine (the crew passes files all day). An existing group keeps
+  // whatever a person set — like the models, it is theirs to choose.
+  else await act(`create group ${o.group} with the crew, lead ${lead}, one shared machine`, async () => {
+    groupId = (await call('POST', '/api/groups', { name: o.group, members: ids, lead, shared_machine: true })).id
   })
 
   // ---- studio roles ----
@@ -148,6 +150,12 @@ async function selfTest() {
   a.match(basics, /`studio` 工具/); a.doesNotMatch(basics, /容器里的 `studio` 命令/)
   a.match(basics, /scene add/)
   a.doesNotMatch(agents[3].persona, /直接 @ 人类/)
+  // Work reaches people as work orders (2.31): nobody is told to hand work over with an @.
+  a.match(basics, /片场工单/); a.match(basics, /episode submit/)
+  for (const x of agents) a.doesNotMatch(x.persona, /@(苏棠|林野|顾衡|严青)/, `${x.name}: no @-relay handoffs left in the persona`)
+  for (const k of skills) a.doesNotMatch(k.body, /@(苏棠|林野|顾衡|严青)/, `${k.name}: no @-relay handoffs left in the skill`)
+  const breakdown = skills.find(k => k.name === 'shot-breakdown').body
+  a.match(breakdown, /"dialogue"/); a.match(breakdown, /onscreen[\s\S]*offscreen[\s\S]*narration/)
   a.throws(() => parseAgent('no heading', 'x'), /first heading/)
   a.throws(() => parseAgent('# A — B\n- **Skills**：x\n', 'x'), /性格描述/)
   console.log('import.mjs: all checks passed')

@@ -1,18 +1,28 @@
-// End-to-end check of the crew loop through the REAL platform and studio (a running compose
-// deployment), with a scripted fake model standing in for the agents and a fake Seedance:
+// End-to-end: one episode of a series, from a person's script to the finished cut, through the REAL
+// platform and studio (a running compose deployment). Scripted fake models stand in for the crew,
+// with fake Seedance and fake speech (TTS) servers:
 //
-//   shot.gen → studio worker → "@reviewer candidates ready" (event) → reviewer calls shot.sheet
-//   → SEES the sheet (image in its next request) → shot.reject → "@cinematographer rejected"
-//   → cinematographer writes a new prompt and regenerates → … → 3rd rejection → "@human", nobody woken.
+//   a person adds E01 and starts it → the director gets a breakdown work order IN HIS OWN CHAT,
+//   cuts scenes and shots with dialogue, submits → a person sends it back once with a note → the
+//   director gets it again (rev 1, the note in it) and resubmits → a person approves → the art
+//   director gets "references" orders, makes them → a person locks them → the cinematographer gets
+//   "prompt + generate" orders → takes → the reviewer gets a review order, SEES the sheet (after one
+//   429), rejects one shot → the cinematographer gets the fix → … everything approved → the studio
+//   cuts the episode on its own (9:16 H.264, narration by TTS, subtitles burned in + .srt) → a person
+//   is told in the group → approves → done.
 //
-// It asserts on artifacts: group log rows, tool rows, what the model was actually sent, studio state.
+// And on the way: nobody hands work over with an @ — the group holds only the studio's lines; the
+// director runs on "deepseek-flash" (our own loop now, not DeepSeek Harness) and its reasoning is
+// passed back on every later request; the crew is offered the studio tool and nothing else.
+//
+// It asserts on artifacts: studio state, the files, what the models and Seedance were actually sent.
 //
 //   Run from the deployment directory, with in .env:
 //     SEEDANCE_BASE_URL=http://host.docker.internal:18777/sd  SEEDANCE_API_KEY=sd-key  NOTIFY_QUIET_MS=1000
 //   node studio/e2e-platform.mjs <deployment dir>
 import { createServer } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, mkdtempSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import assert from 'node:assert/strict'
@@ -24,56 +34,91 @@ const K = ENV.ACCESS_TOKEN
 const RUN = Date.now().toString(36).slice(-5)
 const PORT = 18777
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`, ...a)
 
-// ---- media for the fake Seedance ----
-const tmp = mkdtempSync(join(tmpdir(), 'e2ep-'))
-execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=24:duration=4', '-pix_fmt', 'yuv420p', '-y', join(tmp, 't.mp4')])
-const TAKE = readFileSync(join(tmp, 't.mp4'))
+// ---- media for the fakes: a 16:9 take with sound (Seedance), a still, a short speech clip ----
+const tmp = mkdtempSync(join(tmpdir(), 'e2es-'))
+execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=24:duration=5', '-f', 'lavfi', '-i', 'sine=frequency=300:duration=5',
+  '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', '-y', join(tmp, 't.mp4')])
+execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=512x768', '-frames:v', '1', '-y', join(tmp, 'ref.png')])
+execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=900:duration=1.6', '-y', join(tmp, 'v.mp3')])
+const TAKE = readFileSync(join(tmp, 't.mp4')), PNG = readFileSync(join(tmp, 'ref.png')).toString('base64'), MP3 = readFileSync(join(tmp, 'v.mp3'))
 
-// ---- the fake model: one scripted person per ROLE marker in the persona ----
-const seen = []           // {role, tools, image, text} per request
+// ---- the fake crew: one scripted person per ROLE marker. Each turn is a list of studio calls,
+// made one per step; the step is the number of tool calls since the newest user message. ----
+const seen = []
 const sse = (res, frames) => {
   res.writeHead(200, { 'content-type': 'text/event-stream' })
   for (const f of frames) res.write(`data: ${JSON.stringify(f)}\n\n`)
   res.end('data: [DONE]\n\n')
 }
-const say = (res, text) => sse(res, [{ choices: [{ delta: { content: text } }] }])
-const toolCall = (res, action, args) => sse(res, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: `c${Math.random().toString(36).slice(2, 8)}`,
-  function: { name: 'studio', arguments: JSON.stringify({ action, args }) } }] } }] }, { choices: [{ delta: {}, finish_reason: 'tool_calls' }] }])
 const textOf = m => (Array.isArray(m?.content) ? m.content.filter(x => x.type === 'text').map(x => x.text).join('') : String(m?.content ?? ''))
-const lastCall = msgs => { for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].tool_calls) return JSON.parse(msgs[i].tool_calls[0].function.arguments).action; return null }
-const shotIn = s => (s.match(/S\d+-SH\d+/) ?? [])[0]
+const shotsIn = s => [...new Set(s.match(/E01-S\d+-SH\d+/g) ?? [])]
+const rejectedOnce = new Set()
+let reviewRounds = 0
+
+const SCRIPT = {
+  director: said => /被退回|上一版人给的意见|可以拆了/.test(said) ? [
+    ['scene.add', { code: 'E01-S01', episode: 'E01', title: '断崖', script: '蛮吉在断崖上拔刀。' }],
+    ['shot.plan', { scene: 'E01-S01', shots: [
+      { id: 'E01-S01-SH001', duration_s: 3, characters: [{ name: '蛮吉', look: '战斗装' }], location: '断崖', story_beat: '拔刀',
+        continuity: { out_to: 'E01-S01-SH002' }, dialogue: [{ speaker: '蛮吉', text: '谁也别想过去！', kind: 'onscreen' }] },
+      { id: 'E01-S01-SH002', duration_s: 4, characters: [{ name: '蛮吉', look: '战斗装' }], location: '断崖', story_beat: '风起',
+        continuity: { in_from: 'E01-S01-SH001' }, dialogue: [{ kind: 'narration', text: '那一年，他十二岁。' }] },
+    ] }],
+    ['episode.submit', { episode: 'E01' }],
+  ] : [],
+  art: said => /补参考图|要用到/.test(said) ? [
+    ['char.add', { name: '蛮吉', card: { hair: 'black' } }],
+    ['look.add', { character: '蛮吉', look: '战斗装' }],
+    ['asset.save', { character: '蛮吉', look: '战斗装', kind: 'turnaround', tags: ['正'], data_b64: PNG }],
+    ['loc.add', { name: '断崖' }],
+    ['asset.save', { location: '断崖', kind: 'location', data_b64: PNG }],
+    ['char.voice', { name: '蛮吉', voice: 'onyx', instructions: 'young, fierce' }],
+  ] : [],
+  cinematographer: said => shotsIn(said).flatMap(s => [
+    ['shot.prompt', { shot: s, text: `${s}: boy draws a blade on a cliff, black hair, ${Date.now()}` }],
+    ['shot.gen', { shot: s, model: 'seedance-2.5', n: 1 }],
+  ]),
+  // The reviewer rejects SH001 once (on the image it saw), and approves everything else.
+  reviewer: said => shotsIn(said).flatMap(s => [
+    ['shot.sheet', { shot: s }],
+    rejectedOnce.has(s) || !s.endsWith('SH001')
+      ? ['shot.approve', { shot: s, pick: 'LAST' }]
+      : ['shot.reject', { shot: s, reason: 'hair colour drifts brown in every take; the card says black', route: 'prompt' }],
+  ]),
+}
 
 function model(body, res) {
   const msgs = body.messages
   const role = (textOf(msgs[0]).match(/ROLE:(\w+)/) ?? [])[1] ?? 'none'
+  const iUser = msgs.findLastIndex(m => m.role === 'user' && !Array.isArray(m.content) && !/^\(the image/.test(textOf(m)))
+  const said = textOf(msgs[iUser])
+  const step = msgs.slice(iUser + 1).filter(m => m.tool_calls).length
   const last = msgs.at(-1)
   const image = Array.isArray(last.content) && last.content.some(x => x.type === 'image_url' && x.image_url.url.startsWith('data:image/'))
-  // The newest user message that isn't a tool's image follow-up.
-  const said = [...msgs].reverse().find(m => m.role === 'user' && !Array.isArray(m.content))
-  seen.push({ role, tools: (body.tools ?? []).map(t => t.function.name), image, last: textOf(last).slice(0, 120) })
-  const after = last.role === 'tool' || image ? lastCall(msgs) : null
-  if (role === 'reviewer') {
-    if (after === 'shot.sheet' && image) return toolCall(res, 'shot.reject', { shot: shotIn(JSON.stringify(msgs.slice(-4))) ?? 'S01-SH001',
-      reason: 'candidate hair colour drifts from the locked card, redo', route: 'prompt' })
-    if (after === 'shot.sheet') return say(res, 'I could not see the sheet.')
-    if (after === 'shot.reject') return say(res, '已打回。')
-    const s = shotIn(textOf(said))
-    if (/候选已就绪/.test(textOf(said)) && s) return toolCall(res, 'shot.sheet', { shot: s })
-    return say(res, '好的')
+  seen.push({ role, model: body.model, tools: (body.tools ?? []).map(t => t.function.name), image, effort: body.reasoning_effort,
+    assistants: msgs.filter(m => m.role === 'assistant').map(m => ({ calls: !!m.tool_calls, reasoning: m.reasoning_content ?? null })) })
+  const plan = SCRIPT[role]?.(said) ?? []
+  // DeepSeek-style: every answer carries reasoning, which it wants back.
+  const think = body.model.startsWith('deepseek') ? [{ choices: [{ delta: { reasoning_content: `thinking ${role} ${step}` } }] }] : []
+  if (step < plan.length) {
+    let [action, args] = plan[step]
+    if (args.pick === 'LAST') {       // the newest candidate in what shot.sheet answered
+      const out = textOf(msgs.findLast(m => m.role === 'tool'))
+      const ns = (out.match(/"candidates": \[([\d,\s]+)\]/)?.[1] ?? '1').split(',').map(Number)
+      args = { ...args, pick: ns.at(-1) }
+    }
+    if (action === 'shot.reject') rejectedOnce.add(args.shot)
+    if (action === 'shot.sheet') reviewRounds++
+    return sse(res, [...think, { choices: [{ delta: { tool_calls: [{ index: 0, id: `c${Math.random().toString(36).slice(2, 8)}`,
+      function: { name: 'studio', arguments: JSON.stringify({ action, args }) } }] } }] }, { choices: [{ delta: {}, finish_reason: 'tool_calls' }] }])
   }
-  if (role === 'cinematographer') {
-    const s = shotIn(JSON.stringify(msgs.slice(-6))) ?? 'S01-SH001'
-    if (after === 'shot.prompt') return toolCall(res, 'shot.gen', { shot: s, model: 'seedance-2.5', n: 1 })
-    if (after === 'shot.gen') return say(res, '已重新生成。')
-    if (/被打回/.test(textOf(said))) return toolCall(res, 'shot.prompt', { shot: s, text: `black hair, attempt ${Date.now()}` })
-    return say(res, '收到')
-  }
-  return say(res, 'hello')
+  return sse(res, [...think, { choices: [{ delta: { content: plan.length ? '做完了。' : '收到。' } }] }])
 }
 
-// ---- fake Seedance ----
-const tasks = new Map()
+// ---- fake Seedance and fake speech ----
+const tasks = new Map(), seedanceBodies = [], ttsBodies = []
 let limited = false
 const server = createServer(async (req, res) => {
   let b = ''; for await (const c of req) b += c
@@ -89,10 +134,12 @@ const server = createServer(async (req, res) => {
     }
     return model(body, res)
   }
+  if (req.url === '/tts/v1/models') return json(200, { data: [{ id: 'fake-tts' }] })
+  if (req.url === '/tts/v1/audio/speech') { ttsBodies.push(JSON.parse(b)); res.writeHead(200, { 'content-type': 'audio/mpeg' }); return res.end(MP3) }
   if (req.url === '/v.mp4') { res.writeHead(200, { 'content-type': 'video/mp4' }); return res.end(TAKE) }
   if (req.url.startsWith('/sd/api/v3/contents/generations/tasks')) {
     if (req.headers.authorization !== 'Bearer sd-key') return json(401, { error: { message: 'key' } })
-    if (req.method === 'POST') { const id = `t${tasks.size + 1}`; tasks.set(id, 0); return json(200, { id }) }
+    if (req.method === 'POST') { seedanceBodies.push(JSON.parse(b)); const id = `t${tasks.size + 1}`; tasks.set(id, 0); return json(200, { id }) }
     return json(200, { status: 'succeeded', content: { video_url: `http://host.docker.internal:${PORT}/v.mp4` } })
   }
   json(404, {})
@@ -108,89 +155,130 @@ const api = async (method, path, body) => {
   return { status: r.status, body: j }
 }
 const ok = async (...a) => { const r = await api(...a); assert.ok(r.status < 300, `${a[0]} ${a[1]} → ${r.status} ${JSON.stringify(r.body)}`); return r.body }
-// Actions the panel doesn't offer (the crew's own work) are seeded as a person, straight at the studio.
-const studioAsHuman = (action, args) => JSON.parse(execFileSync('docker', ['compose', 'exec', '-T',
-  '-e', `A=${JSON.stringify({ action, args })}`, 'app', 'node', '-e',
-  `fetch(process.env.STUDIO_URL+'/v1/call',{method:'POST',headers:{authorization:'Bearer '+process.env.STUDIO_TOKEN,'x-studio-actor':'human'},body:process.env.A}).then(r=>r.json()).then(j=>process.stdout.write(JSON.stringify(j)))`],
-{ cwd: DIR }).toString())
-const must = r => { assert.equal(r.ok, true, JSON.stringify(r.error)); return r.result }
+const panel = (action, args) => ok('POST', '/api/studio/call', { action, args })
+const sql = q => execFileSync('docker', ['compose', 'exec', '-T', 'db', 'psql', '-U', 'multiagent', '-d', 'multiagent', '-tAc', q], { cwd: DIR }).toString().trim()
 const gw = execFileSync('docker', ['network', 'inspect', `${ENV.COMPOSE_PROJECT_NAME || 'multi-agent'}_default`, '-f', '{{(index .IPAM.Config 0).Gateway}}']).toString().trim()
+async function until(what, fn, secs = 180) {
+  for (let i = 0; i < secs; i++) { const v = await fn(); if (v) return v; await sleep(1000) }
+  throw new Error(`timed out waiting for: ${what}`)
+}
+const stage = async P => (await panel('episode.show', { project: P, episode: 'E01' })).stage
 
 try {
-  // ---- platform setup: an upstream pointing at the fake, three crew agents, one outsider, a group ----
+  // ---- setup: an upstream on the fake, four crew members (the director on deepseek-flash), a group ----
   const prov = await ok('POST', '/api/providers', { name: `fake-${RUN}`, base_url: `http://${gw}:${PORT}/v1`, protocol: 'chat', auto_context: false, context_tokens: 64000 })
-  const mk = async (id, name, role) => ok('POST', '/api/bots', { id: `${id}-${RUN}`, name: `${name}${RUN}`, persona: `你是${name}。ROLE:${role}`, provider_id: prov.id, model: 'fake-model' })
-  const D = (await mk('dir', '顾衡', 'director')).id, R = (await mk('rev', '严青', 'reviewer')).id
-  const C = (await mk('cine', '林野', 'cinematographer')).id, O = (await mk('plain', '路人', 'none')).id
-  const g = await ok('POST', '/api/groups', { name: `剧组${RUN}`, members: [D, R, C], lead: D })
-  assert.equal((await api('POST', '/api/bots', { name: 'Studio', persona: 'x', model: 'm' })).status, 400, '"Studio" is reserved')
+  const mk = async (id, name, role, extra = {}) => (await ok('POST', '/api/bots', { id: `${id}-${RUN}`, name: `${name}${RUN}`,
+    persona: `你是${name}。ROLE:${role}`, provider_id: prov.id, model: 'fake-model', ...extra })).id
+  const D = await mk('dir', '顾衡', 'director', { model: 'deepseek-flash', effort: 'high' })
+  const A = await mk('art', '苏棠', 'art'), C = await mk('cine', '林野', 'cinematographer'), R = await mk('rev', '严青', 'reviewer')
+  const O = await mk('plain', '路人', 'none')
+  const g = await ok('POST', '/api/groups', { name: `剧组${RUN}`, members: [D, A, C, R], lead: D, shared_machine: true })
+  assert.equal(g.shared_machine, true, 'the crew group shares one machine')
 
-  // ---- studio setup through the panel's own endpoint (as a person) ----
-  const P = `e2ep-${RUN}`
-  await ok('POST', '/api/studio/call', { action: 'project.create', args: { id: P, name: 'Platform E2E', info: { lang: 'zh-Hans' }, notify_group: g.id } })
-  for (const [id, role] of [[D, 'director'], [R, 'reviewer'], [C, 'cinematographer']]) await ok('POST', '/api/studio/call', { action: 'crew.set', args: { agent_id: id, role } })
-  assert.equal((await api('POST', '/api/studio/call', { action: 'shot.gen', args: {} })).status, 400, 'the panel does not generate')
-  must(studioAsHuman('scene.add', { project: P, code: 'S01', script: '断崖' }))
-  must(studioAsHuman('shot.plan', { project: P, scene: 'S01', shots: [{ id: 'S01-SH001', duration_s: 4, characters: [], continuity: { out_to: 'S01-SH002' } }] }))
-  must(studioAsHuman('shot.prompt', { project: P, shot: 'S01-SH001', text: 'v1' }))
-  // Every crew member works in this project.
-  for (const id of [R, C, D]) must(studioAsHuman('crew.set', { agent_id: id, role: { [R]: 'reviewer', [C]: 'cinematographer', [D]: 'director' }[id] }))
-  execFileSync('docker', ['compose', 'exec', '-T', 'db', 'psql', '-U', 'multiagent', '-d', 'multiagent', '-qc',
-    `insert into studio.actor_project values ${[R, C, D].map(id => `('agent:${id}', '${P}')`).join(',')} on conflict (actor) do update set project_id = excluded.project_id`], { cwd: DIR })
+  const P = `ser-${RUN}`
+  await panel('project.create', { id: P, name: 'Series E2E', info: { lang: 'zh-Hans', narrator: { voice: 'sage', instructions: 'calm' } }, notify_group: g.id })
+  assert.equal((await panel('project.info', { project: P })).info.ratio, '9:16', 'a new project is vertical')
+  for (const [id, role] of [[D, 'director'], [A, 'art'], [C, 'cinematographer'], [R, 'reviewer']]) await panel('crew.set', { agent_id: id, role })
+  sql(`insert into studio.actor_project values ${[D, A, C, R].map(id => `('agent:${id}', '${P}')`).join(',')} on conflict (actor) do update set project_id = excluded.project_id`)
+  // Speech through the Keys panel, pointing at the fake.
+  await panel('keys.set', { name: 'tts', values: { base_url: `http://${gw}:${PORT}/tts/v1`, api_key: 'tts-key', model: 'fake-tts' } })
+  assert.equal((await panel('keys.test', { name: 'tts' })).code, 'modelOk')
 
-  // ---- the event door has its own token ----
-  const bad = await fetch(`${APP}/api/events/group/${g.id}`, { method: 'POST', headers: { authorization: 'Bearer nope', 'content-type': 'application/json' }, body: '{"text":"x"}' })
-  assert.equal(bad.status, 401)
-  const noK = await fetch(`${APP}/api/events/group/${g.id}?k=${K}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"x"}' })
-  assert.equal(noK.status, 401, 'ACCESS_TOKEN does not open the event door')
+  // ---- a person writes E01 and starts it ----
+  await panel('episode.add', { project: P, code: 'E01', title: '初见', script: '蛮吉在断崖上拔刀。风起。' })
+  assert.equal((await api('POST', '/api/studio/call', { action: 'episode.add', args: { project: P, code: 'E01' } })).status, 409)
+  await panel('episode.start', { project: P, episode: 'E01' })
 
-  // ---- go ----
-  must(studioAsHuman('shot.gen', { project: P, shot: 'S01-SH001', model: 'seedance-2.5', n: 2 }))
-  let log = []
-  for (let i = 0; i < 240; i++) {
-    log = (await ok('GET', `/api/groups/${g.id}/messages`))
-    if (log.some(m => m.speaker === 'Studio' && m.text.startsWith('@人类'))) break
-    await sleep(1000)
-  }
-  const notices = log.filter(m => m.speaker === 'Studio').map(m => m.text)
-  console.log('studio notices:\n  ' + notices.join('\n  '))
-  assert.match(notices[0], new RegExp(`^@严青${RUN} 候选已就绪：S01-SH001，2 条`), 'the reviewer is told, by name, in the project language')
-  assert.match(notices[1], new RegExp(`^@林野${RUN} S01-SH001 被打回（第 1 次，prompt）`), 'the rejection goes to the cinematographer')
-  assert.match(notices.at(-1), /^@人类 S01-SH001 已被打回 3 次/, 'the third goes to a person')
-  assert.equal(notices.filter(n => n.includes('被打回（')).length, 2)
-  assert.equal(notices.filter(n => n.includes('候选已就绪')).length, 3)
+  // The director's order arrives in HIS chat, and the group gets one line about it.
+  await until('breakdown submitted', async () => (await stage(P)) === 'breakdown_review')
+  const dDm = await ok('GET', `/api/dm/${D}`)
+  const order1 = dDm.find(m => m.speaker === 'Studio')
+  assert.ok(order1 && /〔片场工单/.test(order1.content) && /可以拆了/.test(order1.content), 'the breakdown order is in the director\'s own chat, from "Studio"')
+  const show = await panel('episode.show', { project: P, episode: 'E01' })
+  assert.deepEqual(show.scenes.map(s => [s.code, s.shots]), [['E01-S01', 2]])
 
-  // The reviewer really saw each sheet: the request after shot.sheet carried an image.
+  // ---- a person sends the breakdown back once, then approves ----
+  assert.equal((await api('POST', '/api/studio/call', { action: 'episode.review', args: { project: P, episode: 'E01', decision: 'revise' } })).status, 400, 'a send-back needs a note')
+  await panel('episode.review', { project: P, episode: 'E01', decision: 'revise', note: '第二个镜头太长，改短一点' })
+  await until('resubmitted', async () => (await stage(P)) === 'breakdown_review' && (await ok('GET', `/api/dm/${D}`)).filter(m => m.speaker === 'Studio').length === 2)
+  assert.match((await ok('GET', `/api/dm/${D}`)).filter(m => m.speaker === 'Studio')[1].content, /上一版人给的意见：第二个镜头太长/, 'the second order carries the note')
+  await panel('episode.review', { project: P, episode: 'E01', decision: 'approve' })
+  log('breakdown approved')
+
+  // ---- references: the art director gets them as an order; a person locks ----
+  await until('references made', async () => sql(`select count(*) from studio.assets a join studio.projects p on p.id = a.project_id where p.id = '${P}' and a.kind in ('turnaround','location')`) === '2')
+  const lockOrder = await until('a person asked to lock', async () => (await ok('GET', `/api/groups/${g.id}/messages`)).find(m => m.speaker === 'Studio' && /^@人类 .*等你定稿/s.test(m.text)))
+  assert.ok(lockOrder)
+  assert.equal(sql(`select count(*) from studio.orders where project_id = '${P}' and role = 'cinematographer'`), '0', 'nothing to prompt until the bible is locked')
+  await panel('char.lock', { project: P, name: '蛮吉' })
+  await panel('loc.lock', { project: P, name: '断崖' })
+  log('bible locked')
+
+  // ---- prompts, takes, review (one rejection), approval ----
+  await until('both shots approved', async () => sql(`select count(*) from studio.shots where project_id = '${P}' and status = 'approved'`) === '2', 300)
+  log('all approved')
+  // Seedance got the vertical ratio; the shot that talks got its lines and sound, the narrated one didn't.
+  const sd1 = seedanceBodies.find(b => b.content[0].text.startsWith('E01-S01-SH001')), sd2 = seedanceBodies.find(b => b.content[0].text.startsWith('E01-S01-SH002'))
+  assert.equal(sd1.ratio, '9:16'); assert.equal(sd1.generate_audio, true); assert.match(sd1.content[0].text, /对白（角色出镜说出，口型同步，逐字照念）：\n蛮吉: 「谁也别想过去！」$/)
+  assert.equal(sd2.generate_audio, false, 'narration is not Seedance\'s'); assert.doesNotMatch(sd2.content[0].text, /那一年/)
+  assert.equal(seedanceBodies.filter(b => b.content[0].text.startsWith('E01-S01-SH001')).length, 2, 'SH001 was generated again after its rejection')
   const rev = seen.filter(s => s.role === 'reviewer')
-  assert.ok(limited, 'the 429 was served')
-  assert.equal(rev.filter(s => s.image).length, 3, 'three sheets, three images in front of the model — the first one after a 429')
-  assert.ok(rev.every(s => s.tools.join() === 'studio'), 'tools off: the crew gets the studio tool and nothing else')
-  assert.ok(seen.filter(s => s.role === 'cinematographer').some(s => s.last.includes('shot.gen') || true))
+  assert.ok(limited, 'the 429 was served'); assert.equal(rev.filter(s => s.image).length, 3, 'three sheets, three images in front of the reviewer — the first after a 429')
 
-  // The transcript keeps the tool calls; nobody answers the human notice.
-  const tools = log.filter(m => m.role === 'tool')
-  assert.ok(tools.filter(m => m.name === 'studio' && m.args?.action === 'shot.sheet').length === 3)
-  await sleep(5000)
-  const after = (await ok('GET', `/api/groups/${g.id}/messages`))
-  const iHuman = after.findIndex(m => m.speaker === 'Studio' && m.text.startsWith('@人类'))
-  assert.equal(after.slice(iHuman + 1).filter(m => m.role !== 'user').length, 0, 'a notice for a person wakes no agent')
+  // ---- the cut: made by the studio on its own, a person told ----
+  const finalLine = await until('the cut is ready', async () => (await ok('GET', `/api/groups/${g.id}/messages`)).find(m => m.speaker === 'Studio' && /E01 已经剪好/.test(m.text)), 300)
+  assert.match(finalLine.text, /^@人类 E01 已经剪好（\d+ 秒）/)
+  const ep = await panel('episode.show', { project: P, episode: 'E01' })
+  assert.equal(ep.stage, 'final_review'); assert.equal(ep.cut.status, 'done'); assert.deepEqual(ep.cut.log, [], 'nothing left out')
+  // The file itself: vertical H.264 with sound, as long as the two shots (3 s trimmed from 5, 4 s).
+  const vid = await fetch(`${APP}/api/studio/file/${ep.cut.video_asset_id}?k=${K}`)
+  assert.equal(vid.status, 200); assert.equal(vid.headers.get('content-type'), 'video/mp4')
+  writeFileSync(join(tmp, 'cut.mp4'), Buffer.from(await vid.arrayBuffer()))
+  const pr = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', join(tmp, 'cut.mp4')]).toString())
+  const v = pr.streams.find(s => s.codec_type === 'video')
+  assert.equal(v.codec_name, 'h264'); assert.equal(v.width, 720); assert.equal(v.height, 1280)
+  assert.ok(pr.streams.some(s => s.codec_type === 'audio'), 'with sound')
+  assert.ok(Math.abs(Number(pr.format.duration) - 7) < 0.3, `3 s + 4 s (got ${pr.format.duration})`)
+  // Subtitles beside it, every line; speech in the right voices, cached.
+  const srt = await (await fetch(`${APP}/api/studio/file/${ep.cut.srt_asset_id}?k=${K}`)).text()
+  assert.match(srt, /蛮吉：谁也别想过去！/); assert.match(srt, /那一年，他十二岁。/)
+  assert.deepEqual(ttsBodies.map(b => [b.input, b.voice, b.model]), [['那一年，他十二岁。', 'sage', 'fake-tts']], 'only the narration is spoken by TTS, in the narrator\'s voice')
+  assert.equal(sql(`select count(*) from studio.generations where project_id = '${P}' and engine = 'tts' and status = 'succeeded'`), '1')
+  await panel('episode.assemble', { project: P, episode: 'E01' })
+  await until('recut', async () => sql(`select count(*) from studio.assemblies where episode_id = (select id from studio.episodes where project_id = '${P}') and status = 'done'`) === '2')
+  assert.equal(ttsBodies.length, 1, 'cutting again reuses the speech')
 
-  // The studio's own record agrees.
-  const hist = must(studioAsHuman('review.history', { project: P, shot: 'S01-SH001' }))
-  assert.equal(hist.rejections, 3); assert.equal(hist.prompts.length, 3, 'v1 by the person, two by the cinematographer')
-  assert.ok(hist.reviews.every(r => r.reviewer === `agent:${R}`), 'the studio saw the reviewer, identified by the platform')
+  await panel('episode.review', { project: P, episode: 'E01', decision: 'approve' })
+  assert.equal(await stage(P), 'done')
+  log('episode done')
 
-  // ---- not on the crew → no studio tool; a step limit is a limit ----
+  // ---- how they talked ----
+  const glog = await ok('GET', `/api/groups/${g.id}/messages`)
+  assert.equal(glog.filter(m => m.role === 'assistant').length, 0, 'nobody worked in the group: every order ran in the member\'s own chat')
+  assert.ok(glog.some(m => m.speaker === 'Studio' && new RegExp(`^📋 工单 → 林野${RUN}：E01-S01-SH00\\d（写提示词并生成）`).test(m.text)), 'the group sees who got what')
+  const orders = sql(`select role || ':' || kind || ':' || status from studio.orders where project_id = '${P}' order by id`).split('\n')
+  assert.ok(orders.every(o => /:(done|cancelled)$/.test(o)), `every order closed by the state it asked for: ${orders.join(' ')}`)
+  for (const k of ['director:breakdown', 'art:asset', 'human:lock', 'cinematographer:prompt', 'reviewer:review', 'cinematographer:fixprompt', 'human:final'])
+    assert.ok(orders.some(o => o.startsWith(k)), `an order ${k}`)
+  // Closing by hand is only for what the studio can't see.
+  const anOrder = sql(`select id from studio.orders where project_id = '${P}' and kind = 'prompt' limit 1`)
+  assert.ok(seen.filter(s => ['director', 'art', 'cinematographer', 'reviewer'].includes(s.role)).every(s => s.tools.join() === 'studio'), 'tools off: the crew gets the studio tool and nothing else')
+  assert.ok(anOrder)
+
+  // DeepSeek on our own loop: effort in its own words, and its reasoning comes back on every later request.
+  const ds = seen.filter(s => s.role === 'director')
+  assert.ok(ds.every(s => s.model === 'deepseek-flash' && s.effort === 'max'), 'high → max')
+  const withHistory = ds.filter(s => s.assistants.length)
+  assert.ok(withHistory.length > 3)
+  assert.ok(withHistory.every(s => s.assistants.every(x => x.reasoning?.startsWith('thinking director'))), 'every assistant message went back with its reasoning — in the turn and across turns')
+  assert.ok(withHistory.some(s => s.assistants.some(x => !x.calls)), 'including a previous turn\'s final answer, from the database')
+
+  // ---- not on the crew → no studio tool ----
   const dm = await fetch(`${APP}/api/chat?k=${K}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target: { type: 'agent', id: O }, text: 'hi' }) })
   await dm.text()
   assert.deepEqual(seen.filter(s => s.role === 'none').at(-1).tools, [], 'an agent off the crew is offered no studio tool')
-  await ok('PATCH', `/api/bots/${C}`, { max_steps: 1 })
-  assert.equal((await api('PATCH', `/api/bots/${C}`, { max_steps: 0 })).status, 400)
-  const s2 = await fetch(`${APP}/api/chat?k=${K}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target: { type: 'agent', id: C }, text: 'S01-SH001 被打回，请改' }) })
-  await s2.text()
-  const dmLog = await ok('GET', `/api/dm/${C}`)
-  assert.equal(dmLog.filter(m => m.role === 'tool').length, 1, 'one step, then it has to stop')
-  assert.match(dmLog.at(-1).content, /hit the tool-use limit/, 'and the stored answer says why it stopped')
+  // The event doors have their own token.
+  assert.equal((await fetch(`${APP}/api/events/order?k=${K}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"x"}' })).status, 401, 'ACCESS_TOKEN does not open the work-order door')
 
   console.log('e2e-platform: all checks passed')
 } finally {

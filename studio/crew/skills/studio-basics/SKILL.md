@@ -24,10 +24,19 @@ studio project info             # 世界观、画风、基调、禁忌
 
 ## 命令表
 
-### 项目
+### 项目与分集
 | 命令 | 作用 |
 | --- | --- |
-| `studio project list / current / use <slug> / info` | 项目切换与设定查询 |
+| `studio project list / current / use <slug> / info` | 项目切换与设定查询（项目 = 一部剧，默认竖屏 9:16） |
+| `studio episode list / show <集>` | 分集、每集剧本、所处阶段、合成情况 |
+| `studio episode submit <集>` | 导演：整集拆完，提交给人确认 |
+| `studio episode assemble <集>` | 导演：整集已全部通过时重新合成一次 |
+
+### 工单
+| 命令 | 作用 |
+| --- | --- |
+| `studio order list` | 你手上的工单 |
+| `studio order done <编号> --note ...` | 只用于片场看不到的活（比如「修参考图」），写明改了什么 |
 
 ### 角色 / 场景资产
 | 命令 | 作用 |
@@ -36,6 +45,7 @@ studio project info             # 世界观、画风、基调、禁忌
 | `studio char show <角色> [--look <造型>]` | 身份卡、禁止改动项、可用 look |
 | `studio char refs <角色> --look <造型> [--angle 正/3-4/侧/背] [--expr <表情>] [--light <光照>] [--shot <景别>]` | 按条件匹配参考图 |
 | `studio char add / look add` | 新建角色 / 造型（草稿态） |
+| `studio char voice <角色> --voice <声音名> [--instructions ...]` | 角色的配音声音（画外音 / 旁白用 TTS），定稿后也能改 |
 | `studio loc list / show / refs / add` | 场景，参数同角色 |
 | `studio asset gen --engine gpt-image\|comfy --prompt ... [--ref <asset_id>...]` | 生成图像素材 |
 | `studio asset edit <asset_id> --instruction ... [--mask ...]` | 改图 |
@@ -46,8 +56,8 @@ studio project info             # 世界观、画风、基调、禁忌
 | 命令 | 作用 |
 | --- | --- |
 | `studio scene list / show <场次>` | 场次和镜头列表 |
-| `studio scene add <场次> --title ... --script <该场剧本原文>` | 导演把剧本切成场次入库（原文照抄，之后只有人类能改） |
-| `studio shot plan <场次> --file <shots.json>` | 写入镜头表 |
+| `studio scene add <场次> --episode <集> --title ... --script <该场剧本原文>` | 导演把一集剧本切成场次入库（原文照抄，之后只有人类能改） |
+| `studio shot plan <场次> --file <shots.json>` | 写入镜头表（每个镜头带对白，见 shot-breakdown） |
 | `studio shot show <镜头>` | 镜头定义、状态、候选、审片历史 |
 | `studio shot prompt <镜头> --text ... --refs <id>...` | 保存生成方案 |
 | `studio shot gen <镜头> --model seedance-2.0\|seedance-2.5 --n <数量>` | 异步批量生成 |
@@ -62,16 +72,24 @@ studio project info             # 世界观、画风、基调、禁忌
 1. **不直接碰文件路径。** 素材一律用 asset id 引用；本地文件要先 `asset save` 才算存在。
 2. **不在对话里写设定。** 角色外形、世界观规则只存在 studio 里。发现设定缺失或矛盾，
    报告给导演，不要自己补一个版本。
-3. **定稿态只读。** `locked` 状态的角色、造型、场景不能改，需要改请 @ 人类。
-4. **生成是异步的。** `shot gen` 返回任务 id 就结束，不要轮询。完成后 studio 会在群里通知审片。
+3. **定稿态只读。** `locked` 状态的角色、造型、场景不能改，需要改请在剧组群里说明，由人决定。
+4. **生成是异步的。** `shot gen` 返回就结束，不要轮询。完成后片场会给审片派单。
 5. **命令报错如实汇报**，附原始错误信息，不要换个方式绕过权限。
 
-## 交接格式
+## 工单：活怎么到你手上
 
-发言结尾 @ 下一个人，并附一行摘要，方便对方直接接手：
+活不靠群里 @ 来交接。片场随时看着每一集、每个镜头的状态，算出下一步谁该做什么，
+把「片场工单」发到那个人**自己的对话**里，每项带编号：
 
 ```
-@林野 交接：S03 共 8 镜，镜头表已写入。重点 SH004、SH007（有打斗）。
+〔片场工单 · 2 项。片场看到活干完会自动关单；做不了的在回复里说明原因。〕
+#12 S01-SH002：写 Seedance 提示词（shot.prompt）并生成（shot.gen）。
+#13 S01-SH003 被打回（第 1 次）：…
 ```
 
-没有后续工作时不要 @ 任何人。
+- **照单做完就行。** 片场在自己的状态里看到活干完（镜头进入生成、参考图入库…）会自动关单，
+  并给下一个人派单。不用 @ 任何人，不用在群里逐条汇报。
+- 做不了的，在回复里说明原因。同一张单两次都没完成，片场会交给人。
+- 只有写着「用 order.done 关单」的活才需要你自己关单（片场看不到你修好了参考图）。
+- 剧组群里片场会发一行「📋 工单 → 某人：…」，大家都看得到谁在做什么。群里说话，
+  用于需要同事判断或人来决定的事。

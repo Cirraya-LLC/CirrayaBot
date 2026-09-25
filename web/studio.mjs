@@ -71,17 +71,23 @@ const POSITIONAL = {
   'loc.edit': 'name', 'asset.show': 'id', 'asset.tag': 'id', 'asset.edit': 'id', 'asset.save': 'path',
   'scene.show': 'code', 'scene.add': 'code', 'shot.plan': 'scene', 'shot.show': 'shot', 'shot.prompt': 'shot',
   'shot.gen': 'shot', 'shot.sheet': 'shot', 'shot.approve': 'shot', 'shot.reject': 'shot', 'shot.lock': 'scene',
-  'review.history': 'shot',
+  'review.history': 'shot', 'episode.show': 'episode', 'episode.submit': 'episode', 'episode.assemble': 'episode',
+  'char.voice': 'name', 'order.done': 'id',
 }
 
 export const TOOL = { type: 'function', function: {
   name: 'studio',
-  description: 'The film studio: projects, characters, locations, assets, scenes, shots, generation and review. ' +
+  description: 'The film studio (a short-drama series): episodes, scenes, shots, characters, locations, assets, generation, review, work orders. ' +
     'Your skills write its commands CLI-style; call them here as {action, args}: "studio char refs 蛮吉 --look 战斗装 --angle 3-4" is ' +
     '{"action":"char.refs","args":{"name":"蛮吉","look":"战斗装","angle":"3-4"}}. The first word after the command goes in: ' +
     Object.entries(POSITIONAL).map(([k, v]) => `${k}→${v}`).join(', ') + '. ' +
     'Files: asset.save takes {path} of a file on your machine; shot.plan takes {scene, shots:[…]} or {scene, file} (a JSON file on your machine). ' +
     'shot.sheet returns the contact sheet as an image you can see. asset.show with {"view":true} shows you an image asset. ' +
+    'Work comes to you as numbered work orders in your chat; the studio closes each one when it sees the work done — ' +
+    'you don\'t hand work over with @ (order.list shows yours; order.done {id, note} only for the ones that say so). ' +
+    'Episodes: episode.list / episode.show {episode}; a scene belongs to one (scene.add {code, episode, title, script}). ' +
+    'Dialogue goes in each shot of shot.plan: "dialogue":[{"speaker":"蛮吉","text":"走！","kind":"onscreen"}] — kind onscreen (spoken on camera; ' +
+    'the studio adds it to the Seedance prompt and turns sound on), offscreen, or narration (no speaker; both spoken by TTS). ' +
     'Answers are JSON. A refusal says why — report it as it is; don\'t work around a permission.',
   parameters: { type: 'object', required: ['action'], properties: {
     action: { type: 'string', description: 'e.g. project.info, char.show, shot.gen, shot.sheet, shot.reject' },
@@ -145,7 +151,10 @@ export const PANEL_ACTIONS = new Set([
   'loc.list', 'loc.show', 'loc.refs', 'loc.lock', 'loc.unlock',
   'scene.list', 'scene.show', 'scene.add', 'scene.edit', 'shot.lock',
   'shot.show', 'shot.detail', 'review.history', 'asset.show',
-  'shot.sheet', 'shot.approve', 'shot.reject',
+  'shot.sheet', 'shot.approve', 'shot.reject', 'shot.reopen',
+  // The pipeline's gates and the series itself are a person's (studio/roles.mjs).
+  'episode.list', 'episode.show', 'episode.add', 'episode.edit', 'episode.start', 'episode.review', 'episode.assemble',
+  'order.list', 'char.voice',
   // The Keys panel: the studio's model keys (studio/keys.mjs). The answer carries hints, never keys.
   'keys.get', 'keys.set', 'keys.test',
 ])

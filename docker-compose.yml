@@ -2,12 +2,12 @@
 #   ./start.sh            the first time (generates .env and the access token), and after changing MODULES
 #   docker compose up -d  afterwards
 #
-# Two parts are optional modules (compose profiles), chosen by MODULES in .env: `studio` (the film
-# studio) and `dsh` (DeepSeek Harness). Without them it is db + app. start.sh writes MODULES,
-# COMPOSE_PROFILES and the variables that tell the app which modules exist; set MODULES and rerun it.
+# The film studio is an optional module (compose profile `studio`), chosen by MODULES in .env.
+# Without it this is db + app. start.sh writes MODULES, COMPOSE_PROFILES and the variable that
+# tells the app the studio exists; set MODULES and rerun it.
 #
 # Memory: every service has a ceiling (the *_MEMORY variables), sized by start.sh to the machine —
-# on a 4 GB box they add up to about 3.3 GB, so one runaway part can't take the others down with it.
+# on a 4 GB box they add up to about 2.5 GB, so one runaway part can't take the others down with it.
 #
 # podman: ./start.sh detects it and uses podman compose; it also points DOCKER_SOCK at
 # podman's socket, so the docker client in the container still works.
@@ -68,18 +68,13 @@ services:
       # and is the only thing that holds the token that talks to it.
       # A heap ceiling below the container's, so Node collects instead of being OOM-killed.
       NODE_OPTIONS: --max-old-space-size=${APP_HEAP_MB:-512}
-      # Which optional modules this deployment has (start.sh writes these from MODULES; empty = off).
+      # Whether this deployment has the studio (start.sh writes it from MODULES; empty = off).
       STUDIO_URL: ${STUDIO_URL:-}
       STUDIO_TOKEN: ${STUDIO_TOKEN:?run ./start.sh first to generate .env}
       STUDIO_DB_PASSWORD: ${STUDIO_DB_PASSWORD:?run ./start.sh first to generate .env}
       # The other direction: the studio posts "candidates ready" into a group with this token. It opens
       # only /api/events/…, not the platform — the studio never holds ACCESS_TOKEN.
       STUDIO_EVENT_TOKEN: ${STUDIO_EVENT_TOKEN:?run ./start.sh first to generate .env}
-      # DeepSeek Harness (below): agents whose model is deepseek-* run their turns there. The app
-      # serves their tools on DSH_MCP_PORT, which nothing publishes — only the dsh container reaches it.
-      DSH_CONTAINER: ${DSH_CONTAINER:-}
-      DSH_MCP_PORT: 8081
-      DSH_MCP_URL: http://app:8081/mcp
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH}:/app/workspace
@@ -119,19 +114,6 @@ services:
       # Content-addressed files (studio/store.mjs). A named volume: nothing else mounts it,
       # so it needs no host path, and it works the same under podman.
       - studiodata:/data
-
-  # DeepSeek Harness (deploy/dsh): the model loop for agents whose model is deepseek-*. It idles;
-  # the app starts one runtime per turn with `docker exec -i` and hands it the DeepSeek key on
-  # stdin. No socket, no volumes, no secrets in its environment: a runtime that went wrong would
-  # find nothing here but its own key. The name is fixed so the app can find it — container names
-  # are global on the host, hence AGENT_PREFIX, like the agent containers.
-  dsh:
-    build: ./deploy/dsh
-    profiles: [dsh]
-    restart: unless-stopped
-    # Each turn is a node process of ~150–250 MB; this ceiling is what several at once may use.
-    mem_limit: ${DSH_MEMORY:-1g}
-    container_name: ${AGENT_PREFIX:-ma}-dsh
 
 volumes:
   pgdata:

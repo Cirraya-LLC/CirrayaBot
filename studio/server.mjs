@@ -20,8 +20,9 @@ import { createStore, byteRange } from './store.mjs'
 import { parseActor, deny } from './roles.mjs'
 import { makeActions, StudioError, fail } from './actions.mjs'
 import { startWorker } from './worker.mjs'
-import { enqueue, startNotifier } from './notify.mjs'
+import { startNotifier } from './notify.mjs'
 import { setPanel } from './keys.mjs'
+import { plan } from './pipeline.mjs'
 
 const CFG = {
   token: process.env.STUDIO_TOKEN || '',
@@ -30,7 +31,13 @@ const CFG = {
 }
 const store = createStore(CFG.data)
 let worker = null
-const actions = makeActions({ store, kick: () => worker?.kick() })
+// After a change, the pipeline looks at that project again (a moment later, once per burst).
+const planSoon = new Map()
+const kick = pid => {
+  if (!pid || planSoon.has(pid)) return
+  planSoon.set(pid, setTimeout(() => { planSoon.delete(pid); plan(pid).catch(e => console.error(`pipeline: ${pid}: ${e.message}`)) }, 300))
+}
+const actions = makeActions({ store, kick, kickWorker: () => worker?.kick() })
 const HANDLERS = actions.handlers
 
 // ---------- HTTP ----------
@@ -77,8 +84,10 @@ const server = createServer(async (req, res) => {
       const result = await handler(args && typeof args === 'object' ? args : {}, { actor, actorKey, role }, action)
       // Reads aren't audited: they are most of the traffic and change nothing. A key edit is, by
       // name only — the audit table must never hold a key.
-      if (!/\.(list|show|refs|current|info|history|get|board|detail)$/.test(action))
+      if (!/\.(list|show|refs|current|info|history|get|board|detail)$/.test(action)) {
         await db.audit(actorKey, action, action.startsWith('keys.') ? String(args.name ?? '') : args.project ?? args.id ?? '', true)
+        kick(args.project || await db.currentProject(actorKey))
+      }
       return send(200, { ok: true, result })
     }
     // The bytes of an asset, for the platform: a sheet the reviewer's model must see, a video a
@@ -115,7 +124,9 @@ await db.migrate()
 setPanel(await db.getConfig())
 // A finished round becomes a line in the outbox: "candidates ready" for the reviewer, or "all
 // failed" for the cinematographer. The notifier delivers the outbox to the project's group.
-worker = startWorker({ store, stash: actions.stash, addAsset: actions.addAsset, finishGeneration: actions.finishGeneration,
-  onRoundDone: r => enqueue(r.project_id, { kind: 'round', ...r }) })
+worker = startWorker({ store, stash: actions.stash, stashText: actions.stashText, addAsset: actions.addAsset,
+  newGeneration: actions.newGeneration, finishGeneration: actions.finishGeneration,
+  // A finished round: the pipeline gives the reviewer (or, if every take failed, the cinematographer) a work order.
+  onRoundDone: r => kick(r.project_id) })
 startNotifier()
 server.listen(CFG.port, '0.0.0.0', () => console.log(`studio listening on :${CFG.port}, files in ${CFG.data}`))

@@ -17,12 +17,14 @@ import { Readable } from 'node:stream'
 import * as db from './db.mjs'
 import * as seedance from './seedance.mjs'
 import { move } from './shots.mjs'
+import { runAssembly } from './assembly.mjs'
+import { planAll } from './pipeline.mjs'
 
 const TICK_MS = Number(process.env.STUDIO_TICK_MS || 5000)
 const POLL_MS = Number(process.env.STUDIO_POLL_MS || 10_000)
 const DOWNLOAD_TRIES = 3
 
-export function startWorker({ store, stash, addAsset, finishGeneration, onRoundDone = () => {} }) {
+export function startWorker({ store, stash, stashText, addAsset, newGeneration, finishGeneration, onRoundDone = () => {} }) {
   const lastPoll = new Map()      // generation id → ms
   const downloadFails = new Map() // generation id → count
   let busy = false, again = false
@@ -140,10 +142,27 @@ export function startWorker({ store, stash, addAsset, finishGeneration, onRoundD
     catch (e) { console.error(`worker: onRoundDone for ${s.code}: ${e.message}`) }
   }
 
+  // Episode cuts, one at a time (ffmpeg at 720×1280 is the heaviest thing the studio does).
+  async function assemble() {
+    const next = (await db.q(`select id from assemblies where status = 'queued' order by created_at limit 1`)).rows[0]
+    if (next) await runAssembly(next.id, { store, stash, stashText, addAsset, newGeneration, finishGeneration })
+  }
+  // A cut that was running when the studio stopped is started again: nothing was paid for it.
+  const requeue = db.q(`update assemblies set status = 'queued', started_at = null where status = 'running'`).catch(() => {})
+
+  // The pipeline looks at every active project now and then, besides after each change — a work
+  // order must not depend on the one event that should have made it.
+  const PLAN_MS = Number(process.env.STUDIO_PLAN_MS || 15_000)
+  let lastPlan = 0
+
   async function tick() {
     if (busy) { again = true; return }
     busy = true
-    try { await submit(); await poll() }
+    try {
+      await submit(); await poll()
+      await requeue; await assemble()
+      if (Date.now() - lastPlan > PLAN_MS) { lastPlan = Date.now(); await planAll() }
+    }
     catch (e) { console.error('worker tick failed:', e.message) }
     finally {
       busy = false

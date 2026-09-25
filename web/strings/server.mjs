@@ -10,6 +10,7 @@ export const serverStrings = {
   // Conversation list
   'conv.youSaid': ['You: {text}', '你：{text}', '你：{text}'],
   'conv.said':    ['{who}: {text}', '{who}：{text}', '{who}：{text}'],
+  'conv.studio':  ['Studio', '片场', '片場'],
   'conv.user':    ['You', '你', '你'],
   'conv.members': ['{n} members', '{n} 人', '{n} 人'],
 
@@ -63,23 +64,6 @@ export const serverStrings = {
   'studio.notPanel':    ['"{action}" isn\u2019t something the workbench does', '「{action}」不是片场工作台能做的操作', '「{action}」不是片場工作台能做的操作'],
   'studio.noFile':      ['No such image in the studio', 'studio 里没有这张图', 'studio 裡沒有這張圖'],
 
-  // DeepSeek Harness (web/dsh.mjs): agents whose model is deepseek-*
-  'dsh.off': ['{name} uses a DeepSeek model, which runs on DeepSeek Harness — and this deployment doesn\u2019t have it. Add dsh to MODULES in .env and rerun ./start.sh.',
-                         '{name} 用的是 DeepSeek 模型，要跑在 DeepSeek Harness 上——这个部署没有启用它。在 .env 的 MODULES 里加上 dsh，再运行一次 ./start.sh。',
-                         '{name} 用的是 DeepSeek 模型，要跑在 DeepSeek Harness 上——這個部署沒有啟用它。在 .env 的 MODULES 裡加上 dsh，再執行一次 ./start.sh。'],
-  'dsh.noKey':          ['{name} uses a DeepSeek model but there is no DeepSeek key — add one in the Keys panel (or give {name} an upstream that speaks Chat Completions)',
-                         '{name} 用的是 DeepSeek 模型，但还没有 DeepSeek key——去「密钥」面板填一个（或者给 {name} 选一个 Chat Completions 协议的上游）',
-                         '{name} 用的是 DeepSeek 模型，但還沒有 DeepSeek key——去「金鑰」面板填一個（或者給 {name} 選一個 Chat Completions 協定的上游）'],
-  'dsh.upstream':       ['DeepSeek refused the call ({status}): {detail}', 'DeepSeek 拒绝了这次调用（{status}）：{detail}', 'DeepSeek 拒絕了這次呼叫（{status}）：{detail}'],
-  'dsh.failed':         ['DeepSeek Harness failed: {detail}', 'DeepSeek Harness 出错：{detail}', 'DeepSeek Harness 出錯：{detail}'],
-  'dsh.stray':          ['Stopped: DeepSeek Harness offered its model a tool of its own ({tool}), which the platform never gave this crew member. Its disabled list (deploy/dsh/run.mjs) needs updating for this dsh version.',
-                         '已中止：DeepSeek Harness 给模型提供了它自带的工具（{tool}），平台并没有给这个剧组成员这个工具。需要按这个 dsh 版本更新禁用列表（deploy/dsh/run.mjs）。',
-                         '已中止：DeepSeek Harness 給模型提供了它內建的工具（{tool}），平台並沒有給這個劇組成員這個工具。需要按這個 dsh 版本更新停用清單（deploy/dsh/run.mjs）。'],
-  'dsh.harnessDown':    ['The DeepSeek Harness container ({container}) is not answering: {detail}', 'DeepSeek Harness 容器（{container}）没有响应：{detail}', 'DeepSeek Harness 容器（{container}）沒有回應：{detail}'],
-  'dsh.testNoKey':      ['No DeepSeek key saved yet', '还没有保存 DeepSeek key', '還沒有儲存 DeepSeek key'],
-  'dsh.testStatus':     ['DeepSeek answered {status}: {detail}', 'DeepSeek 返回 {status}：{detail}', 'DeepSeek 回傳 {status}：{detail}'],
-  'dsh.testOk':         ['Key accepted. DeepSeek models: {models}', 'key 有效。DeepSeek 模型：{models}', 'key 有效。DeepSeek 模型：{models}'],
-  'dsh.testUnreachable': ['Could not reach DeepSeek: {detail}', '连不上 DeepSeek：{detail}', '連不上 DeepSeek：{detail}'],
   'agent.approval':     ['The approval mode must be empty or one of {list}', '审批模式只能留空，或者是 {list}', '審批模式只能留空，或是 {list}'],
   'approval.gone':      ['That request is no longer waiting for an answer', '这条请求已经不在等待回答了', '這條請求已經不在等待回答了'],
   'agent.modelRequired': ['Pick a model', '要选一个模型', '請選一個模型'],

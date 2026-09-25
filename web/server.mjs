@@ -14,7 +14,6 @@ import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import * as studio from './studio.mjs'
-import * as dsh from './dsh.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
@@ -69,7 +68,8 @@ async function listConversations(lang) {
     return {
       kind: 'agent', id: b.id, name: b.name, tag: b.description, color: b.color,
       members: [b.id],
-      preview: m ? (m.role === 'user' ? tr(lang, 'conv.youSaid', { text: cut(m.content, 60) }) : cut(m.content, 60)) : '',
+      preview: m ? (m.speaker === studio.STUDIO_SPEAKER ? tr(lang, 'conv.said', { who: tr(lang, 'conv.studio'), text: cut(m.content, 60) })
+        : m.role === 'user' ? tr(lang, 'conv.youSaid', { text: cut(m.content, 60) }) : cut(m.content, 60)) : '',
       at: m?.at ?? 0,
     }
   })
@@ -80,7 +80,8 @@ async function listConversations(lang) {
       members: g.members,
       colors: g.members.map(id => bots.find(b => b.id === id)?.color).filter(Boolean),
       preview: m ? tr(lang, 'conv.said', {
-        who: m.speaker === USER_SPEAKER ? tr(lang, 'conv.user') : m.speaker, text: cut(m.content, 52) }) : '',
+        who: m.speaker === USER_SPEAKER ? tr(lang, 'conv.user') : m.speaker === studio.STUDIO_SPEAKER ? tr(lang, 'conv.studio') : m.speaker,
+        text: cut(m.content, 52) }) : '',
       at: m?.at ?? (+g.created_at || 0),
     })
   }
@@ -156,13 +157,21 @@ async function groupRecallFor(bot) {
   return chunks.join('\n\n')
 }
 
-function systemFor(bot, memory, peers, box, recall, skills = [], lead = null, studioRole = null) {
+function systemFor(bot, memory, peers, box, recall, skills = [], lead = null, studioRole = null, shared = null) {
   const parts = [bot.persona]
   parts.push(`
 
 --- Language ---
 Reply in the language the user writes in.`)
-  if (box) parts.push(`
+  if (box && shared) parts.push(`
+
+--- Your work environment ---
+You share one machine (a container) with the rest of "${shared}": the working directory /work is the group's desk,
+and everyone in the group works in it — what you leave there, they see; what they leave, you see. Put your work in a
+folder named for the job (e.g. /work/E01/S02) and don't delete what isn't yours.
+You are root. Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).
+You also have a browser (the browser tool) — shared too: someone else may have a page open in it.`)
+  else if (box) parts.push(`
 
 --- Your work environment ---
 You have your own machine (a container) with working directory /work; only you can get in.
@@ -208,7 +217,9 @@ Other rules:
 --- The studio ---
 You are on the film crew as the ${studioRole}. You work in the studio through the studio tool; your skills say which
 actions to use. The studio decides what your role may do and refuses the rest — don't try to get around a refusal.
-Messages from "[Studio]" are the studio itself telling the crew something happened (takes ready, a shot rejected).`)
+Messages from "[Studio]" are the studio itself. Work reaches you as numbered work orders in your own chat; do them — the studio
+sees the work in its own state and closes each order by itself, so you don't @ a colleague to hand work over and you don't
+report every step in the group. Speak in the group when you need a colleague's judgment or a person's decision.`)
   if (skills.length) parts.push(box ? `
 
 --- Your skills ---
@@ -336,12 +347,31 @@ async function execIn(c, argv, input) {
 }
 
 /** Make sure this agent's container is running, and point /work/group at the current group. */
+/**
+ * Which machine an agent works on. Normally its own. Weak isolation (2.31): a member of a group
+ * marked shared_machine works on the group's machine, whose /work IS the group's drive — the
+ * film crew hands files over by leaving them on the desk. (A member of two such groups gets the
+ * older one.) Different groups, and everyone else, stay apart as before.
+ */
+async function machineOf(botId) {
+  const g = (await db.listGroups()).find(x => x.shared_machine && x.members.includes(botId))
+  return g ? { name: `${PREFIX}-group-${g.id}`, gid: g.id } : { name: cname(botId), gid: null }
+}
+
+/** The name of the group whose machine this agent shares, for the system prompt; null = its own. */
+async function sharedName(botId) {
+  const m = await machineOf(botId)
+  return m.gid ? (await db.listGroups()).find(g => g.id === m.gid)?.name ?? null : null
+}
+
 async function ensureContainer(botId, groupId) {
   await ensureImage()
-  const name = cname(botId)
+  const m = await machineOf(botId)
+  const name = m.name
   if (!containerReady.has(name)) {
-    const work = join(HOSTWORK, 'agents', botId)
-    await mkdir(join(WORKROOT, 'agents', botId), { recursive: true })
+    const own = m.gid ? join('groups', m.gid) : join('agents', botId)
+    const work = join(HOSTWORK, own)
+    await mkdir(join(WORKROOT, own), { recursive: true })
     await mkdir(join(WORKROOT, 'groups'), { recursive: true })
     // Also ask where /work is mounted: containers are long-lived, and WORKSPACE_HOST_PATH changes
     // (upgrades, moving the repo, editing compose). A wrongly mounted container looks perfectly fine —
@@ -364,11 +394,12 @@ async function ensureContainer(botId, groupId) {
     else if (state === 'true') { /* already running */ }
     else if (state === 'false') await cliRun(['start', name], null, 60_000)
     if (!mounted || mounted !== work) {
+      // A shared machine sees its own group's drive and nothing else — not the other groups'.
       const r = await cliRun(['run', '-d', '--name', name,
         '--memory', env.AGENT_MEMORY || '2g', '--cpus', env.AGENT_CPUS || '2',
         '--pids-limit', '512',
-        '-v', `${join(HOSTWORK, 'agents', botId)}:/work`,
-        '-v', `${join(HOSTWORK, 'groups')}:/groups`,
+        '-v', `${work}:/work`,
+        ...m.gid ? [] : ['-v', `${join(HOSTWORK, 'groups')}:/groups`],
         '-w', '/work', IMAGE, 'sleep', 'infinity'], null, 120_000)
       if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
     }
@@ -378,6 +409,8 @@ async function ensureContainer(botId, groupId) {
   // this directory anymore — without it the symlink points nowhere, `cp report.md group/` just fails,
   // and the failure only shows up in some agent's tool output.
   if (groupId) await mkdir(join(WORKROOT, 'groups', groupId), { recursive: true })
+  // On a shared machine /work already is the group's drive; there is no ./group to point anywhere.
+  if (m.gid) return name
   // Reset the group symlink every time — otherwise it keeps pointing at the previous group (CLAUDE.md 2.14)
   await cliRun(['exec', name, 'bash', '-lc',
     groupId ? `rm -f /work/group && ln -s /groups/${groupId} /work/group` : 'rm -f /work/group'],
@@ -386,7 +419,7 @@ async function ensureContainer(botId, groupId) {
 }
 
 async function removeContainer(botId) {
-  const name = cname(botId)
+  const name = cname(botId)             // its own machine only — a shared one belongs to the group
   containerReady.delete(name)
   await cliRun(['rm', '-f', name], null, 60_000)
 }
@@ -488,7 +521,7 @@ async function browserPost(c, args, lang = 'en') {
 async function humanBrowserAct(botId, args, lang) {
   if (!CFG.tools) throw new Say('browser.toolsOff')
   if (!HUMAN_ACTIONS.includes(args.action)) throw new Say('browser.badAction', { action: args.action })
-  const c = cname(botId)
+  const c = (await machineOf(botId)).name
   if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
     await withAgent(botId, () => ensureContainer(botId, null))
   // Always go through BROWSERD_UP: start it if it isn't running, swap in new daemon code if it changed (the human actions were added later)
@@ -583,8 +616,7 @@ async function checkCap(bot, p) {
 /**
  * Write down what a call cost. Deliberately not awaited: the reply is still streaming and a
  * database round-trip per step would be felt. A row that cannot be written is logged — it may
- * be lost, but never silently. The promise is returned for the one caller that must wait: a
- * DeepSeek Harness tool call checks the cap, and the call that crossed it has to be counted.
+ * be lost, but never silently.
  */
 function noteUsage(ctx, p, usage) {
   if (!usage) return Promise.resolve()
@@ -632,8 +664,6 @@ const upstreamStatus = e => Number(e?.upstreamStatus) || 0
  * and trimming only at the entrance would overflow by step three or four.
  */
 async function runAgent(p, messages, onDelta, onTool, ctx) {
-  // DeepSeek models run their loop in DeepSeek Harness; everything around the loop is the same.
-  if (dsh.isDsh(p.model)) return runDshTurn(p, messages, onDelta, onTool, ctx)
   const MAX_STEPS = ctx.maxSteps ?? DEFAULT_STEPS
   const lang = ctx.lang ?? 'en'
   let text = ''
@@ -667,14 +697,17 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       }
     }
     if (!r) { step--; continue }
-    const { content, calls, usage } = r
+    const { content, calls, usage, reasoning } = r
     noteUsage(ctx, p, usage)
     if (content) text = content
+    // The caller stores the final answer's reasoning with it (DeepSeek wants it back next turn too)
+    ctx.reasoning = reasoning ?? ''
     if (!calls.length) return text
 
     messages.push({
       role: 'assistant',
       content: content || null,
+      ...reasoning ? { reasoning_content: reasoning } : {},
       tool_calls: calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } })),
     })
     const shots = []
@@ -697,10 +730,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
   return text || '(hit the tool-use limit; stopping here for now)'
 }
 
-/**
- * One tool call, from asking to recording — the same path whether the loop is ours (runAgent) or
- * DeepSeek Harness's (an MCP call). Returns what the model gets back, and an image if there is one.
- */
+/** One tool call, from asking to recording. Returns what the model gets back, and an image if there is one. */
 async function execTool(name, args, ctx, onTool) {
   onTool?.({ phase: 'run', name, args })
   const allowed = !needsApproval(name, args, ctx.approval ?? { mode: 'off' })
@@ -722,143 +752,6 @@ Do not try this again. Do it another way, or say why you cannot.`
   if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.bot?.name ?? '',
     { name, args, output: (out ?? '').slice(0, TOOL_TRACE) })
   return { out, image: res?.image ?? null }
-}
-
-// ---------- DeepSeek Harness (web/dsh.mjs, deploy/dsh) ----------
-// An agent whose model is deepseek-* runs its turn in DeepSeek Harness, one runtime per turn in the
-// dsh container. It reaches its tools through MCP on DSH.mcpPort — a port compose never publishes,
-// so only the dsh container can knock — with a token that exists for exactly one turn.
-const DSH = {
-  container: env.DSH_CONTAINER || '',
-  mcpPort: Number(env.DSH_MCP_PORT || 8081),
-  mcpUrl: env.DSH_MCP_URL || `http://app:${Number(env.DSH_MCP_PORT || 8081)}/mcp`,
-}
-const DSH_KEY = 'keys.deepseek'       // settings row: {base_url, api_key} from the Keys panel
-const dshTurns = new Map()            // bearer token → the turn it serves
-
-function spawnDsh(rt) {
-  const proc = spawn(CLI, ['exec', '-i', DSH.container, 'node', '/opt/dsh/run.mjs'], { stdio: ['pipe', 'pipe', 'pipe'] })
-  const exited = new Promise(r => { proc.on('close', code => r(code)); proc.on('error', () => r(127)) })
-  return {
-    stdin: proc.stdin, stdout: proc.stdout, stderr: proc.stderr, exited,
-    // Killing the docker client closes the runtime's stdin, which ends it (verified, CLAUDE.md
-    // 2.29 — unlike 2.22.1's curl, stuck writing). Telling it to stop by its id is the backstop.
-    kill() {
-      try { proc.stdin.end() } catch {}
-      proc.kill('SIGKILL')
-      cliRun(['exec', DSH.container, 'node', '/opt/dsh/run.mjs', '--kill', rt], null, 15_000)
-    },
-  }
-}
-
-async function runDshTurn(p, messages, onDelta, onTool, ctx) {
-  if (!DSH.container) throw new Say('dsh.off', { name: ctx.bot.name })
-  const key = dsh.keyFor(await db.getSetting(DSH_KEY, null), p)
-  if (!key) throw new Say('dsh.noKey', { name: ctx.bot.name })
-  await checkCap(ctx.bot, p)
-  // Images a tool returns don't reach a model on dsh (accepted, see dsh.mjs): tools say so in words.
-  ctx.noImages = true
-  const fit = fitContext(messages, p.context_tokens)
-  if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
-  const { system, prompt } = dsh.renderTurn(fit.messages, { group: ctx.scope === 'group' })
-  const rt = randomBytes(8).toString('hex'), token = randomBytes(24).toString('hex')
-  const turn = { ctx, onTool, p, steps: 0, calls: 0, announced: 0, text: '', limit: false, error: null, usage: null,
-    maxSteps: ctx.maxSteps ?? DEFAULT_STEPS, stop: new AbortController(), tools: dsh.mcpTools(ctx.tools ?? []) }
-  const onAbort = () => turn.stop.abort()
-  ctx.signal?.addEventListener('abort', onAbort, { once: true })
-  dshTurns.set(token, turn)
-  try {
-    const r = await dsh.runTurn({
-      child: spawnDsh(rt),
-      config: { rt, key: key.key, base_url: key.base_url, mcp_url: DSH.mcpUrl, mcp_token: token,
-        system: system + (turn.tools.length ? dsh.TOOL_NOTE : '') },
-      init: { cwd: `/tmp/dsh/${rt}/ws`, provider: 'deepseek-official', model: p.model,
-        ...dsh.EFFORT[p.effort] ? { reasoningEffort: dsh.EFFORT[p.effort] } : {} },
-      prompt, signal: turn.stop.signal,
-      onEvent: e => {
-        if (e.type === 'step' && ++turn.steps > turn.maxSteps) { turn.limit = true; turn.stop.abort() }
-        if (e.type === 'message') {
-          // Every model call leaves a usage row, estimated when dsh reports none (2.25).
-          turn.usage = noteUsage(ctx, p, e.usage ? { prompt: e.usage.inputTokens ?? 0, completion: e.usage.outputTokens ?? 0 }
-            : { ...estimateUsage([{ role: 'system', content: system }, { role: 'user', content: prompt }], e.text), estimated: true })
-          if (e.text.trim()) { turn.text = e.text; onDelta(e.text) }
-          turn.announced += e.calls.length
-        }
-        // dsh offered the model a tool that isn't ours: run.mjs's disabled list has fallen behind dsh.
-        if (e.type === 'stray') { turn.error = new Say('dsh.stray', { tool: e.name }); turn.stop.abort() }
-      },
-    })
-    return r.text || turn.text
-  } catch (e) {
-    if (turn.error) throw turn.error
-    if (ctx.signal?.aborted) throw new Say('chat.aborted')
-    if (turn.limit) return turn.text || '(hit the tool-use limit; stopping here for now)'
-    console.error(`[dsh] ${ctx.bot.name}: ${e.message}`)
-    throw new Say(e.upstream ? 'dsh.upstream' : 'dsh.failed', { detail: String(e.message).slice(0, 300), status: e.upstreamStatus ?? '—' }, 502)
-  } finally {
-    dshTurns.delete(token)
-    ctx.signal?.removeEventListener('abort', onAbort)
-  }
-}
-
-/** A tool call arriving over MCP: the cap first (a model call follows it), then the ordinary path. */
-async function dshToolCall(turn, name, args) {
-  if (turn.stop.signal.aborted) throw new Error('this turn is over')
-  // The assistant message asking for this call comes over stdout, the call over HTTP. Give the
-  // message a moment to land first: its words then show above the card, and its usage row is
-  // written before the cap is checked — otherwise the call that crossed the cap wouldn't count yet.
-  for (let i = 0; i < 20 && turn.announced <= turn.calls; i++) await new Promise(r => setTimeout(r, 25))
-  await turn.usage
-  try { await checkCap(turn.ctx.bot, turn.p) }
-  catch (e) { turn.error = e; turn.stop.abort(); throw new Error('the daily spending cap is reached') }
-  turn.calls++
-  return (await execTool(name, args, turn.ctx, turn.onTool)).out
-}
-
-function startMcp() {
-  if (!DSH.container) return
-  createServer(async (req, res) => {
-    const end = (code, body) => {
-      res.writeHead(code, body ? { 'content-type': 'application/json' } : {})
-      res.end(body ? JSON.stringify(body) : undefined)
-    }
-    // A throw here would be an unhandled rejection, and that ends the whole app.
-    try {
-      // POST only: no server-to-client stream, which streamable HTTP allows (GET → 405).
-      if (req.method !== 'POST' || new URL(req.url, 'http://x').pathname !== '/mcp') return end(405)
-      const turn = dshTurns.get(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))
-      if (!turn) return end(401)
-      let body = ''
-      for await (const c of req) { body += c; if (body.length > 4 << 20) return end(413) }
-      let msg
-      try { msg = JSON.parse(body) } catch { return end(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }) }
-      const r = await dsh.mcpHandle(msg, { tools: turn.tools, call: (name, args) => dshToolCall(turn, name, args) })
-      return r ? end(200, r) : end(202)
-    } catch (e) {
-      console.error('[dsh] MCP request failed:', e.message)
-      if (!res.headersSent) end(500)
-      else res.destroy()
-    }
-  }).listen(DSH.mcpPort, '0.0.0.0', () => console.log(`DeepSeek Harness: tools served on :${DSH.mcpPort} to ${DSH.container}`))
-}
-
-/** The panel's "Test" for the DeepSeek key: does the key open /models, and is the harness there. */
-async function testDeepseek(lang) {
-  const k = await db.getSetting(DSH_KEY, null)
-  const harness = !DSH.container ? { ok: false, message: tr(lang, 'dsh.off', { name: '—' }) }
-    : await cliRun(['exec', DSH.container, 'node', '/opt/dsh/run.mjs', '--version'], null, 20_000)
-      .then(r => r.code === 0 ? { ok: true, message: `DeepSeek Harness ${r.out.trim()}` }
-        : { ok: false, message: tr(lang, 'dsh.harnessDown', { container: DSH.container, detail: (r.err || r.out).trim().slice(-200) }) })
-  if (!k?.api_key) return { ok: false, message: tr(lang, 'dsh.testNoKey'), harness }
-  const base = k.base_url || dsh.DEEPSEEK_BASE
-  try {
-    const r = await fetch(`${base}/models`, { headers: { authorization: `Bearer ${k.api_key}` }, signal: AbortSignal.timeout(15_000) })
-    if (!r.ok) return { ok: false, message: tr(lang, 'dsh.testStatus', { status: r.status, detail: (await r.text()).slice(0, 200) }), harness }
-    const ids = ((await r.json().catch(() => ({}))).data ?? []).map(m => m.id).filter(dsh.isDsh)
-    return { ok: true, message: tr(lang, 'dsh.testOk', { models: ids.join(', ') || '—' }), harness, models: ids }
-  } catch (e) {
-    return { ok: false, message: tr(lang, 'dsh.testUnreachable', { detail: String(e?.cause?.code ?? e.message) }), harness }
-  }
 }
 
 /**
@@ -906,20 +799,21 @@ function dropImages(messages, note = '(a screenshot was here; the current model 
 }
 
 // One-on-one
-function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate) {
+function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate, from = USER_SPEAKER) {
   return withAgent(bot.id, async () => {
     const prior = (await db.recent('dm', bot.id, FETCH_MAX))
-      .map(m => ({ role: m.role, content: m.content }))
+      .map(m => ({ role: m.role, content: m.content, ...m.role === 'assistant' && m.reasoning ? { reasoning_content: m.reasoning } : {} }))
     // Store first, then start the container: if the container won't start, what the user said shouldn't vanish with it
-    await db.addMessage('dm', bot.id, { role: 'user', speaker: USER_SPEAKER, content: text })
+    await db.addMessage('dm', bot.id, { role: 'user', speaker: from, content: text })
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
     const tools = await toolsFor(bot)
+    const ctx = { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, tools, maxSteps: bot.max_steps ?? undefined, ...gate }
     const full = await runAgent(p,
-      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id), null, await studio.roleOf(bot.id).catch(() => null)) },
+      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id), null, await studio.roleOf(bot.id).catch(() => null), await sharedName(bot.id)) },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, tools, maxSteps: bot.max_steps ?? undefined, ...gate })
-    await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
+      onDelta, onTool, ctx)
+    await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full, reasoning: ctx.reasoning })
     return full
   })
 }
@@ -929,13 +823,15 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
     const tools = await toolsFor(bot)
-    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead, await studio.roleOf(bot.id).catch(() => null)) }]
+    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead, await studio.roleOf(bot.id).catch(() => null), await sharedName(bot.id)) }]
     for (const e of await db.recent('group', groupId, FETCH_MAX)) {
       messages.push(e.speaker === bot.name
-        ? { role: 'assistant', content: e.content }                                   // what he said himself
+        ? { role: 'assistant', content: e.content, ...e.reasoning ? { reasoning_content: e.reasoning } : {} }   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, tools, maxSteps: bot.max_steps ?? undefined, ...gate })
+    const ctx = { container, signal, bot, lang, scope: 'group', scopeId: groupId, tools, maxSteps: bot.max_steps ?? undefined, ...gate }
+    const text = await runAgent(p, messages, onDelta, onTool, ctx)
+    return { text, reasoning: ctx.reasoning ?? '' }
   })
 }
 
@@ -979,7 +875,7 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
       await askSolo(providers.get(bot.id), bot, text,
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
         d => emit('delta', { botId: bot.id, text: d }),
-        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang, gateFor(bot))
+        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang, gateFor(bot), from)
       emit('end', { botId: bot.id })
     } else {
       // Group chat: colleagues relay. Who speaks first — whoever the caller names (an event), whoever the user
@@ -996,19 +892,19 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
       for (let turn = 0; turn <= MAX_HANDOFFS && !signal.aborted; turn++) {
         const peers = bots.filter(b => b.id !== speaker.id)
         emit('start', { botId: speaker.id, turn })
-        let reply = ''
+        let reply = '', reasoning = ''
         try {
-          reply = await askInGroup(providers.get(speaker.id), speaker, peers, lead,
+          ;({ text: reply, reasoning } = await askInGroup(providers.get(speaker.id), speaker, peers, lead,
             { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
               group: await db.getMemory('group', gid) },
             d => emit('delta', { botId: speaker.id, text: d }),
             t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }),
-            gid, signal, lang, gateFor(speaker))
+            gid, signal, lang, gateFor(speaker)))
         } catch (e) {
           emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
           break
         }
-        await db.addMessage('group', gid, { role: 'assistant', speaker: speaker.name, content: reply })
+        await db.addMessage('group', gid, { role: 'assistant', speaker: speaker.name, content: reply, reasoning })
         emit('end', { botId: speaker.id })
 
         const next = findMention(reply, peers)
@@ -1257,6 +1153,48 @@ async function postEvent(req, gid) {
   return [202, { woke: first.id }]
 }
 
+/**
+ * A studio work order for one crew member, run in that member's own chat (the pipeline's way of
+ * handing work over — not an @ in the group). Stored under the speaker "Studio" so the member and
+ * a person reading the chat both see where it came from. The group gets one line (`report`, with
+ * {agent} filled in) so everyone can see who has what. Unattended, like a scheduled task: anything
+ * that needs a person's approval is refused rather than left waiting.
+ *
+ * Answers when the turn is over, so the studio can look at what changed and decide whether the
+ * order is done; {ok:false, error} when the turn failed (no model, the upstream refused, the cap…).
+ */
+async function postOrder(req) {
+  const want = Buffer.from(env.STUDIO_EVENT_TOKEN || '')
+  const got = Buffer.from(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))
+  if (!want.length || got.length !== want.length || !timingSafeEqual(got, want)) return [401, { error: 'bad event token' }]
+  const b = await readBody(req)
+  const text = str(b.text).trim().slice(0, 20_000)
+  if (!text) return [400, { error: 'empty text' }]
+  // The studio knows roles, not groups: of the agents with this role, the one in the project's
+  // group gets it (a second film's crew is a second group); otherwise the studio's first choice.
+  const g = str(b.group) ? (await db.listGroups()).find(x => x.id === str(b.group)) : null
+  const known = new Set((await db.listAgents()).map(a => a.id))
+  const ids = (Array.isArray(b.candidates) ? b.candidates : []).filter(x => typeof x === 'string' && known.has(x))
+  const pick = ids.find(id => g?.members.includes(id)) ?? ids[0]
+  const bot = pick ? await db.getAgent(pick) : null
+  if (!bot) return [404, { ok: false, error: 'none of the crew members with this role exists on the platform' }]
+  if (g && str(b.report)) await withGroup(g.id, () => db.addMessage('group', g.id,
+    { role: 'user', speaker: studio.STUDIO_SPEAKER, content: str(b.report).replaceAll('{agent}', bot.name).slice(0, 2000) }))
+  let error = ''
+  try {
+    let p
+    // A member who can't run (no model chosen, say) still gets the order in their chat, so a person
+    // reading it sees what was asked — then the studio is told why nothing happened.
+    try { p = await providerFor(bot) }
+    catch (e) { await db.addMessage('dm', bot.id, { role: 'user', speaker: studio.STUDIO_SPEAKER, content: text }); throw e }
+    const providers = new Map([[bot.id, p]])
+    await converse([bot], null, providers, text, (ev, d) => { if (ev === 'error' && !error) error = d.message },
+      new AbortController().signal, 'en', { unattended: true, from: studio.STUDIO_SPEAKER })
+  } catch (e) { error = errorText(e, 'en') }
+  if (error) console.error(`Studio work order for ${bot.name}: ${error}`)
+  return [200, error ? { ok: false, agent: bot.id, error: error.slice(0, 500) } : { ok: true, agent: bot.id }]
+}
+
 // ---------- HTTP ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' }
 
@@ -1371,6 +1309,7 @@ async function checkGroup(b, cur = null) {
     if (lead && !members.includes(lead)) throw new Say('group.leadNotMember')
     out.lead = lead || null
   } else if (cur?.lead && !members.includes(cur.lead)) out.lead = null
+  if (b.shared_machine !== undefined) out.shared_machine = b.shared_machine === true
   return out
 }
 
@@ -1390,9 +1329,9 @@ const server = createServer(async (req, res) => {
   }
   // The studio telling a group something ("candidates ready"). Its own token, not ACCESS_TOKEN: the
   // studio must not hold the key to every container shell just to post a notice.
-  const evm = url.pathname.match(/^\/api\/events\/group\/([\w-]+)$/)
+  const evm = url.pathname.match(/^\/api\/events\/(?:group\/([\w-]+)|(order))$/)
   if (evm && req.method === 'POST') {
-    try { return send(...await postEvent(req, evm[1])) }
+    try { return send(...await (evm[2] ? postOrder(req) : postEvent(req, evm[1]))) }
     catch (e) { return send(e.status ?? 500, { error: e instanceof Say ? e.text('en') : String(e.message ?? e) }) }
   }
   if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
@@ -1406,7 +1345,7 @@ const server = createServer(async (req, res) => {
     const dm = url.pathname.match(/^\/api\/dm\/([a-z0-9-]+)$/)
     if (dm && req.method === 'GET')
       return send(200, (await db.recent('dm', dm[1], FETCH_MAX, { tools: true }))
-        .map(m => transcriptRow(m, { content: m.content })))
+        .map(m => transcriptRow(m, { content: m.content, ...m.speaker === studio.STUDIO_SPEAKER ? { speaker: m.speaker } : {} })))
     if (dm && req.method === 'DELETE') { await db.clearMessages('dm', dm[1]); return send(200, { ok: true }) }
 
     if (url.pathname === '/api/bots' && req.method === 'GET') return send(200, await loadBots(lang))
@@ -1468,7 +1407,7 @@ const server = createServer(async (req, res) => {
     const bw = url.pathname.match(/^\/api\/browser\/([a-z0-9-]+)\/(shot|act|stream)$/)
     if (bw) {
       if (!await db.getAgent(bw[1])) return send(404, { error: t('err.noAgent') })
-      const c = cname(bw[1])
+      const c = (await machineOf(bw[1])).name
       // Live view: relay the daemon's MJPEG as-is (Chromium screencast; a frame only when the page changes).
       // Screenshot polling (shot) stays as the fallback: for when the stream drops or the daemon is still an old version
       if (bw[2] === 'stream' && req.method === 'GET') {
@@ -1770,8 +1709,8 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/groups' && req.method === 'GET') return send(200, await db.listGroups())
 
     if (url.pathname === '/api/groups' && req.method === 'POST') {
-      const { name, members, lead } = await checkGroup(await readBody(req))
-      return send(200, await db.saveGroup({ id: `g${Date.now().toString(36)}`, name, members, lead }))
+      const { name, members, lead, shared_machine } = await checkGroup(await readBody(req))
+      return send(200, await db.saveGroup({ id: `g${Date.now().toString(36)}`, name, members, lead, shared_machine }))
     }
 
     const gm = url.pathname.match(/^\/api\/groups\/([\w-]+)$/)
@@ -1822,18 +1761,6 @@ const server = createServer(async (req, res) => {
         .map(m => transcriptRow(m, { speaker: m.speaker, text: m.content })))
     if (gr && req.method === 'DELETE') { await db.clearMessages('group', gr[1]); return send(200, { ok: true }) }
 
-    // ---- Keys panel: the DeepSeek key (the studio's keys go through /api/studio/call, keys.*) ----
-    // The key itself never comes back, only its last four characters.
-    if (url.pathname === '/api/keys/deepseek' && req.method === 'GET')
-      return send(200, { ...dsh.keyView(await db.getSetting(DSH_KEY, null)), harness: !!DSH.container })
-    if (url.pathname === '/api/keys/deepseek' && req.method === 'PUT') {
-      let k
-      try { k = dsh.keyEdit(await db.getSetting(DSH_KEY, null), await readBody(req)) }
-      catch (e) { if (e instanceof Say) throw e; return send(400, { error: e.message }) }
-      await db.setSetting(DSH_KEY, k)
-      return send(200, { ...dsh.keyView(k), harness: !!DSH.container })
-    }
-    if (url.pathname === '/api/keys/deepseek/test' && req.method === 'POST') return send(200, await testDeepseek(lang))
 
     // ---- The studio workbench (web UI): a person setting up projects and the crew, locking, reviewing ----
     if (url.pathname === '/api/studio/status' && req.method === 'GET') return send(200, { enabled: studio.enabled() })
@@ -1850,11 +1777,13 @@ const server = createServer(async (req, res) => {
       // Range requests, which pass through to the studio and come back as 206.
       const r = await studio.fileStream(sf[1], req.headers.range).catch(() => null)
       const mime = r?.headers.get('content-type') ?? ''
-      if (!r || (r.status !== 200 && r.status !== 206 && r.status !== 416) || !/^(image|video)\//.test(mime) && r.status !== 416) {
+      // Pictures, takes, cuts, speech and subtitles — nothing a browser would run.
+      if (!r || (r.status !== 200 && r.status !== 206 && r.status !== 416) || !/^(image|video|audio)\/|^application\/x-subrip/.test(mime) && r.status !== 416) {
         r?.body?.cancel().catch(() => {})
         return send(404, { error: t('studio.noFile') })
       }
-      const head = { 'cache-control': 'private, max-age=86400' }
+      const head = { 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff',
+        ...mime.startsWith('application/x-subrip') ? { 'content-disposition': `attachment; filename="${sf[1]}.srt"` } : {} }
       for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag']) {
         const v = r.headers.get(h); if (v) head[h] = v
       }
@@ -1907,6 +1836,7 @@ catch (e) { console.error(`Could not create the studio's database role, so the s
 const s = await db.seed(ROOT)
 if (s.seeded) console.log(`First start, imported from files: ${s.agents} agents, ${s.groups} groups, ${s.messages} messages`)
 if (await db.seedProviderFromEnv(env)) console.log('Created the default upstream from .env (change it later in the UI ⚙)')
+{ const n = await db.deepseekKeyToProvider(); if (n != null) console.log(`DeepSeek key moved from the Keys panel to the upstream "DeepSeek" (${n} crew member(s) now use it)`) }
 { const n = await db.fillAgentModels(); if (n) console.log(`${n} agent(s) took over the model name from their upstream`) }
 
 await mkdir(join(WORKROOT, 'agents'), { recursive: true })
@@ -1956,7 +1886,7 @@ server.on('upgrade', async (req, socket) => {
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`)
 
   // The channel connects in the background; events arriving before that are queued, not dropped
-  const c = cname(m[1]), pending = []
+  const c = (await machineOf(m[1])).name, pending = []
   let child = null, closed = false
   const pidFile = `/tmp/input-${process.pid}-${Date.now().toString(36)}.pid`
   const send = line => { if (child) child.stdin.write(line + '\n'); else pending.push(line) }
@@ -2010,7 +1940,6 @@ server.on('upgrade', async (req, socket) => {
 setInterval(() => tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e)), 20_000)
 tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))
 
-startMcp()
 
 server.listen(CFG.port, CFG.host, () => {
   console.log(`Multi-Agent  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)

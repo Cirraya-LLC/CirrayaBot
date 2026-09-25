@@ -188,6 +188,8 @@ async function drawHistory(c, ticket) {
     // (both data, not UI text). A Studio notice is a user-role row but not something *you* said.
     if (c.kind === 'group' && e.speaker === 'Studio') bubble(null, false, t('st.speaker')).innerHTML = fmt(e.text)
     else if (c.kind === 'group') bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User').innerHTML = fmt(e.text)
+    // In a DM, a user-role row from "Studio" is a work order the studio sent this crew member.
+    else if (e.speaker === 'Studio') bubble(null, false, t('st.speaker')).innerHTML = fmt(e.content)
     else bubble(c.id, e.role === 'user').innerHTML = fmt(e.content)
   }
   if (!log.children.length) empty(c)
@@ -448,6 +450,7 @@ function openGroupDlg(g) {
   }
   $('#gmembers').onchange = () => fillLead($('#glead').value)
   fillLead(g?.lead ?? '')
+  $('#gshared').checked = g?.shared_machine === true
   $('#gdlg').showModal()
 }
 $('#gcancel').onclick = () => $('#gdlg').close()
@@ -455,11 +458,11 @@ $('#gsave').onclick = async () => {
   const name = $('#gname').value.trim()
   const members = [...$('#gmembers').querySelectorAll('input:checked')].map(i => i.value)
   if (!name || members.length < 2) { alert(t('g.invalid')); return }
-  const lead = $('#glead').value
-  if (gEditing) { if (!await patchGroup(gEditing.id, { name, members, lead })) return }
+  const lead = $('#glead').value, shared_machine = $('#gshared').checked
+  if (gEditing) { if (!await patchGroup(gEditing.id, { name, members, lead, shared_machine })) return }
   else {
     const r = await fetch(api('/api/groups'), { method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ name, members, lead }) })
+      body: JSON.stringify({ name, members, lead, shared_machine }) })
     if (!r.ok) { alert(await errText(r)); return }
     const g = await r.json()
     await reload(); const c = CONVS.find(x => x.id === g.id); if (c) openConv(c)
@@ -540,20 +543,14 @@ async function loadModels(providerId, current) {
     body: JSON.stringify({ id: providerId }) }).then(x => x.json()).catch(() => ({ models: [] }))
   if (seq !== modelsSeq) return                  // provider changed meanwhile; this answer is stale
   const models = r.models ?? []
-  if (!models.length) { sel.hidden = true; box.hidden = false; box.value = current; dshHint(); return }
+  if (!models.length) { sel.hidden = true; box.hidden = false; box.value = current; return }
   // Show a saved model even if the provider dropped it; never silently switch to the first
   const list = current && !models.includes(current) ? [current, ...models] : models
   sel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}${models.includes(m) ? '' : esc(t('b.unlisted'))}</option>`).join('')
   // New Agents default to the model others already use on this provider, not the alphabetically first
   sel.value = current || r.suggested || models[0]; sel.disabled = false
-  dshHint()
 }
 const chosenModel = () => ($('#bmodel').hidden ? $('#bmodelx').value : $('#bmodel').value).trim()
-// A deepseek-* model runs on DeepSeek Harness, which can't show it the images tools return — say so
-// where the model is picked, before someone makes it the reviewer.
-const dshHint = () => { $('#bdshhint').hidden = !/^deepseek/i.test(chosenModel()) }
-$('#bmodel').addEventListener('change', dshHint)
-$('#bmodelx').addEventListener('input', dshHint)
 $('#newbot').onclick = () => editBot(null)
 $('#bcancel').onclick = () => $('#bdlg').close()
 $('#bsave').onclick = async () => {
@@ -1068,7 +1065,10 @@ const stCall = async (action, args = {}) => {
   return r.json()
 }
 const fileUrl = id => api(`/api/studio/file/${encodeURIComponent(id)}`)
-const WS = { on: false, projects: [], project: null, view: null, shot: null, scene: '', board: null, sig: '' }
+const WS = { on: false, projects: [], project: null, view: null, shot: null, scene: '', episode: '', ep: null, board: null, sig: '' }
+const EP_STAGES = ['draft', 'breakdown', 'breakdown_review', 'production', 'final_review', 'done']
+const EP_COL = { draft: 'var(--dim2)', breakdown: 'var(--chipink)', breakdown_review: 'var(--warn)', production: 'var(--accent)',
+  final_review: 'var(--warn)', done: 'var(--ok)' }
 let wsTicket = 0
 const wsBody = () => $('#wsb')
 // Who did it, as a person reads it: the platform's names for agents, "a person" for the human actor.
@@ -1103,7 +1103,7 @@ $('#wsproj').onchange = e => {
   if (e.target.value === '+') { e.target.value = WS.project ?? ''; wsNewProject(); return }
   WS.project = e.target.value
   try { localStorage.setItem('ma_project', WS.project) } catch {}
-  WS.scene = ''
+  WS.scene = ''; WS.episode = ''
   wsShow(!WS.view || WS.view === 'shot' ? 'board' : WS.view)
 }
 async function wsNewProject() {
@@ -1121,14 +1121,17 @@ for (const b of document.querySelectorAll('#proj [data-view]')) b.onclick = () =
 async function wsShow(view, arg = null) {
   const ticket = ++wsTicket
   WS.view = view; WS.shot = view === 'shot' ? arg : null
+  if (view === 'episode') WS.ep = arg
   cur = null; renderConvs()
   $('main').classList.add('ws-on'); document.body.classList.add('ws-mode')
-  for (const b of document.querySelectorAll('#proj [data-view]')) b.classList.toggle('on', b.dataset.view === (view === 'shot' ? 'board' : view))
+  const nav = view === 'shot' ? 'board' : view === 'episode' ? 'episodes' : view
+  for (const b of document.querySelectorAll('#proj [data-view]')) b.classList.toggle('on', b.dataset.view === nav)
   if (!WS.project) return wsNoProject()
   try {
     if (view === 'board') await wsBoard(ticket)
     else if (view === 'shot') await wsShot(ticket, arg)
-    else if (view === 'script') await wsScript(ticket)
+    else if (view === 'episodes' || view === 'script') await wsEpisodes(ticket)
+    else if (view === 'episode') await wsEpisode(ticket, arg)
     else if (view === 'bible') await wsBible(ticket)
     else await wsSettings(ticket)
   } catch (e) {
@@ -1144,12 +1147,12 @@ function wsLeave() {
   for (const b of document.querySelectorAll('#proj [data-view]')) b.classList.remove('on')
 }
 
-function wsHead(title, sub = '', { back = false, quota = null } = {}) {
+function wsHead(title, sub = '', { back = false, quota = null, backTo = 'board' } = {}) {
   const p = WS.projects.find(x => x.id === WS.project)
-  $('#wsh').innerHTML = `${back ? `<button class="btn back">${esc(t('ws.back'))}</button>` : ''}
+  $('#wsh').innerHTML = `${back ? `<button class="btn back">${esc(t(backTo === 'episodes' ? 'ws.backEpisodes' : 'ws.back'))}</button>` : ''}
     <div style="min-width:0"><div class="t">${esc(title)}</div><small>${esc(sub || p?.name || '')}</small></div>
     ${quota ? `<div class="quota${quota.used >= quota.per_hour ? ' w' : ''}" title="${esc(t('ws.quotaTip'))}">${esc(t('ws.quota', quota))}</div>` : ''}`
-  $('#wsh .back')?.addEventListener('click', () => wsShow('board'))
+  $('#wsh .back')?.addEventListener('click', () => wsShow(backTo, backTo === 'episode' ? WS.ep : null))
 }
 
 function wsNoProject() {
@@ -1161,21 +1164,33 @@ function wsNoProject() {
 
 // ─── Board: every shot of the film, one column per state ───
 async function wsBoard(ticket) {
-  const b = await stCall('project.board', { project: WS.project })
+  const b = await stCall('project.board', { project: WS.project, ...WS.episode ? { episode: WS.episode } : {} })
+    .catch(e => { if (!WS.episode) throw e; WS.episode = ''; return stCall('project.board', { project: WS.project }) })
   if (ticket !== wsTicket) return
   WS.board = b
   wsBoardRender()
 }
 function wsBoardRender() {
   const b = WS.board
-  wsHead(t('ws.board'), b.project.name, { quota: b.quota })
+  wsHead(t('ws.board'), `${b.project.name} · ${b.ratio}`, { quota: b.quota })
   const box = wsBody(), keep = [box.scrollLeft, box.scrollTop]
   box.innerHTML = ''
   if (!b.seedance_ready) box.insertAdjacentHTML('beforeend', `<p class="lead" style="color:var(--warn)">${esc(t('ws.noSeedance'))}</p>`)
+  // Who has work right now (the pipeline's orders), and which episode the board shows.
+  const stuck = b.orders.reduce((n, o) => n + o.stuck, 0)
+  if (b.orders.length) box.insertAdjacentHTML('beforeend', `<p class="lead"${stuck ? ' style="color:var(--warn)"' : ''}>${esc(t('ws.ordersNow', {
+    list: b.orders.map(o => `${t(o.role === 'human' ? 'ws.you' : `st.role.${o.role}`)} ${o.n}`).join(' · ') }))}${stuck ? esc(t('ws.ordersStuck', { n: stuck })) : ''}</p>`)
+  if (b.episodes.length) {
+    const eps = document.createElement('div'); eps.className = 'chips'
+    eps.innerHTML = [['', t('ws.allEpisodes')], ...b.episodes.map(e => [e.code, `${e.code}${e.title ? ` · ${e.title}` : ''} · ${t(`ws.ep.${e.stage}`)}`])]
+      .map(([c, label]) => `<button class="chip${WS.episode === c ? ' on' : ''}" data-e="${esc(c)}">${esc(label)}</button>`).join('')
+    eps.onclick = async e => { const c = e.target.closest('.chip'); if (!c) return; WS.episode = c.dataset.e; WS.scene = ''; wsShow('board') }
+    box.appendChild(eps)
+  }
   if (!b.shots.length) {
     box.insertAdjacentHTML('beforeend', `<div class="wempty"><h2>${esc(t('ws.noShots'))}</h2>
       <p>${esc(t(b.scenes.length ? 'ws.noShotsYet' : 'ws.noScenes'))}</p><button class="btn pri">${esc(t('ws.goScript'))}</button></div>`)
-    box.querySelector('.wempty button').onclick = () => wsShow('script')
+    box.querySelector('.wempty button').onclick = () => wsShow('episodes')
     return
   }
   if (WS.scene && !b.scenes.some(s => s.code === WS.scene)) WS.scene = ''
@@ -1235,8 +1250,10 @@ function wsShotRender(d) {
     ${d.rejections ? `<span class="badge bad">${esc(t('ws.rejections', { n: d.rejections, max: d.rejects_to_human }))}</span>` : ''}
     ${d.picked ? `<span class="badge ok">${esc(t('ws.pickedN', { n: d.picked }))}</span>` : ''}</div>`)
 
-  // The decision, when there is one to make.
+  // The decision, when there is one to make. A rejected shot is a person's too: after the third
+  // rejection it waits for one, and even before, a person may take a take the crew turned down.
   if (d.status === 'review') box.appendChild(reviewBar(d))
+  if (d.status === 'rejected') box.appendChild(decideBar(d))
 
   // Takes, newest round first.
   const sec = document.createElement('div'); sec.className = 'sec'
@@ -1247,7 +1264,7 @@ function wsShotRender(d) {
     const takes = d.candidates.filter(c => c.round === r)
     sec.insertAdjacentHTML('beforeend', `<div class="rhint" style="margin:8px 0 6px">${esc(t('ws.round', {
       model: takes[0].model, v: takes[0].prompt_version ?? '—', at: stamp(takes[0].created_at) }))}</div>`)
-    const grid = document.createElement('div'); grid.className = 'cands'
+    const grid = document.createElement('div'); grid.className = WS.board?.ratio === '9:16' || WS.board?.ratio === '3:4' ? 'cands v' : 'cands'
     for (const c of takes) {
       const el = document.createElement('div'); el.className = 'cand' + (d.picked === c.n ? ' picked' : '')
       el.innerHTML = `<video controls preload="metadata" playsinline ${c.frame ? `poster="${fileUrl(c.frame)}"` : ''} src="${fileUrl(c.asset_id)}"></video>
@@ -1255,7 +1272,7 @@ function wsShotRender(d) {
           c.width ? `<span>${c.width}×${c.height}</span>` : ''}${c.trim_to ? `<span title="${esc(t('ws.trimTip'))}">${esc(t('ws.trim', { n: c.trim_to }))}</span>` : ''}${
           d.picked === c.n ? `<span class="badge ok">${esc(t('ws.picked'))}</span>` : ''}${
           `<a class="dl" href="${fileUrl(c.asset_id)}" download="${esc(d.code)}-${c.n}.mp4">${esc(t('ws.download'))}</a>`}${
-          d.status === 'review' ? `<button class="btn pri">${esc(t('ws.approveThis'))}</button>` : ''}</div>`
+          d.status === 'review' || d.status === 'rejected' ? `<button class="btn pri">${esc(t('ws.approveThis'))}</button>` : ''}</div>`
       el.querySelector('button')?.addEventListener('click', () => wsApprove(d, c.n))
       // 1080p / 4K takes are 10-bit HEVC, which many browsers can't decode: show the last frame and
       // say so, rather than a black box that looks like a broken take.
@@ -1277,6 +1294,13 @@ function wsShotRender(d) {
       <img src="${fileUrl(d.sheets[0].id)}" alt="${esc(t('ws.sheet'))}" loading="lazy">`
     sh.querySelector('img').onclick = () => openImage(d.sheets[0].id)
     box.appendChild(sh)
+  }
+
+  // What is said in it, and how it will be heard.
+  if (d.def?.dialogue?.length) {
+    const ls = document.createElement('div'); ls.className = 'sec'
+    ls.innerHTML = `<h4>${esc(t('ws.dialogue'))} <small>${esc(t('ws.dialogueHint'))}</small></h4>${linesHtml(d.def.dialogue)}`
+    box.appendChild(ls)
   }
 
   // What the shot is.
@@ -1366,69 +1390,225 @@ function reviewBar(d) {
   }
   return bar
 }
+/** A rejected shot: a person hands it back to the crew with a note, or takes one of its takes (above). */
+function decideBar(d) {
+  const mine = d.rejections >= d.rejects_to_human
+  const bar = document.createElement('div'); bar.className = 'sec'
+  bar.innerHTML = `<div class="rform" style="border-color:${mine ? 'var(--warn)' : 'var(--line)'}"><b>${esc(t(mine ? 'ws.decideYours' : 'ws.decideCrew', { n: d.rejections }))}</b>
+    <p class="rhint" style="margin:6px 0 10px">${esc(t(mine ? 'ws.decideYoursHint' : 'ws.decideCrewHint'))}</p>
+    ${mine ? `<textarea class="fi" placeholder="${esc(t('ws.reopenPh'))}"></textarea>
+    <select class="fi">${['prompt', 'asset', 'plan'].map(r => `<option value="${r}">${esc(t(`ws.route.${r}`))}</option>`).join('')}</select>
+    <div class="rowb"><button class="btn pri">${esc(t('ws.reopen'))}</button></div>` : ''}</div>`
+  bar.querySelector('button')?.addEventListener('click', async () => {
+    const note = bar.querySelector('textarea').value.trim()
+    if (note.length < 5) { alert(t('ws.reviseNeed')); return }
+    try { await stCall('shot.reopen', { project: WS.project, shot: d.code, route: bar.querySelector('select').value, note }); wsShow('shot', d.code) }
+    catch (e) { alert(e.message) }
+  })
+  return bar
+}
 async function wsApprove(d, n) {
   if (!confirm(t('ws.confirmApprove', { shot: d.code, n }))) return
   try { await stCall('shot.approve', { project: WS.project, shot: d.code, pick: n }); await wsShow('shot', d.code) }
   catch (e) { alert(e.message) }
 }
 
-// ─── Script: the scenes the film is cut into, each with its slice of the script ───
-async function wsScript(ticket) {
-  const scenes = await stCall('scene.list', { project: WS.project })
+// ─── Episodes: the series, one episode at a time, each moving through the pipeline ───
+// A person writes an episode's script and starts it; the director breaks it down; a person
+// checks the breakdown; the crew makes it, each told by work orders; the studio cuts it once every
+// shot is approved; a person watches the cut and approves it. The two decisions are here.
+const epBadge = st => `<span class="badge" style="color:${EP_COL[st]}">● ${esc(t(`ws.ep.${st}`))}</span>`
+async function wsEpisodes(ticket) {
+  const [eps, scenes] = await Promise.all([stCall('episode.list', { project: WS.project }), stCall('scene.list', { project: WS.project })])
   if (ticket !== wsTicket) return
-  wsHead(t('ws.script'))
-  const box = wsBody(); box.innerHTML = `<p class="lead">${esc(t('ws.scriptLead'))}</p>`
-  // A new scene, by a person: code, title and its text, exactly as written.
+  wsHead(t('ws.episodes'))
+  const box = wsBody(); box.innerHTML = `<p class="lead">${esc(t('ws.episodesLead'))}</p>`
   const add = document.createElement('details'); add.className = 'scr'
-  add.innerHTML = `<summary><b>＋ ${esc(t('ws.addScene'))}</b></summary>
-    <div class="brow"><input class="fi mono" placeholder="${esc(t('ws.sceneCodePh'))}" style="max-width:160px"><input class="fi" placeholder="${esc(t('ws.sceneTitlePh'))}"></div>
-    <textarea class="fi" style="min-height:160px" placeholder="${esc(t('ws.sceneScriptPh'))}"></textarea>
-    <div class="rowb"><button class="btn pri">${esc(t('ws.addScene'))}</button></div>`
+  add.open = !eps.length
+  add.innerHTML = `<summary><b>＋ ${esc(t('ws.addEpisode'))}</b></summary>
+    <div class="brow"><input class="fi mono" placeholder="${esc(t('ws.epCodePh'))}" style="max-width:120px" value="E${String(eps.length + 1).padStart(2, '0')}">
+      <input class="fi" placeholder="${esc(t('ws.epTitlePh'))}"></div>
+    <input class="fi" placeholder="${esc(t('ws.epLoglinePh'))}">
+    <textarea class="fi" style="min-height:200px" placeholder="${esc(t('ws.epScriptPh'))}"></textarea>
+    <div class="rowb"><button class="btn pri">${esc(t('ws.addEpisode'))}</button></div>`
   add.querySelector('.btn.pri').onclick = async () => {
-    const [code, title] = [...add.querySelectorAll('input')].map(i => i.value.trim())
+    const [code, title, logline] = [...add.querySelectorAll('input')].map(i => i.value.trim())
     const script = add.querySelector('textarea').value.trim()
-    if (!code || !script) { alert(t('ws.sceneNeed')); return }
-    try { await stCall('scene.add', { project: WS.project, code, title, script, ord: scenes.length }); wsShow('script') }
+    if (!code) { alert(t('ws.epNeed')); return }
+    try { await stCall('episode.add', { project: WS.project, code, title, logline, script }); wsShow('episode', code) }
     catch (e) { alert(e.message) }
   }
   box.appendChild(add)
-  if (!scenes.length) box.insertAdjacentHTML('beforeend', `<p class="lead">${esc(t('ws.noScenesYet'))}</p>`)
-  for (const sc of scenes) {
-    const el = document.createElement('details'); el.className = 'scr'
-    el.innerHTML = `<summary><b class="mono">${esc(sc.code)}</b><span>${esc(sc.title)}</span>
-      <span class="badge" style="margin-left:auto">${esc(t('ws.sceneShots', { ok: sc.approved, n: sc.shots }))}</span>
-      ${sc.locked ? `<span class="badge ok">${esc(t('ws.sceneLocked'))}</span>` : ''}</summary><div class="body"></div>`
-    el.ontoggle = async () => {
-      if (!el.open || el.dataset.loaded) return
-      el.dataset.loaded = '1'
-      const full = await stCall('scene.show', { project: WS.project, scene: sc.code }).catch(e => ({ error: e.message }))
-      const body = el.querySelector('.body')
-      if (full.error) { body.textContent = full.error; return }
-      body.innerHTML = `<pre></pre>
-        ${full.shots.length ? `<div class="chips" style="margin:12px 0 4px">${full.shots.map(s =>
-          `<button class="chip" data-shot="${esc(s.code)}" title="${esc(s.story_beat ?? '')}"><span style="color:${STATUS_COL[s.status]}">●</span> ${esc(s.code)}</button>`).join('')}</div>` : `<p class="rhint" style="margin-top:10px">${esc(t('ws.sceneNoShots'))}</p>`}
-        <div class="rowb" style="margin-top:10px">${sc.locked ? '' : `<button class="btn" data-a="edit">${esc(t('ws.editScript'))}</button>`}
-        ${!sc.locked && sc.shots && sc.approved === sc.shots ? `<button class="btn pri" data-a="lock">${esc(t('ws.lockScene'))}</button>` : ''}</div>`
-      body.querySelector('pre').textContent = full.script
-      body.querySelectorAll('[data-shot]').forEach(b => { b.onclick = () => wsShow('shot', b.dataset.shot) })
-      body.querySelector('[data-a=lock]')?.addEventListener('click', async () => {
-        if (!confirm(t('ws.confirmLockScene', { code: sc.code }))) return
-        try { await stCall('shot.lock', { project: WS.project, scene: sc.code }); wsShow('script') } catch (e) { alert(e.message) }
-      })
-      body.querySelector('[data-a=edit]')?.addEventListener('click', () => {
-        body.innerHTML = `<input class="fi" value="${esc(sc.title)}"><textarea class="fi" style="min-height:220px"></textarea>
-          <div class="rowb"><button class="btn" data-a="cancel">${esc(t('common.cancel'))}</button><button class="btn pri" data-a="save">${esc(t('common.save'))}</button></div>`
-        body.querySelector('textarea').value = full.script
-        body.querySelector('[data-a=cancel]').onclick = () => wsShow('script')
-        body.querySelector('[data-a=save]').onclick = async () => {
-          try {
-            await stCall('scene.edit', { project: WS.project, scene: sc.code, title: body.querySelector('input').value.trim(), script: body.querySelector('textarea').value })
-            wsShow('script')
-          } catch (e) { alert(e.message) }
-        }
-      })
+  const list = document.createElement('div'); list.className = 'eplist'
+  for (const e of eps) {
+    const el = document.createElement('button'); el.className = 'epcard'
+    el.innerHTML = `<div class="rowb"><b class="mono">${esc(e.code)}</b><span>${esc(e.title)}</span>${epBadge(e.stage)}</div>
+      ${e.logline ? `<div class="rhint" style="margin:6px 0 0">${esc(e.logline)}</div>` : ''}
+      <div class="meta">${e.scenes ? `<span>${esc(t('ws.epScenes', { n: e.scenes }))}</span>` : ''}${
+        e.shots ? `<span>${esc(t('ws.sceneShots', { ok: e.approved, n: e.shots }))}</span>` : ''}</div>`
+    el.onclick = () => wsShow('episode', e.code)
+    list.appendChild(el)
+  }
+  box.appendChild(list)
+  // Scenes from before episodes existed: still here, outside the pipeline.
+  const loose = scenes.filter(sc => !sc.episode)
+  if (loose.length) {
+    box.insertAdjacentHTML('beforeend', `<div class="sec"><h4>${esc(t('ws.looseScenes'))}</h4><small class="rhint">${esc(t('ws.looseHint'))}</small></div>`)
+    for (const sc of loose) box.appendChild(sceneItem(sc, () => wsShow('episodes')))
+  }
+}
+
+/** One scene, opened on demand: its text as written, its shots (with their dialogue), editing and locking. */
+function sceneItem(sc, refresh, { dialogue = false } = {}) {
+  const el = document.createElement('details'); el.className = 'scr'
+  el.innerHTML = `<summary><b class="mono">${esc(sc.code)}</b><span>${esc(sc.title)}</span>
+    <span class="badge" style="margin-left:auto">${esc(t('ws.sceneShots', { ok: sc.approved, n: sc.shots }))}</span>
+    ${sc.locked ? `<span class="badge ok">${esc(t('ws.sceneLocked'))}</span>` : ''}</summary><div class="body"></div>`
+  el.ontoggle = async () => {
+    if (!el.open || el.dataset.loaded) return
+    el.dataset.loaded = '1'
+    const full = await stCall('scene.show', { project: WS.project, scene: sc.code }).catch(e => ({ error: e.message }))
+    const body = el.querySelector('.body')
+    if (full.error) { body.textContent = full.error; return }
+    // In a breakdown review a person reads the plan, lines included; later the chips are enough.
+    const plan = dialogue && full.shots.length ? await Promise.all(full.shots.map(x => stCall('shot.detail', { project: WS.project, shot: x.code }).catch(() => null))) : []
+    body.innerHTML = `<pre></pre>
+      ${plan.length ? `<div class="planl">${plan.filter(Boolean).map(d => `<div class="pl"><button class="chip" data-shot="${esc(d.code)}"><span style="color:${STATUS_COL[d.status]}">●</span> ${esc(d.code)}</button>
+        <span class="rhint" style="margin:0">${esc([d.def?.duration_s && t('ws.secs', { n: d.def.duration_s }), d.def?.shot_size, d.def?.story_beat].filter(Boolean).join(' · '))}</span>
+        ${linesHtml(d.def?.dialogue)}</div>`).join('')}</div>`
+      : full.shots.length ? `<div class="chips" style="margin:12px 0 4px">${full.shots.map(s =>
+        `<button class="chip" data-shot="${esc(s.code)}" title="${esc(s.story_beat ?? '')}"><span style="color:${STATUS_COL[s.status]}">●</span> ${esc(s.code)}</button>`).join('')}</div>` : `<p class="rhint" style="margin-top:10px">${esc(t('ws.sceneNoShots'))}</p>`}
+      <div class="rowb" style="margin-top:10px">${sc.locked ? '' : `<button class="btn" data-a="edit">${esc(t('ws.editScript'))}</button>`}
+      ${!sc.locked && sc.shots && sc.approved === sc.shots ? `<button class="btn pri" data-a="lock">${esc(t('ws.lockScene'))}</button>` : ''}</div>`
+    body.querySelector('pre').textContent = full.script
+    body.querySelectorAll('[data-shot]').forEach(b => { b.onclick = () => wsShow('shot', b.dataset.shot) })
+    body.querySelector('[data-a=lock]')?.addEventListener('click', async () => {
+      if (!confirm(t('ws.confirmLockScene', { code: sc.code }))) return
+      try { await stCall('shot.lock', { project: WS.project, scene: sc.code }); refresh() } catch (e) { alert(e.message) }
+    })
+    body.querySelector('[data-a=edit]')?.addEventListener('click', () => {
+      body.innerHTML = `<input class="fi" value="${esc(sc.title)}"><textarea class="fi" style="min-height:220px"></textarea>
+        <div class="rowb"><button class="btn" data-a="cancel">${esc(t('common.cancel'))}</button><button class="btn pri" data-a="save">${esc(t('common.save'))}</button></div>`
+      body.querySelector('textarea').value = full.script
+      body.querySelector('[data-a=cancel]').onclick = refresh
+      body.querySelector('[data-a=save]').onclick = async () => {
+        try {
+          await stCall('scene.edit', { project: WS.project, scene: sc.code, title: body.querySelector('input').value.trim(), script: body.querySelector('textarea').value })
+          refresh()
+        } catch (e) { alert(e.message) }
+      }
+    })
+  }
+  return el
+}
+
+/** A shot's lines, as a person reads them: who, how it is heard, what. */
+function linesHtml(lines) {
+  if (!lines?.length) return ''
+  return `<div class="lines">${lines.map(l => `<div class="ln"><span class="lk ${esc(l.kind)}">${esc(t(`ws.line.${l.kind}`))}</span>${
+    l.speaker ? `<b>${esc(l.speaker)}</b>` : ''}<span>${esc(l.text)}</span></div>`).join('')}</div>`
+}
+
+async function wsEpisode(ticket, code) {
+  const e = await stCall('episode.show', { project: WS.project, episode: code })
+  if (ticket !== wsTicket) return
+  WS.sig = epSig(e)
+  wsEpisodeRender(e)
+}
+const epSig = e => JSON.stringify([e.stage, e.rev, e.cut?.id, e.cut?.status, e.orders.map(o => [o.id, o.status]), e.scenes.map(s => [s.shots, s.approved])])
+function wsEpisodeRender(e) {
+  wsHead(`${e.code}${e.title ? ` · ${e.title}` : ''}`, `${WS.projects.find(x => x.id === WS.project)?.name ?? ''} · ${e.ratio}`, { back: true, backTo: 'episodes' })
+  const box = wsBody(); box.innerHTML = ''
+  const refresh = () => wsShow('episode', e.code)
+  const shots = e.scenes.reduce((n, s) => n + s.shots, 0), ok = e.scenes.reduce((n, s) => n + s.approved, 0)
+  // Where it is in the pipeline, as a row of steps.
+  box.insertAdjacentHTML('beforeend', `<div class="steps">${EP_STAGES.map(st => `<span class="${st === e.stage ? 'on' : EP_STAGES.indexOf(st) < EP_STAGES.indexOf(e.stage) ? 'past' : ''}">${esc(t(`ws.ep.${st}`))}</span>`).join('<i>›</i>')}</div>`)
+
+  // The gate for this stage: what a person does here, if anything.
+  const gate = document.createElement('div'); gate.className = 'sec'
+  const act = async (fn, btn) => { btn.disabled = true; try { await fn(); refresh() } catch (err) { alert(err.message); btn.disabled = false } }
+  if (e.stage === 'draft') {
+    gate.innerHTML = `<div class="rform"><b>${esc(t('ws.gateDraft'))}</b><p class="rhint" style="margin:6px 0 10px">${esc(t(e.script.trim() ? 'ws.gateDraftHint' : 'ws.gateNoScript'))}</p>
+      <div class="rowb"><button class="btn pri"${e.script.trim() ? '' : ' disabled'}>${esc(t('ws.startEpisode'))}</button></div></div>`
+    gate.querySelector('button').onclick = ev => act(() => stCall('episode.start', { project: WS.project, episode: e.code }), ev.target)
+  } else if (e.stage === 'breakdown') {
+    gate.innerHTML = `<div class="rform"><b>${esc(t('ws.gateBreakdown'))}</b><p class="rhint" style="margin:6px 0 0">${esc(t('ws.gateBreakdownHint'))}</p>
+      ${e.note ? `<p class="rhint" style="margin:6px 0 0">${esc(t('ws.lastNote', { note: e.note }))}</p>` : ''}</div>`
+  } else if (e.stage === 'breakdown_review') {
+    gate.innerHTML = `<div class="rform" style="border-color:var(--warn)"><b>${esc(t('ws.gateReview', { scenes: e.scenes.length, shots }))}</b>
+      <p class="rhint" style="margin:6px 0 10px">${esc(t('ws.gateReviewHint'))}</p>
+      <textarea class="fi" placeholder="${esc(t('ws.revisePh'))}"></textarea>
+      <div class="rowb"><button class="btn" data-a="revise">${esc(t('ws.sendBack'))}</button><button class="btn pri" data-a="ok">${esc(t('ws.approveBreakdown'))}</button></div></div>`
+    gate.querySelector('[data-a=ok]').onclick = ev => act(() => stCall('episode.review', { project: WS.project, episode: e.code, decision: 'approve' }), ev.target)
+    gate.querySelector('[data-a=revise]').onclick = ev => {
+      const note = gate.querySelector('textarea').value.trim()
+      if (note.length < 5) { alert(t('ws.reviseNeed')); gate.querySelector('textarea').focus(); return }
+      act(() => stCall('episode.review', { project: WS.project, episode: e.code, decision: 'revise', note }), ev.target)
     }
-    box.appendChild(el)
+  } else if (e.stage === 'production') {
+    gate.innerHTML = `<div class="rform"><b>${esc(t('ws.gateProduction', { ok, n: shots }))}</b><p class="rhint" style="margin:6px 0 10px">${esc(t('ws.gateProductionHint'))}</p>
+      <div class="rowb"><button class="btn">${esc(t('ws.openBoard'))}</button></div></div>`
+    gate.querySelector('button').onclick = () => { WS.episode = e.code; wsShow('board') }
+  }
+  if (gate.innerHTML) box.appendChild(gate)
+
+  // The cut: made by the studio once every shot is approved.
+  if (e.cut) {
+    const c = e.cut, cs = document.createElement('div'); cs.className = 'sec'
+    const notes = (c.log ?? []).map(l => t(`ws.cutLog.${l.code}`, { n: l.lines ?? '', shot: l.shot ?? '', error: l.error ?? '' }))
+    cs.innerHTML = `<h4>${esc(t('ws.cut'))} <small>${esc(t(`ws.cut.${c.status}`))}${c.finished_at ? ` · ${esc(stamp(c.finished_at))}` : ''}${c.duration_ms ? ` · ${esc(t('ws.secs', { n: Math.round(c.duration_ms / 100) / 10 }))}` : ''}</small></h4>
+      ${c.status === 'done' ? `<div class="cutv"><video controls preload="metadata" playsinline style="aspect-ratio:${e.ratio.replace(':', '/')}" src="${fileUrl(c.video_asset_id)}"></video></div>
+        <div class="rowb" style="margin-top:8px"><a class="dl" href="${fileUrl(c.video_asset_id)}" download="${esc(e.code)}.mp4">${esc(t('ws.downloadMp4'))}</a>
+        ${c.srt_asset_id ? `<a class="dl" href="${fileUrl(c.srt_asset_id)}" download="${esc(e.code)}.srt">${esc(t('ws.downloadSrt'))}</a>` : ''}</div>` : ''}
+      ${c.status === 'failed' ? `<p class="rhint" style="color:var(--bad)">${esc(c.error)}</p>` : ''}
+      ${notes.length ? `<p class="rhint" style="color:var(--warn)">${notes.map(esc).join('<br>')}</p>` : ''}
+      ${e.stage === 'final_review' ? `<div class="rform" style="border-color:var(--warn);margin-top:10px"><b>${esc(t('ws.gateFinal'))}</b>
+        <p class="rhint" style="margin:6px 0 10px">${esc(t('ws.gateFinalHint'))}</p>
+        <div class="rowb"><button class="btn" data-a="recut">${esc(t('ws.recut'))}</button><button class="btn pri" data-a="ok">${esc(t('ws.approveEpisode'))}</button></div></div>`
+      : ['done', 'production'].includes(e.stage) && c.status !== 'running' && c.status !== 'queued' && ok === shots && shots ? `<div class="rowb" style="margin-top:8px"><button class="btn" data-a="recut">${esc(t('ws.recut'))}</button></div>` : ''}`
+    cs.querySelector('[data-a=ok]')?.addEventListener('click', ev => act(() => stCall('episode.review', { project: WS.project, episode: e.code, decision: 'approve' }), ev.target))
+    cs.querySelector('[data-a=recut]')?.addEventListener('click', ev => act(() => stCall('episode.assemble', { project: WS.project, episode: e.code }), ev.target))
+    box.appendChild(cs)
+  }
+
+  // Who has what right now.
+  if (e.orders.length) {
+    const os = document.createElement('div'); os.className = 'sec'
+    os.innerHTML = `<h4>${esc(t('ws.orders'))} <small>${esc(t('ws.ordersHint'))}</small></h4>${e.orders.map(o => `<div class="ord ${esc(o.status)}">
+      <span class="mono">#${o.id}</span><b>${esc(o.role === 'human' ? t('ws.you') : o.agent_id ? (bot(o.agent_id)?.name ?? o.agent_id) : t(`st.role.${o.role}`))}</b>
+      <span>${esc(t(`ws.ok.${o.kind}`))} · ${esc(o.subject)}${o.status === 'stuck' && o.error ? `<br><small>${esc(o.error)}</small>` : ''}</span>
+      <span class="badge${o.status === 'stuck' ? ' bad' : ''}" style="margin-left:auto">${esc(t(`ws.os.${o.status}`))}</span></div>`).join('')}`
+    box.appendChild(os)
+  }
+
+  // The script, as the person wrote it; editable until production starts.
+  const sc = document.createElement('div'); sc.className = 'sec'
+  sc.innerHTML = `<h4>${esc(t('ws.epScript'))}</h4>${e.logline ? `<p class="rhint">${esc(e.logline)}</p>` : ''}<pre class="script"></pre>
+    <div class="rowb"><button class="btn">${esc(t('ws.editScript'))}</button></div>`
+  sc.querySelector('pre').textContent = e.script || t('ws.noScriptYet')
+  sc.querySelector('button').onclick = () => {
+    sc.innerHTML = `<h4>${esc(t('ws.epScript'))}</h4><input class="fi" placeholder="${esc(t('ws.epTitlePh'))}"><input class="fi" placeholder="${esc(t('ws.epLoglinePh'))}">
+      <textarea class="fi" style="min-height:260px"></textarea>
+      <small class="rhint">${esc(t(['draft', 'breakdown'].includes(e.stage) ? 'ws.scriptEditHint' : 'ws.scriptEditLate'))}</small>
+      <div class="rowb"><button class="btn" data-a="cancel">${esc(t('common.cancel'))}</button><button class="btn pri" data-a="save">${esc(t('common.save'))}</button></div>`
+    const [ti, lo] = sc.querySelectorAll('input'); ti.value = e.title; lo.value = e.logline
+    sc.querySelector('textarea').value = e.script
+    sc.querySelector('[data-a=cancel]').onclick = refresh
+    sc.querySelector('[data-a=save]').onclick = async () => {
+      try { await stCall('episode.edit', { project: WS.project, episode: e.code, title: ti.value.trim(), logline: lo.value.trim(), script: sc.querySelector('textarea').value }); refresh() }
+      catch (err) { alert(err.message) }
+    }
+  }
+  box.appendChild(sc)
+
+  // Its scenes and shots — with the lines while a person is checking the breakdown.
+  if (e.scenes.length) {
+    box.insertAdjacentHTML('beforeend', `<div class="sec"><h4>${esc(t('ws.epScenesTitle'))}</h4></div>`)
+    for (const s of e.scenes) {
+      const el = sceneItem(s, refresh, { dialogue: true })
+      if (e.stage === 'breakdown_review' && e.scenes.length <= 6) { el.open = true; el.ontoggle() }
+      box.appendChild(el)
+    }
   }
 }
 
@@ -1465,6 +1645,19 @@ async function wsBible(ticket) {
   if (chars.length) section(t('ws.characters'), grid => {
     for (const c of chars) {
       item(grid, c.name, c.status, lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: WS.project, name: c.name }), ['char.refs', { name: c.name }])
+      // Their voice, for the lines spoken off camera: settable on a locked character too.
+      const v = typeof c.voice === 'string' ? { voice: c.voice } : c.voice ?? {}
+      const vb = document.createElement('div'); vb.className = 'voice rowb'
+      vb.innerHTML = `<span class="rhint" style="margin:0">🎙 ${esc(t('ws.voiceOf', { name: c.name }))}</span>
+        <input class="fi mono" style="max-width:130px;margin:0" placeholder="${esc(t('ws.voicePh'))}"><input class="fi" style="margin:0" placeholder="${esc(t('ws.voiceHowPh'))}">
+        <button class="btn">${esc(t('common.save'))}</button>`
+      const [vi, vh] = vb.querySelectorAll('input'); vi.value = v.voice ?? ''; vh.value = v.instructions ?? ''
+      vb.querySelector('button').onclick = async () => {
+        if (!vi.value.trim()) { vi.focus(); return }
+        try { await stCall('char.voice', { project: WS.project, name: c.name, voice: vi.value.trim(), instructions: vh.value.trim() }); vb.querySelector('button').textContent = t('key.saved') }
+        catch (e) { alert(e.message) }
+      }
+      grid.appendChild(vb)
       for (const l of c.looks) item(grid, `${c.name} / ${l.name}`, l.status,
         lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: WS.project, name: c.name, look: l.name }), ['char.refs', { name: c.name, look: l.name }])
     }
@@ -1481,7 +1674,8 @@ async function wsSettings(ticket) {
   if (ticket !== wsTicket) return
   wsHead(t('ws.settings'))
   const box = wsBody()
-  const { lang: plang = 'en', ...rest } = info.info ?? {}
+  const { lang: plang = 'en', ratio: pratio = '16:9', narrator = null, ...rest } = info.info ?? {}
+  const nv = typeof narrator === 'string' ? { voice: narrator } : narrator ?? {}
   const groups = CONVS.filter(c => c.kind === 'group')
   box.innerHTML = `<div style="max-width:720px">
     <div class="sec"><h4>${esc(t('st.projectSec'))} <small class="mono">${esc(info.id)}</small></h4>
@@ -1489,6 +1683,9 @@ async function wsSettings(ticket) {
       <div class="brow"><select class="fi" id="stlang" title="${esc(t('st.langTitle'))}">${['en', 'zh-Hans', 'zh-Hant'].map(l => `<option value="${l}">${esc(t(`st.lang.${l}`))}</option>`).join('')}</select>
         <select class="fi" id="stgroup" title="${esc(t('st.groupTitle'))}"><option value="">${esc(t('st.noGroup'))}</option>${groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('')}</select></div>
       <small class="rhint">${esc(t('st.groupHint'))}</small>
+      <div class="brow"><select class="fi" id="stratio" title="${esc(t('st.ratioTitle'))}">${['9:16', '16:9', '3:4', '1:1'].map(r => `<option value="${r}">${esc(t('st.ratio', { r }))}</option>`).join('')}</select>
+        <input class="fi mono" id="stnarr" placeholder="${esc(t('st.narratorPh'))}"><input class="fi" id="stnarrhow" placeholder="${esc(t('ws.voiceHowPh'))}"></div>
+      <small class="rhint">${esc(t('st.narratorHint'))}</small>
       <textarea class="fi mono" id="stinfo" rows="6" spellcheck="false" placeholder="${esc(t('st.infoPh'))}"></textarea>
       <small class="rhint">${esc(t('st.infoHint'))}</small>
       <div class="rowb"><button class="btn pri" id="stsave">${esc(t('common.save'))}</button><button class="btn" id="stnew">${esc(t('ws.newProject'))}</button></div></div>
@@ -1497,6 +1694,8 @@ async function wsSettings(ticket) {
   $('#stlang').value = ['en', 'zh-Hans', 'zh-Hant'].includes(plang) ? plang : 'en'
   $('#stgroup').value = groups.some(g => g.id === info.notify_group) ? info.notify_group : ''
   $('#stinfo').value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''
+  $('#stratio').value = ['9:16', '16:9', '3:4', '1:1'].includes(pratio) ? pratio : '16:9'
+  $('#stnarr').value = nv.voice ?? ''; $('#stnarrhow').value = nv.instructions ?? ''
   $('#stnew').onclick = wsNewProject
   $('#stsave').onclick = async () => {
     let extra = {}
@@ -1505,7 +1704,9 @@ async function wsSettings(ticket) {
       if (!extra || typeof extra !== 'object' || Array.isArray(extra)) { alert(t('st.infoBad')); return }
     }
     try {
-      await stCall('project.edit', { project: WS.project, name: $('#stname').value.trim(), notify_group: $('#stgroup').value, info: { ...extra, lang: $('#stlang').value } })
+      const narr = $('#stnarr').value.trim() ? { voice: $('#stnarr').value.trim(), instructions: $('#stnarrhow').value.trim() } : undefined
+      await stCall('project.edit', { project: WS.project, name: $('#stname').value.trim(), notify_group: $('#stgroup').value,
+        info: { ...extra, lang: $('#stlang').value, ratio: $('#stratio').value, ...narr ? { narrator: narr } : {} } })
       await wsProjects(WS.project); wsShow('settings')
     } catch (e) { alert(e.message) }
   }
@@ -1528,6 +1729,14 @@ async function wsSettings(ticket) {
 async function wsPoll() {
   if (!WS.view || document.hidden) return
   if (WS.view === 'board') return wsBoard(wsTicket).catch(() => {})
+  if (WS.view === 'episode') {
+    // Not while a cut is playing or a note is being written.
+    if ([...document.querySelectorAll('#wsb video')].some(v => !v.paused) || [...document.querySelectorAll('#wsb textarea')].some(x => x.value.trim())) return
+    const ticket = wsTicket
+    const e = await stCall('episode.show', { project: WS.project, episode: WS.ep }).catch(() => null)
+    if (!e || ticket !== wsTicket || epSig(e) === WS.sig) return
+    WS.sig = epSig(e); return wsEpisodeRender(e)
+  }
   if (WS.view !== 'shot') return
   // Never under someone: not while a take is playing or a rejection is being written.
   if ([...document.querySelectorAll('#wsb video')].some(v => !v.paused) || document.querySelector('#wsb .rjf')) return
@@ -1538,20 +1747,15 @@ async function wsPoll() {
 }
 
 // ═══ Keys ═══
-// Model keys: DeepSeek's lives on the platform, the studio's in the studio (keys.* actions). A saved
+// The studio's model keys, kept in the studio (keys.* actions). Chat models are upstreams (⚙), not keys. A saved
 // key never comes back to the browser, only its last four characters, so a key box always starts
 // empty: typing replaces the key, leaving it empty keeps it. Other fields show only what was set
 // here; the .env / default value is the placeholder, so saving never copies .env into the panel.
-const KEY_FIELDS = { deepseek: ['base_url', 'api_key'], seedance: ['base_url', 'api_key'], gpt_image: ['base_url', 'api_key', 'model'], comfy: ['url'] }
+const KEY_FIELDS = { seedance: ['base_url', 'api_key'], gpt_image: ['base_url', 'api_key', 'model'], comfy: ['url'], tts: ['base_url', 'api_key', 'model'] }
 async function openKeys() {
-  const [ds, st] = await Promise.all([
-    fetch(api('/api/keys/deepseek')).then(r => (r.ok ? r.json() : null)).catch(() => null),
-    fetch(api('/api/studio/status')).then(r => r.json()).then(j => (j.enabled ? stCall('keys.get') : null)).catch(() => null),
-  ])
+  const st = await fetch(api('/api/studio/status')).then(r => r.json())
+    .then(j => (j.enabled ? stCall('keys.get') : null)).catch(() => null)
   const box = $('#keylist'); box.innerHTML = ''
-  if (ds) box.appendChild(keyCard('deepseek', { fields: {
-    base_url: { value: ds.base_url || 'https://api.deepseek.com', source: ds.base_url ? 'panel' : 'default' },
-    api_key: { hint: ds.hint, source: ds.set ? 'panel' : 'none' } } }, ds.harness ? '' : t('key.noHarness')))
   if (st) for (const k of st) box.appendChild(keyCard(k.name, k))
   else box.insertAdjacentHTML('beforeend', `<div class="psplit"></div><small class="rhint">${esc(t('key.studioOff'))}</small>`)
   if (!$('#keydlg').open) $('#keydlg').showModal()
@@ -1577,16 +1781,13 @@ function keyCard(name, k, warn = '') {
   const initial = () => [...el.querySelectorAll('[data-f]')].map(i => i.value).join('\n')
   const start = initial()
   const values = () => Object.fromEntries([...el.querySelectorAll('[data-f]')].map(i => [i.dataset.f, i.value.trim()]))
-  const put = body => (name === 'deepseek'
-    ? fetch(api('/api/keys/deepseek'), { method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
-      .then(async r => { if (!r.ok) throw new Error(await errText(r)) })
-    : stCall('keys.set', { name, values: body.values ?? {}, clear: body.clear ? ['api_key'] : [] }))
+  const put = body => stCall('keys.set', { name, values: body.values ?? {}, clear: body.clear ? ['api_key'] : [] })
   const note = async (text, ok) => {
     await openKeys()                                    // re-read: the card shows what is stored now
     const r = $(`#keylist [data-name="${name}"] .kres`)
     if (r) { r.textContent = text; r.style.color = ok == null ? '' : ok ? 'var(--ok)' : 'var(--bad)' }
   }
-  const save = () => put(name === 'deepseek' ? values() : { values: values() })
+  const save = () => put({ values: values() })
   el.querySelector('.ksave').onclick = async () => {
     try { await save(); await note(t('key.saved'), null) } catch (e) { alert(e.message) }
   }
@@ -1599,14 +1800,9 @@ function keyCard(name, k, warn = '') {
     const res = el.querySelector('.kres'); res.style.color = ''; res.textContent = t('key.testing')
     try {
       if (initial() !== start) await save()
-      if (name === 'deepseek') {
-        const r = await fetch(api('/api/keys/deepseek/test'), { method:'POST' }).then(x => x.json())
-        await note(`${r.message}${r.harness ? `\n${t('key.harness', { msg: r.harness.message })}` : ''}`, r.ok && r.harness?.ok !== false)
-      } else {
-        const r = await stCall('keys.test', { name })
-        const said = t(`key.t.${r.code}`, r.vars ?? {})
-        await note(said === `key.t.${r.code}` ? r.message : said, r.ok)
-      }
+      const r = await stCall('keys.test', { name })
+      const said = t(`key.t.${r.code}`, r.vars ?? {})
+      await note(said === `key.t.${r.code}` ? r.message : said, r.ok)
     } catch (e) { res.textContent = e.message; res.style.color = 'var(--bad)' }
   }
   return el

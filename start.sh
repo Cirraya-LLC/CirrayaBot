@@ -10,8 +10,8 @@
 #   4. size the deployment to the machine (memory ceilings, and on a first run which optional
 #      modules to start) and turn MODULES into compose profiles
 #
-# Optional modules (MODULES in .env, comma-separated): studio (the film studio), dsh (DeepSeek
-# Harness). Change it and rerun ./start.sh.
+# Optional modules (MODULES in .env, comma-separated): studio (the film studio). Change it and
+# rerun ./start.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,6 +38,7 @@ setkv() {
   printf '%s=%s\n' "$1" "$2" >> .env.tmp
   mv .env.tmp .env
 }
+delkv() { grep -v "^$1=" .env > .env.tmp 2>/dev/null || true; mv .env.tmp .env; }
 # Write only when the key has no value yet — an upgraded old deployment already has .env but
 # lacks new keys like POSTGRES_PASSWORD, and compose errors out on missing values.
 ensure() {
@@ -58,28 +59,34 @@ mem_mb() {
   echo 4096
 }
 MEM=$(mem_mb)
-# Under 6 GB, the ceilings for a 2-core / 4 GB box (they add up to ~3.3 GB); above, room to breathe.
+# Under 6 GB, the ceilings for a 2-core / 4 GB box (they add up to ~2.5 GB); above, room to breathe.
 # `ensure` only fills keys that are still empty: a value you set yourself is kept.
 if [ "$MEM" -lt 6000 ]; then
-  ensure DB_MEMORY 768m; ensure APP_MEMORY 768m; ensure STUDIO_MEMORY 1g; ensure DSH_MEMORY 768m
+  ensure DB_MEMORY 768m; ensure APP_MEMORY 768m; ensure STUDIO_MEMORY 1g
   ensure PG_SHARED_BUFFERS 128MB; ensure APP_HEAP_MB 384; ensure STUDIO_HEAP_MB 512
 else
-  ensure DB_MEMORY 2g; ensure APP_MEMORY 1g; ensure STUDIO_MEMORY 2g; ensure DSH_MEMORY 2g
+  ensure DB_MEMORY 2g; ensure APP_MEMORY 1g; ensure STUDIO_MEMORY 2g
   ensure PG_SHARED_BUFFERS 256MB; ensure APP_HEAP_MB 512; ensure STUDIO_HEAP_MB 1024
 fi
 if [ "$FIRST" = 1 ]; then
   # An Agent's own container (AGENT_TOOLS=on): 2 GB each would overcommit a 4 GB box at once.
   if [ "$MEM" -lt 6000 ]; then setkv AGENT_MEMORY 1g; setkv AGENT_CPUS 1; fi
-  # Below 2 GB: the chat alone. (Measured peaks with both modules busy are ~400 MB in all — dsh
-  # ~100 MB per turn, the studio ~150 MB making a sheet of eight 1080p HEVC takes — but a box that
-  # small has little to spare for anything else.)
+  # Below 2 GB: the chat alone. (The studio peaks at ~150 MB making a sheet of eight 1080p HEVC
+  # takes, ~250 MB assembling an episode — but a box that small has little to spare.)
   if [ "$MEM" -lt 2000 ]; then
     setkv MODULES ""
-    echo "Only ${MEM} MB of memory: starting the chat alone. Add studio / dsh to MODULES later if the machine grows."
+    echo "Only ${MEM} MB of memory: starting the chat alone. Add studio to MODULES later if the machine grows."
   fi
 fi
-# A deployment from before modules existed ran both of them: keep it that way.
-if ! grep -q '^MODULES=' .env; then setkv MODULES "studio,dsh"; fi
+# A deployment from before modules existed ran the studio: keep it that way.
+if ! grep -q '^MODULES=' .env; then setkv MODULES "studio"; fi
+# DeepSeek Harness was a module until 2.31; DeepSeek models now run like any other upstream.
+# Drop it from MODULES and forget its settings (its container goes with --remove-orphans below).
+if grep -q '^MODULES=.*dsh' .env; then
+  setkv MODULES "$(grep '^MODULES=' .env | tail -n 1 | cut -d= -f2- | tr ',' '\n' | grep -vx 'dsh' | paste -sd, - || true)"
+  echo "DeepSeek Harness is no longer part of this product: removed dsh from MODULES."
+fi
+delkv DSH_MEMORY; delkv DSH_CONTAINER
 
 ensure BIND_ADDR 127.0.0.1
 ensure WEB_PORT 8080
@@ -112,18 +119,16 @@ fi
 # ── Modules → profiles, and what the app is told exists ──
 # (|| true: under pipefail a grep that finds nothing would end the script — 2.9.5's rule again.)
 MODULES=$(grep '^MODULES=' .env | tail -n 1 | cut -d= -f2- | tr -d ' ' || true)
-PREFIX=$(grep '^AGENT_PREFIX=' .env | tail -n 1 | cut -d= -f2- || true)
 has() { case ",$MODULES," in *",$1,"*) return 0 ;; esac; return 1; }
 for m in $(echo "$MODULES" | tr ',' ' '); do
-  case "$m" in studio|dsh) ;; *) echo "⚠️  MODULES: unknown module \"$m\" (known: studio, dsh)" >&2 ;; esac
+  case "$m" in studio) ;; *) echo "⚠️  MODULES: unknown module \"$m\" (known: studio)" >&2 ;; esac
 done
 PROFILES=()
 if has studio; then setkv STUDIO_URL http://studio:8090; PROFILES+=(--profile studio); else setkv STUDIO_URL ""; fi
-if has dsh; then setkv DSH_CONTAINER "${PREFIX:-ma}-dsh"; PROFILES+=(--profile dsh); else setkv DSH_CONTAINER ""; fi
 # For a plain `docker compose up` later (podman-compose may ignore it: rerun this script there).
 setkv COMPOSE_PROFILES "$MODULES"
 
-# Free disk, measured: the images are ~1.6 GB with both modules, +1.2 GB for the agent image
+# Free disk, measured: the images are ~1.2 GB with the studio, +1.2 GB for the agent image
 # (AGENT_TOOLS=on), and building leaves a cache of the same order.
 FREE_MB=$(df -Pm . | awk 'NR == 2 {print $4}')
 if [ "${FREE_MB:-99999}" -lt 4000 ]; then
@@ -131,9 +136,11 @@ if [ "${FREE_MB:-99999}" -lt 4000 ]; then
 fi
 
 # ${a[@]+"${a[@]}"}: an empty array under set -u is an error in bash 3.2 (macOS).
-"${COMPOSE[@]}" ${PROFILES[@]+"${PROFILES[@]}"} up -d --build
+# --remove-orphans: the old DeepSeek Harness container, whose service no longer exists. Agent
+# containers are started by the app, not compose, so it never touches them.
+"${COMPOSE[@]}" ${PROFILES[@]+"${PROFILES[@]}"} up -d --build --remove-orphans
 # A module switched off keeps running unless it is stopped: compose leaves other profiles alone.
-for m in studio dsh; do
+for m in studio; do
   if ! has "$m"; then "${COMPOSE[@]}" --profile "$m" rm -s -f "$m" >/dev/null 2>&1 || true; fi
 done
 

@@ -313,6 +313,37 @@
   .scr summary::-webkit-details-marker{display:none}
   .scr[open] summary{margin-bottom:10px}
   .bible{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+  .bible .voice{grid-column:1/-1;margin:-4px 0 4px;gap:8px;flex-wrap:nowrap}
+  .bible .voice .btn{white-space:nowrap}
+  .bible .voice input+input{max-width:380px}
+  .ord small{color:var(--bad);font-size:11.5px}
+  /* Vertical projects: takes are 9:16, so narrower cells and tall players */
+  .cands.v{grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+  .cands.v .cand video,.cands.v .cand .noplay img{aspect-ratio:9/16}
+  /* Episodes */
+  .eplist{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:18px}
+  .epcard{all:unset;cursor:pointer;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;display:block}
+  .epcard:hover,.epcard:focus-visible{border-color:var(--accent)}
+  .epcard .rowb{gap:8px}.epcard .rowb .badge{margin-left:auto}
+  .epcard .meta{display:flex;gap:10px;font-size:12px;color:var(--dim);margin-top:6px}
+  .steps{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;font-size:12px;color:var(--dim2);margin-bottom:16px}
+  .steps span{padding:3px 9px;border-radius:99px;border:1px solid var(--line)}
+  .steps span.past{color:var(--dim)} .steps span.on{color:var(--onacc);background:var(--accent);border-color:var(--accent)}
+  .steps i{font-style:normal;color:var(--dim2)}
+  pre.script{margin:0 0 8px;white-space:pre-wrap;word-break:break-word;font:13px/1.75 inherit;color:var(--ink);max-height:420px;overflow:auto}
+  .lines{display:flex;flex-direction:column;gap:4px;margin:6px 0 2px}
+  .ln{display:flex;gap:8px;align-items:baseline;font-size:13px}
+  .ln b{white-space:nowrap}
+  .lk{font-size:11px;padding:1px 7px;border-radius:99px;border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+  .lk.onscreen{color:var(--accent);border-color:var(--accent)}
+  .planl{display:flex;flex-direction:column;gap:10px;margin-top:12px}
+  .pl{border-left:2px solid var(--line);padding-left:10px}
+  .pl .chip{margin-right:8px}
+  .cutv video{height:min(70vh,640px);max-width:100%;background:#000;border-radius:8px;display:block}
+  .sec .dl{color:var(--dim);font-size:12.5px;text-decoration:none;border:1px solid var(--line);border-radius:7px;padding:4px 10px}
+  .sec .dl:hover{color:var(--ink);border-color:var(--dim2)}
+  .ord{display:flex;align-items:center;gap:10px;font-size:13px;padding:6px 0;border-bottom:1px solid var(--line)}
+  .ord.stuck b{color:var(--bad)}
   .bitem{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
   .bitem .rowb b{font-size:13.5px}
   .thumbs{display:flex;gap:5px;flex-wrap:wrap}
@@ -457,7 +488,7 @@
   <div class="proj" id="proj" hidden>
     <label class="fitem cur" data-tip-key="ws.project"><b>🎬</b> <select id="wsproj" data-i18n-aria-label="ws.project"></select></label>
     <button class="fitem" data-view="board" data-tip-key="ws.board"><b>▤</b> <span data-i18n="ws.board"></span></button>
-    <button class="fitem" data-view="script" data-tip-key="ws.script"><b>✎</b> <span data-i18n="ws.script"></span></button>
+    <button class="fitem" data-view="episodes" data-tip-key="ws.episodes"><b>▶</b> <span data-i18n="ws.episodes"></span></button>
     <button class="fitem" data-view="bible" data-tip-key="ws.bible"><b>◎</b> <span data-i18n="ws.bible"></span></button>
     <button class="fitem" data-view="settings" data-tip-key="ws.settings"><b>⚙</b> <span data-i18n="ws.settings"></span></button>
   </div>
@@ -604,6 +635,8 @@
   <div id="gmembers"></div>
   <small class="rhint" style="margin-top:10px" data-i18n="g.leadHint"></small>
   <select id="glead"></select>
+  <label class="pick" style="margin-top:10px"><input type="checkbox" id="gshared"><span data-i18n="g.shared"></span></label>
+  <small class="rhint" data-i18n="g.sharedHint"></small>
   <div class="acts">
     <button class="btn" style="margin-right:auto;color:var(--bad)" id="gdel" data-i18n="g.disband"></button>
     <button class="btn" id="gcancel" data-i18n="common.cancel"></button>
@@ -624,7 +657,6 @@
     <select id="bapproval" data-i18n-title="b.approvalTitle"></select>
   </div>
   <small class="rhint" data-i18n="b.effortHint"></small>
-  <small class="rhint" id="bdshhint" data-i18n="b.dshHint" style="color:var(--warn)" hidden></small>
   <input type="number" id="bsteps" min="1" max="60" step="1" data-i18n-placeholder="b.stepsPh" autocomplete="off">
   <small class="rhint" data-i18n="b.stepsHint"></small>
   <input type="text" id="bcap" data-i18n-placeholder="sp.capPh" autocomplete="off">

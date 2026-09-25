@@ -32,12 +32,13 @@ A **Bot org layer** on top of **DeepSeek Harness (dsh)**, making an open-source 
 
 **⚠️ This section describes the conclusion of the 2026-09-05 round and has been overturned by 2.12** —
 the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
-2.6–2.11 are kept because the dsh source-code findings in them still hold. **Since 2.29 agents whose
-model is `deepseek-*` run their turns on dsh** (the rest of the platform stays ours).
+2.6–2.11 are kept because the dsh source-code findings in them still hold. (2.29 ran `deepseek-*`
+agents on dsh; **2.31 removed that again** — DeepSeek is an ordinary upstream on our own loop.)
 
 **For the current shape see 2.12 and 2.18**: PostgreSQL + one container per Agent + one-command
 compose deployment. **Since 2.30 the product presents itself as a film studio** (the workbench, 2.28 +
-2.30); the studio and DeepSeek Harness are optional modules.
+2.30), **since 2.31 an AI-native short-drama studio**: series → episodes, work orders instead of @
+relays, dialogue + TTS + subtitles, automatic cuts. The studio is the one optional module.
 
 ```bash
 ./start.sh     # this is how you start it
@@ -280,8 +281,8 @@ Measured: the Researcher's preset listed only web / fs-search / todo, and it rep
 So **a Bot's off-limits areas only hold after the host composition disables those tool rows**.
 dsh's official web profile does exactly that; the 17 disable rows in `headless.patch.yml` are copied
 from it. **When adding a new tool, keep this list in sync**, otherwise the new tool is unconditionally
-visible to every Bot. (The product's own use of dsh, 2.29, keeps its list in `deploy/dsh/run.mjs`
-and trips on any leak at runtime.)
+visible to every Bot. (The product's own use of dsh in 2.29 kept this list in `deploy/dsh/run.mjs`
+and tripped on any leak at runtime; that integration was removed in 2.31 — see the note in 2.29.)
 
 ### 2. `agentPresets.mount()` has exactly one call site in the whole codebase
 
@@ -1750,28 +1751,25 @@ shapes); prefilter scores (`candidates.prefilter_score` is always null — no si
   back it fails** ("the rejection goes to the cinematographer" never happens).
 - **Studio → group: `POST /api/events/group/<gid>`, its own `STUDIO_EVENT_TOKEN`** (ACCESS_TOKEN
   does not open it, and the studio never holds ACCESS_TOKEN). Stored as speaker **`Studio`**
-  (reserved like `User`; web shows "片场/Studio", not your own bubble); `wake: [agent ids]` → the
-  first one in the group is @-ed and the relay runs **unattended** (no stream for an approval card).
-  No wake → stored only. Answers 202 at once.
+  (reserved like `User`; web shows "片场/Studio", not your own bubble). *Since 2.31 the studio sends
+  only lines for everyone or for a person here (no `wake`); work goes to a member's own chat as a
+  work order, `POST /api/events/order` — see 2.31.* The `wake` path still exists for other callers.
 - **One relay per group at a time** (`withGroup`, around the whole group branch of `converse`). A
   person typing while "candidates ready" wakes the reviewer would otherwise run two relays over one log.
-- **The studio's outbox** (`studio/notify.mjs`, table `notifications`): round done → reviewer
-  ("candidates ready") or, if every take failed, the cinematographer; `shot.reject` → the route's
-  owner; the **3rd rejection → `@人类`/`@human` with the three reasons, waking nobody**. Lines to the
-  same target are merged after `NOTIFY_QUIET_MS` (15 s). Text in the project's `info.lang`
-  (en / zh-Hans / zh-Hant). A project with no `notify_group` drops its notices (marked, audited) —
-  a group set later must not receive last week's "candidates ready" as news.
+- **The studio's outbox** (`studio/notify.mjs`, table `notifications`): *since 2.31 only the lines
+  that wake nobody* — a person's approval (for everyone), the **3rd rejection → `@人类`/`@human`
+  with the three reasons**, a stuck work order. "Candidates ready" and "rejected, over to you" are
+  work orders now (2.31). Lines to the same target are merged after `NOTIFY_QUIET_MS` (15 s). Text in
+  the project's `info.lang` (en / zh-Hans / zh-Hant). A project with no `notify_group` drops its
+  notices (marked, audited) — a group set later must not receive last week's news.
 - **`agents.max_steps`** (1–60, empty = 12) in the Agent editor.
 - **Studio panel** — *replaced in 2.30 by the workbench*, which keeps its parts (project settings,
   crew roles, locking with the reference thumbnails beside each item: you lock what you have looked
   at). Everything goes through `POST /api/studio/call` with an allowlist (`PANEL_ACTIONS`).
 
-**`node studio/e2e-platform.mjs <deploy dir>`** drives the real deployment with a scripted fake model
-(one persona per `ROLE:` marker) and a fake Seedance, and checks the log and the studio: gen → "@严青
-候选已就绪" → the reviewer calls `shot.sheet` **and the next request carries the image** → reject →
-"@林野 被打回" → the cinematographer writes v2 and regenerates → … → "@人类 已被打回 3 次" and nobody
-answers it; the crew is offered `studio` and nothing else; an off-crew agent is offered nothing;
-`max_steps: 1` stops after one tool; both tokens are checked. Needs in `.env`:
+**`node studio/e2e-platform.mjs <deploy dir>`** drives the real deployment with scripted fake models
+(one persona per `ROLE:` marker) and a fake Seedance. *Rewritten in 2.31* to run one whole episode
+through the pipeline — see 2.31 for what it checks. Needs in `.env`:
 `SEEDANCE_BASE_URL=http://host.docker.internal:18777/sd SEEDANCE_API_KEY=sd-key NOTIFY_QUIET_MS=1000`.
 Verified in a browser too: the Studio bubble, the panel in zh-Hans, locking from the panel lands
 `locked` in the database.
@@ -1813,7 +1811,7 @@ podman; the Flutter client (untouched). **Not built**: candidate prefilter score
 local, uncommitted Dockerfile that adds the proxy CA; never commit that. Docker Hub also
 rate-limits anonymous pulls (429); `mirror.gcr.io/library/<image>` + retag works.
 
-## 2.29 A Keys panel, and DeepSeek models on DeepSeek Harness (2026-09-25, branch `feat/studio`)
+## 2.29 A Keys panel, and (until 2.31) DeepSeek models on DeepSeek Harness (2026-09-25, branch `feat/studio`)
 
 The boss: "填apikey做成ui，单独有个key接入面板，在接入deepseek harness，在使用deepseek模型的时候用这个"
 (put API-key entry in the UI as its own Keys panel; plug in DeepSeek Harness; use it when a DeepSeek
@@ -1827,8 +1825,9 @@ model is used). Then, asked:
 
 ### The Keys panel
 
-- **DeepSeek's key is the platform's** (`settings` row `keys.deepseek` = `{base_url, api_key}`, like
-  the upstreams' keys in `providers`); `GET/PUT /api/keys/deepseek`, `POST …/test`.
+- *(2.31: gone.)* DeepSeek's key was a platform `settings` row `keys.deepseek`; on startup
+  `deepseekKeyToProvider()` turns it into an upstream "DeepSeek" (`p-deepseek`), points every
+  `deepseek-*` agent at it and deletes the row. The Keys panel holds only the studio's keys now.
 - **The studio's keys stay in the studio** (`studio/keys.mjs`, table `studio.config`, one row per
   field): human-only `keys.get / keys.set / keys.test` through the panel's `/api/studio/call`. The
   panel wins **per field**, .env is the fallback; the adapters read `value()` synchronously from a
@@ -1838,89 +1837,21 @@ model is used). Then, asked:
   the e2e greps `studio.audit` and `settings` for the key it set.
 - The form shows only what was set **in the panel**; the .env/default value is the placeholder. Filled
   in instead, one Save would copy .env into the panel and later .env edits would silently stop working.
-- **Test costs nothing**: Seedance lists one task, GPT image lists models, ComfyUI `GET /system_stats`
-  (checked in ComfyUI's server.py), DeepSeek `GET /models` plus `run.mjs --version` in the harness.
+- **Test costs nothing**: Seedance lists one task, GPT image and speech list models, ComfyUI
+  `GET /system_stats` (checked in ComfyUI's server.py).
   Test saves first if the form changed — that's what a person pressing it means. Results carry a
   `code` the UI translates (`key.t.*`).
 
-### DeepSeek Harness: the shape
+### DeepSeek Harness — removed in 2.31
 
-```
-runAgent ─(model deepseek-*)─▶ runDshTurn: docker exec -i $DSH_CONTAINER node /opt/dsh/run.mjs   (<AGENT_PREFIX>-dsh; set by start.sh when MODULES has dsh)
-   │                              stdin line 1 = {rt, key, base_url, system, mcp_url, mcp_token}
-   │                              then dsh's SDK JSON-RPC both ways (profile sdk)
-   └─ execTool ◀── MCP tools/call ◀── dsh      app:8081/mcp — unpublished port, per-turn bearer token
-```
-
-- **One runtime per turn** (~1 s to start): the system prompt changes every turn (memory, recall,
-  skills), a fresh `HOME`/`DSH_HOME` has no session to go stale (reusing a session id in one home
-  errors "session already exists"), and cancel is just ending it. History travels **inside** the
-  one user message (`renderTurn`), after `fitContext`.
-- **Everything around the loop is the platform's**: `execTool` (factored out of `runAgent`) runs
-  approvals, the tool, the card and the transcript row for both loops; usage rows come from each
-  `assistant/message`'s `usage`; the cap is checked before the turn and before **every tool call**
-  — i.e. before every model call after the first, which is where `runAgent` checks too (dsh's own
-  model calls can't be intercepted; the call that crosses the cap is the last, in both loops).
-  `max_steps` counts `step/start` events and kills the runtime when step N+1 starts — like
-  `runAgent`, the last step's tools run and no wrap-up call follows.
-- **The key never goes on a command line or into `docker exec -e`** (`ps`, `docker inspect`): it is
-  stdin line 1, and `run.mjs` puts it only into the dsh child's environment.
-- **The patch is written as JSON** (YAML reads it), with NEL / LS / PS / BOM escaped — YAML 1.1
-  parsers treat some as line breaks. Verified with CJK, quotes, `#`, `---`, `- ` in the persona.
-- **The `dsh` container holds nothing worth reaching**: no docker socket, no volumes, no secret in
-  its environment, runs as `node`. It can reach app:8080 (no token) and the internet (it must, for
-  DeepSeek). `DSH_PERMISSION_MODE=danger-full-access` only because dsh would otherwise hold every MCP
-  call for an approval nobody can give over the SDK — the platform asks its own question first.
-- Effort: `low → low`, `medium → high`, `high → max` (dsh's vocabulary is off/low/high/max).
-
-### ⚠️ What was hit
-
-1. **The tripwire must watch `request/header`, not `tool/call`.** `request/header` lists exactly the
-   tools the next model call offers. `tool/call` also fires when the model invents a name (`bash`
-   → `UNKNOWN_TOOL`) — watching it would stop turns for the model's mistake. **Mutation-checked**:
-   with the disabled rows removed from `run.mjs`, the real deployment stopped the first turn with
-   "DeepSeek Harness offered its model a tool of its own (write)". When upgrading dsh, run the e2e.
-2. **dsh's defaults are not "send nothing"**: with no effort it sends `thinking: enabled`,
-   `reasoning_effort: high`, `max_tokens: 256000`, and **every request body carries
-   `dsh_plugin_packages`** (the list of its plugin packages). DeepSeek's own API takes that; a strict
-   relay might reject the unknown field. Empty effort = dsh's default, not the model's.
-3. **MCP tool names are `mcp__platform__<name>`**, fixed by dsh-mcp-client; the system prompt gets a
-   line saying so (`TOOL_NOTE`), since skills and personas say "the studio tool".
-4. **The MCP call and the assistant message that asked for it arrive on different channels** (HTTP
-   vs stdout). Unordered, the card rendered above its own words and — worse — the cap check ran before
-   the usage row of the call that crossed it was written. `dshToolCall` waits (≤ 0.5 s) for the
-   message, then awaits its usage insert (`noteUsage` now returns the promise), then checks the cap.
-   The e2e's cap case: exactly one call in the turn that crossed it, zero in the next.
-5. **Killing the `docker exec` client does close the runtime's stdin** (verified: SIGKILL on the
-   client → `run.mjs` ended dsh and deleted `/tmp/dsh/<rt>`). Unlike 2.22.1, where curl was stuck
-   *writing*. `run.mjs --kill <rt>` stays as the backstop, plus a 2-hour lifetime.
-6. A boot failure (bad MCP token, bad patch) is a 40-line stack; the error surfaced is the `Error…`
-   lines, not the last three lines of stack.
-7. The slim image has no `ps`; a `/proc` scan from `sh -c` matches **itself** (its command line says
-   run.mjs) — 2.9.5 once more. The e2e skips `$$`.
-
-### Verified / not verified
-
-Verified (compose deployment, fakes for DeepSeek and Seedance — `node deploy/dsh/e2e.mjs <dir>`):
-the panel stores and hides keys (both kinds), Test reaches the service with the panel's key, an
-agent is refused `keys.get`, clearing falls back to .env, the audit holds no key; a DeepSeek agent's
-turn uses **the panel's key**, is offered **only** `mcp__platform__studio`, has the persona as its whole
-system prompt, stores question → tool row → answer in order, and leaves two usage rows priced from its
-upstream (280 micro-dollars for the scripted tokens); history reaches the next turn; effort high →
-`max`; a 401 surfaces as an error with nothing stored; `max_steps` 2 runs two steps' tools; the cap
-stops mid-turn and before the next; closing the page kills the runtime; a two-agent group relay hands
-off by @; with the panel's key cleared, the agent's own (Chat Completions) upstream key is used; a
-bad MCP token gets 401 and port 8081 isn't published. `e2e-platform` and the studio e2e
-still pass on the refactored loop. In a browser (en, zh-Hans): the panel, Test results, the
-.env placeholder after clearing, the editor's DeepSeek warning.
-
-**Not verified**: the real DeepSeek API (no key here) — in particular dsh's defaults (thinking,
-`max_tokens 256000`) against whatever model names the boss's relay lists; podman; the Flutter client
-(untouched: it gets whole-message deltas, which it should draw like any other).
-
-**Left for later**: dsh-mcp-client *does* admit MCP image blocks when the model's catalog entry
-declares image input (`deepseek-v4-flash-vision-exp` in 0.1.5-rc.3) — we set `noImages` and send
-text. That is the way to a DeepSeek reviewer, and it is unbuilt and unverified.
+From here to the next section this round ran `deepseek-*` agents' turns inside DeepSeek Harness
+(one runtime per turn in a `dsh` container, our tools over MCP). **2.31 removed it**: the boss asked
+to evaluate V4.1 Flash and drop the harness if it didn't work; the model works, the harness was
+the problem — no token streaming, and tool images never reached the model, so a vision model
+couldn't be the reviewer. `web/dsh.mjs`, `deploy/dsh/` and the module are gone; the facts worth
+keeping moved to 2.31: dsh's defaults (thinking on, `max_tokens` 256000, `dsh_plugin_packages` in
+every body), and DeepSeek's thinking mode wanting its `reasoning_content` back — which the harness
+did for us and our loop now does itself.
 
 ## 2.30 The whole product becomes a film studio; the smallest machine it runs on (2026-09-25)
 
@@ -1932,7 +1863,7 @@ deployment so it deploys on a minimal configuration). Asked, he chose:
 | --- | --- |
 | What "影视创作定制化" means | "整个产品改成影视工作室" — open into the studio, Agents are called 剧组成员, the sidebar centres on the project |
 | May a person decide in the workbench? (he had said "not this round" before) | "可以，人能通过/打回/选条" |
-| The smallest machine | "2 核 4GB、约 10GB 硬盘，用 Docker" — modules as compose profiles, slimmer images, memory ceilings, start.sh sizing to the machine |
+| The smallest machine | "2 核 4GB、约 10GB 硬盘，用 Docker" — modules as compose profiles, slimmer images, memory ceilings, start.sh sizing to the machine (dsh was a module until 2.31) |
 
 ### The workbench (web/app.js "The film studio")
 
@@ -1987,7 +1918,7 @@ deployment so it deploys on a minimal configuration). Asked, he chose:
 
 ### The smallest machine
 
-- **`MODULES` in .env** (`studio`, `dsh`) → compose `profiles`. start.sh writes `COMPOSE_PROFILES`,
+- **`MODULES` in .env** (`studio`; `dsh` too until 2.31, when start.sh started removing it) → compose `profiles`. start.sh writes `COMPOSE_PROFILES`,
   passes `--profile` itself (podman-compose may not read the variable), sets `STUDIO_URL` /
   `DSH_CONTAINER` for the app (empty = off), and **removes a module switched off** — compose leaves
   containers of inactive profiles running. `MODULES=` (empty) is a real choice, so it gets a presence
@@ -1998,7 +1929,7 @@ deployment so it deploys on a minimal configuration). Asked, he chose:
   1g / 1 CPU on a first run; above, larger; **under 2 GB a first run starts the chat alone**.
   Values set by hand are kept (`ensure`).
 - **Measured** with the e2e suites running under those ceilings, sampled every second: dsh 104 MiB
-  (one turn's runtime), app 77, studio 62, db 30 — and the studio at 153 MiB making one sheet of
+  (one turn's runtime; gone since 2.31), app 77, studio 62, db 30 — and the studio at 153 MiB making one sheet of
   **eight 1080p 10-bit HEVC takes** (11 s on 4 cores). The ceilings are loose; they are there so one
   runaway part can't starve the others.
 - **Disk**: ~0.7 GB always (postgres, node base, app), studio +0.5 GB (ffmpeg), dsh +0.45 GB, the agent
@@ -2025,6 +1956,156 @@ back to the chat and the Keys panel said why; switching `studio` on brought it u
 podman with profiles; H.264 playback in a real browser (this Chromium has none — VP9 stood in); the
 Flutter client.
 
+## 2.31 An AI-native short-drama platform: episodes, work orders, dialogue, cuts (2026-09-25)
+
+The boss: "学习一下市面上别的平台，我希望做一个ai原生的短剧平台 / 给每个员工都建议他们适配的模型，评估DeepSeek
+v4.1flash的可用性，如果不行那就删去harness / 优化整体工作流程，创建workflow，来优化agent组之间的通信，可以考虑
+变成弱隔离" (study the other platforms; make an AI-native short-drama platform; suggest a model for each
+crew member; evaluate DeepSeek V4.1 Flash, drop the harness if it doesn't work; build a workflow for
+how the agents communicate; weak isolation is an option). Asked, he chose:
+
+| Asked | The boss chose |
+| --- | --- |
+| The harness | "删掉 Harness" — deepseek-* on our own loop over Chat Completions |
+| The workflow | "片场驱动的流水线" — fixed stages, the studio hands each stage's owner a work order, the group only reports, a person between stages |
+| Weak isolation | "每个项目一台共享机器" — implemented per group (the crew group), see below |
+| Scope | "剧集/分集 + 竖屏 9:16", "对白配音 + 字幕", "成片合成与导出" (not: new screenwriter / editor roles) |
+| Voices | "Seedance 原生 + TTS 旁白"; the TTS provider "后续手动设置" (set by hand later) |
+
+### What the others do (researched 2026-09-25)
+
+Topview (Drama Studio), Pippit (Short Drama Agent), AIDrama (open source, Celery pipeline), Toonflow
+(open source, node canvas). Common ground: series → episode → scene → shot; 9:16, 1–3 minutes;
+character sheets + references carried into every shot; dialogue, voice, subtitles and the final
+assembly are part of the product; a person checks each stage. Their shared lesson: **the fixed
+workflow is the product**, not agents chatting. That is what this round copies.
+
+### DeepSeek V4.1 Flash
+
+`deepseek-flash` (released 2026-09-10): 1M context, tool calls, native image input, the old V4 flash
+ids routed to it; $0.15 / $0.60 per M tokens off-peak. **The model is usable; the harness was not**
+(no streaming, images never reached the model). Removed (2.29 note). On our loop it needed two things:
+
+- ⚠️ **Thinking mode wants its `reasoning_content` back on every later request that carries tools** —
+  within the turn *and* across turns (DeepSeek's docs; a 400 otherwise). `chatFrame` collects it,
+  `runAgent` puts it on the assistant messages of the turn, and the final answer's reasoning is
+  stored in `messages.reasoning` and sent back from history. Only for `deepseek*` models:
+  `toChatMessages` strips the field for everyone else (an unknown field is a 400 on strict APIs).
+  **Mutation-checked**: storing `''` instead fails e2e-platform ("every assistant message went back
+  with its reasoning").
+- Effort in DeepSeek's words: low → low, medium → high, high → max. Context: `deepseek-(flash|v4)` →
+  1,048,576 in the KNOWN table (from DeepSeek's changelog, not a guess).
+- **Not verified with the real API** (no key here): only against a fake that behaves as the docs say.
+
+### The pipeline (`studio/pipeline.mjs`)
+
+**Nobody hands work over with an @.** After every change (and every 15 s) the studio looks at a
+project's whole state — `needs(snapshot)`, pure and self-tested — and works out every need as a
+**work order** with a stable key (`prompt:<shot>:<prompt version>:<rounds>`, `fix:<shot>:<attempt>`…),
+so the same need never makes two orders and **an order closes the moment its need is gone** (the
+shot moved on, the reference exists, the person locked it) — done if someone was told, cancelled if
+not. Only `fixasset` (the studio can't see "the references are better") is closed by the agent,
+`order.done {id, note}`, and the note goes into the cinematographer's follow-up.
+
+Episode stages: draft → (person: start) breakdown → (director: `episode.submit`) breakdown_review →
+(person: approve / send back with a note, `rev`+1) production → (every shot approved: the studio cuts
+it) final_review → (person: approve) done; a shot rejected in final review sends it back to production.
+In production: a character / look / location a shot needs with no references → art; with references
+but not locked → a person; **a shot is given to the cinematographer only when everything it needs is
+locked**. Review → reviewer; rejection → the route's owner (asset → art, then the cinematographer
+with art's note; plan → director, then the cinematographer); 3rd → a person, who can take a take
+(`override`) or hand it back (`shot.reopen`, a `reopen` review row).
+
+**Delivery** (`notify.mjs`): orders for one role in one project, after the quiet period, become one
+message **in that member's own chat** (`POST /api/events/order`, `STUDIO_EVENT_TOKEN`), speaker
+`Studio`, `#id` per order; the platform runs the turn unattended and answers when it is over; the
+group gets one line "📋 工单 → 林野：S01-SH002（写提示词并生成）". After the turn the pipeline looks
+again: still needed → sent once more ("第二次"), then **stuck** with the reason, and a person is told.
+
+⚠️ **Roles are the studio's, not per film** — there can be several directors. The first version sent
+every order to "the first director by id": in the test deployment that was an old crew from another
+project, and the order failed. Now the studio sends the candidates (those working in the project
+first) and **the platform picks the one in the project's group**.
+
+⚠️ A member who can't run (no model chosen) used to fail before the order was stored, so nobody could
+see what they had been asked. The order is stored in their chat first now.
+
+### Dialogue, speech, subtitles, the cut
+
+- Shot definitions carry `dialogue: [{speaker, text, kind}]`, kind `onscreen` / `offscreen` /
+  `narration` (`studio/dialogue.mjs`, ≤ 12 lines a shot, ≤ 300 characters a line).
+- **On-camera lines are added to the Seedance prompt by the studio at `shot.gen`, with
+  `generate_audio: true`** — a cinematographer who forgets them can't lose them. The prompt stored in
+  the generation row is what was sent (lineage). Narration is never sent to Seedance.
+- Off-screen and narration: TTS (`studio/tts.mjs`), any OpenAI-compatible `/audio/speech`, set in the
+  Keys panel (`tts` group; empty base URL = off, the boss sets it later). A character's voice is
+  `card.voice` (`char.voice`, allowed on a locked character — the voice isn't the look), the narrator's
+  `info.narrator`. Speech is cached per (model, voice, instructions, text) as a `voice` asset.
+- **The cut** (`assembly.mjs` + `media.mjs assemble`): picked takes in script order, each cut to
+  `trim_to` or its planned length, every segment re-encoded to one size / rate / sound format
+  (Seedance mixes 10-bit HEVC and H.264, with and without sound — concatenating mixed streams makes
+  a file one player plays and another doesn't), silence added where a take has none, narration mixed
+  over a ducked bed (`sidechaincompress`), subtitles burned in and kept as an `.srt`, **H.264 + AAC,
+  faststart, 720×1280** for 9:16. What was left out goes in `assemblies.log` (`no_tts`, `tts_failed`).
+- ⚠️ **libass sizes an SRT against a 384×288 script, not the video.** `FontSize=H/64` came out ~90 px
+  and `MarginV=H/12` put the line mid-frame; the numbers are in script space now (12 / 30). Caught
+  by a pixel check that found no subtitle where it was looked for — the first check averaged too
+  coarsely to see a thin line of text at all, so it tests the maximum difference now.
+- New projects are 9:16 (`info.ratio`); an older project keeps what it had (16:9 unless set).
+
+### Weak isolation: one machine per crew group
+
+A group can be marked `shared_machine` (group editor; the importer sets it on a **new** crew group).
+Its members' tools run in `<prefix>-group-<gid>`, whose `/work` **is** the group's drive; `/groups`
+isn't mounted there, so other groups stay out of reach. The prompt says so ("you share one machine…
+don't delete what isn't yours"). One browser for the group, too. Verified with tools on and a small
+base image: A wrote `hostname` to /work, B read it with the same hostname, an outsider couldn't see
+it and kept its own machine, the file landed in `data/workspace/groups/<gid>/`, one container named for
+the group and none for A.
+
+### The workbench
+
+"Script & scenes" became **Episodes**: the list, a new-episode form, and each episode's page — the
+stage as a row of steps, the gate for it (start / check the breakdown with every shot's lines, send
+back with a note / watch the cut, approve, cut again), the cut with MP4 and SRT downloads, the open
+work orders (a stuck one says why), the script, its scenes. The board filters by episode and says
+who has how many orders. The shot page shows the dialogue and, on a rejected shot, a person's
+decision (take a take, or hand it back). The bible sets each character's voice; project settings
+the ratio and the narrator. A crew member's chat shows the studio's orders as "片场/Studio". Old
+scenes without an episode are listed below the episodes and work as before, outside the pipeline.
+
+### Model suggestions (in `studio/crew/README.md`, printed by the importer)
+
+Director Claude Opus 5.5 (high) — budget deepseek-flash; art director GPT-5.6 Sol (medium, same
+family as GPT image) — budget deepseek-flash; cinematographer Claude Sonnet 5 (medium, the most
+orders) — budget deepseek-flash; reviewer Claude Opus 5.5 (high, **must see images**) — alternative
+GPT-5.6 Sol. deepseek-flash as the reviewer is possible on our loop now but **unverified**.
+
+### Verified / not verified
+
+Verified (`e2e-platform`, the real deployment, fakes for the models, Seedance and speech): a person
+adds E01 and starts it → the director's order is in **his** chat → scenes and shots with dialogue →
+submit → a person sends it back (the note is in the second order) → resubmit → approve → art's
+orders → references → a person asked to lock, and **nothing for the cinematographer until locked** →
+prompts, takes → the reviewer sees each sheet (after a 429), rejects SH001 once → the fix → all
+approved → the studio cuts it: **H.264 720×1280 with sound, 7 s = 3 + 4** (SH001 trimmed from 5),
+subtitles with every line, the narration spoken once in the narrator's voice, cached on a recut → a
+person is told → approves → done. Seedance got `ratio 9:16`, the lines and `generate_audio: true` for
+the talking shot and neither for the narrated one. **No crew message in the group** — all work ran in
+members' own chats; every order closed by the state it asked for. The DeepSeek director: effort
+`max`, reasoning back on every request, in the turn and from history. e2e-workbench and the studio
+e2e pass. In a browser (zh-Hans, light): every new page, a stuck order with its reason, zero page
+errors. Upgrading the test deployment: dsh dropped from MODULES, its container removed, .env cleaned.
+
+Not verified: the real DeepSeek API; a real TTS service; real Seedance dialogue (lip-sync quality,
+and whether the model says exactly the lines); **playing the cut in a real browser** (this Chromium
+has no H.264 — ffprobe checked the file); podman; the Flutter client (untouched: it doesn't know
+episodes, shows orders as a speaker "Studio", has no shared-machine switch).
+
+Not built: a screenwriter and an editor (the boss left them out); background music; lip-sync for TTS
+lines (off-screen by definition); per-episode cost; distribution / publishing; the candidate
+prefilter.
+
 ## 3. What runs now
 
 ```bash
@@ -2041,11 +2122,13 @@ node studio/store.mjs      # self-test for the studio's content-addressed file s
 node studio/roles.mjs      # self-test for who may do what in the studio
 node studio/shots.mjs      # self-test for the shot state machine (studio has refs/seedance/gptimage/comfy/media too)
 STUDIO_DATABASE_URL=… node studio/e2e.mjs   # the whole studio flow against fakes (see 2.28)
-node studio/e2e-platform.mjs <deploy dir>   # the crew loop through the running platform (see 2.28)
+node studio/e2e-platform.mjs <deploy dir>   # one whole episode, script → cut, through the running platform (see 2.31)
+node studio/pipeline.mjs   # self-test for the pipeline: which work orders a state needs (see 2.31)
+node studio/dialogue.mjs   # self-test for dialogue, subtitle timing, .srt
+node studio/tts.mjs        # self-test for the speech adapter
+node studio/media.mjs      # needs ffmpeg + a CJK font: sheets, and an episode cut with burned-in subtitles
 node web/studio.mjs        # self-test for the platform's studio tool
-node web/dsh.mjs           # self-test for driving DeepSeek Harness: turns, MCP, keys (see 2.29)
 node studio/keys.mjs       # self-test for the Keys panel's studio side (see 2.29)
-node deploy/dsh/e2e.mjs <deploy dir>        # DeepSeek Harness + Keys panel through the running platform (see 2.29)
 node studio/e2e-workbench.mjs <deploy dir>  # the workbench: board, shot page, files by range, a person reviewing (see 2.30)
 MODULES=… ./start.sh / MEM_MB=4096 ./start.sh   # modules → profiles; size .env as if for a 4 GB box (see 2.30)
 node studio/crew/import.mjs --self-test     # the crew spec parses the way the importer needs
@@ -2060,9 +2143,8 @@ built-in web UI, **not part of the product**, kept only for the record.
 
 ## 3.1 Next steps
 
-1. **dsh for everything, not just `deepseek-*`?** 2.29 runs DeepSeek models on dsh with our tools over
-   MCP. Its adapters are DeepSeek's; other providers would need dsh's other llm plugins, and the
-   bwrap/Landlock sandbox would need the agent's container to be where dsh runs (see 2.9.x)
+1. ~~**dsh for everything?**~~ **Dropped in 2.31**: our own loop does what the harness did for us, and more
+   (images, streaming). What's left of the short-drama roadmap is in 2.31's "not built".
 2. ~~**Per-Agent spending cap**~~ **done 2026-09-20, see 2.25** — usage rows, per-upstream
    prices, and a daily cap checked before every model call
 3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)

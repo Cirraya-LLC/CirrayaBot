@@ -88,6 +88,30 @@ create table if not exists locations (
 );
 create unique index if not exists locations_name on locations (project_id, lower(name));
 
+-- A short drama is a series of episodes (1–3 minutes each, vertical). The project is the series;
+-- an episode carries its script, as a person wrote it, and where it is in the pipeline:
+--   draft → breakdown (director cuts it into scenes and shots) → breakdown_review (a person checks
+--   the cut) → production (assets, prompts, takes, reviews; assembled automatically once every
+--   shot is approved) → final_review (a person watches the cut) → done
+-- rev counts the times a person sent the breakdown back; each send-back is a new work order.
+create table if not exists episodes (
+  id          text primary key,
+  project_id  text not null references projects(id) on delete cascade,
+  code        text not null,                      -- E01
+  title       text not null default '',
+  logline     text not null default '',
+  script      text not null default '',
+  ord         int  not null default 0,
+  stage       text not null default 'draft'
+              check (stage in ('draft','breakdown','breakdown_review','production','final_review','done')),
+  rev         int  not null default 0,
+  note        text not null default '',           -- a person's note with the latest send-back
+  created_by  text not null default '',
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create unique index if not exists episodes_code on episodes (project_id, lower(code));
+
 -- A scene is a slice of the script. The director cuts the script into scenes; the text in
 -- \`script\` is the human's words and only a person may edit it (scene.edit is HUMAN_ONLY).
 -- locked = the director's "shot lock": every shot in it passed, it goes to editing.
@@ -105,6 +129,8 @@ create table if not exists scenes (
   updated_at  timestamptz not null default now()
 );
 create unique index if not exists scenes_code on scenes (project_id, lower(code));
+-- Scenes made before episodes existed have none; they still work, outside the pipeline.
+alter table scenes add column if not exists episode_id text references episodes(id) on delete set null;
 
 create table if not exists shots (
   id            text primary key,
@@ -168,6 +194,11 @@ create index if not exists generations_recent on generations (engine, created_at
 alter table generations add column if not exists round text not null default '';
 create index if not exists generations_round on generations (shot_id, round);
 create index if not exists generations_shot on generations (shot_id);
+-- Speech (tts.mjs) is a generation too: what was said, in which voice, by which model.
+alter table generations drop constraint if exists generations_engine_check;
+alter table generations add constraint generations_engine_check check (engine in ('seedance','gpt-image','comfy','tts'));
+alter table generations drop constraint if exists generations_kind_check;
+alter table generations add constraint generations_kind_check check (kind in ('image','video','audio'));
 
 create table if not exists assets (
   id            text primary key,
@@ -220,6 +251,9 @@ create table if not exists reviews (
   created_at  timestamptz not null default now()
 );
 create index if not exists reviews_shot on reviews (shot_id, id);
+-- 'reopen': a person handing a shot that was rejected three times back to the crew, with a route and a note.
+alter table reviews drop constraint if exists reviews_verdict_check;
+alter table reviews add constraint reviews_verdict_check check (verdict in ('approve','reject','reopen'));
 
 create table if not exists loras (
   id           text primary key,
@@ -249,6 +283,53 @@ create table if not exists notifications (
   error       text not null default ''
 );
 create index if not exists notifications_unsent on notifications (project_id, target) where sent_at is null;
+
+-- Work orders: the pipeline (pipeline.mjs) decides who has to do what next, and tells them in
+-- their own chat — not by an @ relay in the group. One row per thing to do, keyed so the same
+-- need never makes two orders; rows for one person are sent together. role is a crew role, or
+-- 'human' (goes to the group as an @human line). A row is done when the studio sees the work in
+-- its own state (the shot moved on, the asset exists), or when the agent says so for work the
+-- studio can't see (order.done).
+create table if not exists orders (
+  id          bigserial primary key,
+  project_id  text not null references projects(id) on delete cascade,
+  episode_id  text references episodes(id) on delete cascade,
+  role        text not null,
+  kind        text not null,
+  key         text not null,
+  subject     text not null default '',           -- a shot code, a character, an episode
+  body        text not null,
+  status      text not null default 'open' check (status in ('open','sent','done','stuck','cancelled')),
+  attempts    int  not null default 0,
+  agent_id    text not null default '',
+  note        text not null default '',           -- what the agent said when it closed it
+  error       text not null default '',
+  created_at  timestamptz not null default now(),
+  sent_at     timestamptz,
+  done_at     timestamptz
+);
+create unique index if not exists orders_key on orders (project_id, key);
+create index if not exists orders_open on orders (project_id, role) where status in ('open','sent');
+
+-- An episode cut: the approved takes in order, trimmed, speech mixed in, subtitles. Made by the
+-- worker (media.mjs assemble); sig is the set of takes it used, so the same cut isn't made twice.
+create table if not exists assemblies (
+  id             text primary key,
+  project_id     text not null references projects(id) on delete cascade,
+  episode_id     text not null references episodes(id) on delete cascade,
+  status         text not null default 'queued' check (status in ('queued','running','done','failed')),
+  sig            text not null default '',
+  params         jsonb not null default '{}',
+  video_asset_id text,
+  srt_asset_id   text,
+  log            jsonb not null default '[]',      -- what was left out and why (e.g. no speech service)
+  error          text not null default '',
+  requested_by   text not null default '',
+  created_at     timestamptz not null default now(),
+  started_at     timestamptz,
+  finished_at    timestamptz
+);
+create index if not exists assemblies_episode on assemblies (episode_id, created_at);
 
 -- Who did what. Refusals are recorded too: an agent trying a command outside its job is the
 -- first sign that something it read has been talking to it.

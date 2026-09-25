@@ -1,4 +1,4 @@
-// The studio's model keys: Seedance, GPT image, ComfyUI.
+// The studio's model keys: Seedance, GPT image, ComfyUI, and speech (TTS) for narration.
 //
 // Two sources, per field: what a person typed into the Keys panel (stored in the studio's own
 // `config` table — never the platform's database), else the studio container's environment
@@ -25,6 +25,14 @@ export const KEYS = {
   },
   comfy: {
     url: { env: 'COMFY_URL', url: true },
+  },
+  // Narration and off-screen voices (tts.mjs): any service that speaks OpenAI's /audio/speech.
+  // No base URL by default on purpose — the boss sets it up later; until then narration is left
+  // to the subtitles and the assembly says so.
+  tts: {
+    base_url: { env: 'TTS_BASE_URL', url: true },
+    api_key: { env: 'TTS_API_KEY', secret: true },
+    model: { env: 'TTS_MODEL', fallback: 'gpt-4o-mini-tts' },
   },
 }
 
@@ -129,6 +137,16 @@ export async function test(name, { env = process.env, timeoutMs = 15_000 } = {})
       return ids.includes(v('model')) ? say(true, 'modelOk', { model: v('model') })
         : say(true, 'modelUnlisted', { model: v('model'), n: ids.length })
     }
+    if (name === 'tts') {
+      if (!v('base_url')) return say(false, 'need', { fields: 'base_url' })
+      // Listing models is free; saying a word is not.
+      const r = await get(`${v('base_url')}/models`, v('api_key') ? { authorization: `Bearer ${v('api_key')}` } : {})
+      if (r.status === 401 || r.status === 403) return say(false, 'rejected', { status: r.status, detail: await reason(r) })
+      if (!r.ok) return say(false, 'status', { status: r.status, detail: await reason(r) })
+      const ids = ((await r.json().catch(() => ({}))).data ?? []).map(m => m.id)
+      return ids.includes(v('model')) ? say(true, 'modelOk', { model: v('model') })
+        : say(true, 'modelUnlisted', { model: v('model'), n: ids.length })
+    }
     if (name === 'comfy') {
       if (!v('url')) return say(false, 'need', { fields: 'url' })
       const r = await get(`${v('url')}/system_stats`)
@@ -167,6 +185,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.equal(value('gpt_image', 'base_url', env), 'https://api.openai.com/v1', 'the fallback')
   a.equal(sourceOf('gpt_image', 'base_url', env), 'default')
   a.equal(sourceOf('comfy', 'url', env), 'none')
+  a.equal(value('tts', 'base_url', env), '', 'no speech service until someone sets one')
+  a.equal(value('tts', 'model', env), 'gpt-4o-mini-tts')
 
   // The panel wins, field by field; an empty row is no row.
   setPanel({ 'seedance.api_key': 'panel-key-9876', 'seedance.base_url': '' })
