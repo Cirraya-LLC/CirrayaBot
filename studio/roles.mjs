@@ -36,6 +36,8 @@ export const HUMAN_ONLY = new Set([
   'project.create', 'project.edit', 'scene.edit', 'crew.set', 'crew.list',
   // Model keys. Not even a hint of one is readable by an agent.
   'keys.get', 'keys.set', 'keys.test',
+  // The workbench's views (the web UI). Reading, but shaped for a screen, not for a model's context.
+  'project.board', 'shot.detail',
 ])
 
 export const ACTIONS = new Set([...READ, ...Object.values(WRITE).flat(), ...HUMAN_ONLY])

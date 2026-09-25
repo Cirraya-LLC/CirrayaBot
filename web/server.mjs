@@ -1835,7 +1835,7 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname === '/api/keys/deepseek/test' && req.method === 'POST') return send(200, await testDeepseek(lang))
 
-    // ---- The Studio panel: a person setting up projects, the crew, and locking what is final ----
+    // ---- The studio workbench (web UI): a person setting up projects and the crew, locking, reviewing ----
     if (url.pathname === '/api/studio/status' && req.method === 'GET') return send(200, { enabled: studio.enabled() })
     if (url.pathname === '/api/studio/call' && req.method === 'POST') {
       const { action, args = {} } = await readBody(req)
@@ -1846,11 +1846,24 @@ const server = createServer(async (req, res) => {
     }
     const sf = url.pathname.match(/^\/api\/studio\/file\/([\w-]{1,60})$/)
     if (sf && req.method === 'GET') {
-      // Images only: the panel shows reference thumbnails, it doesn't play footage.
-      const f = await studio.file(sf[1]).catch(() => null)
-      if (!f || !f.mime.startsWith('image/')) return send(404, { error: t('studio.noFile') })
-      res.writeHead(200, { 'content-type': f.mime, 'cache-control': 'private, max-age=86400' })
-      return res.end(f.buf)
+      // Images and takes for the workbench, streamed: a take is tens of MB, and a <video> seeks with
+      // Range requests, which pass through to the studio and come back as 206.
+      const r = await studio.fileStream(sf[1], req.headers.range).catch(() => null)
+      const mime = r?.headers.get('content-type') ?? ''
+      if (!r || (r.status !== 200 && r.status !== 206 && r.status !== 416) || !/^(image|video)\//.test(mime) && r.status !== 416) {
+        r?.body?.cancel().catch(() => {})
+        return send(404, { error: t('studio.noFile') })
+      }
+      const head = { 'cache-control': 'private, max-age=86400' }
+      for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag']) {
+        const v = r.headers.get(h); if (v) head[h] = v
+      }
+      res.writeHead(r.status, head)
+      if (!r.body) return res.end()
+      const { Readable } = await import('node:stream')
+      const body = Readable.fromWeb(r.body)
+      res.on('close', () => body.destroy())              // the viewer seeked or left: stop reading
+      return body.pipe(res)
     }
 
     // Static files

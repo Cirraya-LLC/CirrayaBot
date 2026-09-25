@@ -6,7 +6,7 @@
 // so it says what to do next, not just what went wrong.
 import * as db from './db.mjs'
 import { ROLES } from './roles.mjs'
-import { move, rejectTarget } from './shots.mjs'
+import { move, rejectTarget, REJECTS_TO_HUMAN } from './shots.mjs'
 import { normTags, matchRefs } from './refs.mjs'
 import * as seedance from './seedance.mjs'
 import * as gptimage from './gptimage.mjs'
@@ -680,6 +680,9 @@ export function makeActions({ store, kick = () => {} }) {
     await moveShot(s, 'approve', 'pick_asset_id = $4', [c.asset_id])
     await db.q('insert into reviews (shot_id, verdict, pick, note, scores, reviewer) values ($1,$2,$3,$4,$5,$6)',
       [s.id, 'approve', pick, text(a.note, 2000), obj(a.scores, 'scores') ?? {}, ctx.actorKey])
+    // A person deciding in the workbench is news for the crew (the reviewer may be about to look at
+    // the same takes); an agent approving says so in the group itself.
+    if (ctx.actor?.kind === 'human') await enqueue(p.id, { kind: 'approved', shot: s.code, pick })
     return { shot: s.code, status: 'approved', pick }
   }
   H['shot.reject'] = async (a, ctx) => {
@@ -696,7 +699,8 @@ export function makeActions({ store, kick = () => {} }) {
     // The routing is the studio's job, not the reviewer's: the owner of the route (or a person, on
     // the 3rd rejection) is told through the project's group.
     const reasons = to === 'human' ? (await db.q(`select reason from reviews where shot_id = $1 and verdict = 'reject' order by id`, [s.id])).rows.map(r => r.reason) : []
-    await enqueue(p.id, { kind: 'reject', shot: s.code, attempt: s2.reject_count, route, reason, goes_to: to, reasons })
+    await enqueue(p.id, { kind: 'reject', shot: s.code, attempt: s2.reject_count, route, reason, goes_to: to, reasons,
+      by: ctx.actor?.kind === 'human' ? 'human' : '' })
     return { shot: s.code, status: 'rejected', attempt: s2.reject_count, route, goes_to: to,
       note: to === 'human' ? `this is rejection #${s2.reject_count}: it goes to a person now, not back to the crew`
         : `the ${to} will be told; you don't need to @ them` }
@@ -714,6 +718,56 @@ export function makeActions({ store, kick = () => {} }) {
       return { scene: sc.code, locked: true, shots: shots.length }
     })
   }
+  // ---- the workbench (web UI): whole views in one call each ----
+  H['project.board'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const scenes = (await db.q(`select code, title, locked, length(script)::int as script_chars
+        from scenes where project_id = $1 order by ord, created_at`, [p.id])).rows
+    const shots = (await db.q(`
+      select s.code, sc.code as scene, s.status, s.priority, s.reject_count as rejections, s.prompt_version,
+             s.def->>'story_beat' as story_beat, (s.def->>'duration_s')::float8 as duration_s, s.updated_at,
+             (select count(*)::int from candidates c where c.shot_id = s.id) as candidates,
+             (select c.n from candidates c where c.shot_id = s.id and c.asset_id = s.pick_asset_id) as picked,
+             -- a still for the card: the picked take's last frame, else the newest take's
+             (select f.id from candidates c join assets f on f.generation_id = c.generation_id and f.kind = 'frame'
+               where c.shot_id = s.id order by (c.asset_id = s.pick_asset_id) desc nulls last, c.n desc limit 1) as thumb,
+             (select count(*)::int from generations g where g.shot_id = s.id and g.status in ('queued','running')) as pending
+        from shots s join scenes sc on sc.id = s.scene_id
+       where s.project_id = $1 order by sc.ord, sc.created_at, s.ord, s.created_at`, [p.id])).rows
+    const lim = seedance.limits(p.info)
+    const q = (await db.q(`select count(*) filter (where created_at > now() - interval '1 hour')::int as used,
+        count(*) filter (where status = 'running')::int as running, count(*) filter (where status = 'queued')::int as queued
+        from generations where project_id = $1 and engine = 'seedance'`, [p.id])).rows[0]
+    const bible = (await db.q(`select
+        (select count(*)::int from characters where project_id = $1) as characters,
+        (select count(*)::int from characters where project_id = $1 and status = 'locked') as characters_locked,
+        (select count(*)::int from locations where project_id = $1) as locations,
+        (select count(*)::int from locations where project_id = $1 and status = 'locked') as locations_locked`, [p.id])).rows[0]
+    const cfg = seedance.config()
+    return { project: projectView(p), scenes, shots, bible, seedance_ready: !!(cfg.base && cfg.key), rejects_to_human: REJECTS_TO_HUMAN,
+      quota: { used: q.used, per_hour: lim.perHour, concurrent: lim.concurrent, running: q.running, queued: q.queued } }
+  }
+  H['shot.detail'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const s = await shotOf(p, a.shot ?? a.code)
+    const scene = (await db.q('select code, title from scenes where id = $1', [s.scene_id])).rows[0]
+    const prompts = (await db.q('select version, text, ref_asset_ids as refs, note, created_by, created_at from shot_prompts where shot_id = $1 order by version desc', [s.id])).rows
+    const candidates = (await db.q(`
+      select c.n, c.asset_id, c.prompt_version, c.created_at, g.id as generation_id, g.round, g.model,
+             g.params->>'trim_to' as trim_to, v.mime, v.duration_ms, v.width, v.height,
+             (select f.id from assets f where f.generation_id = c.generation_id and f.kind = 'frame' order by f.created_at limit 1) as frame
+        from candidates c join generations g on g.id = c.generation_id join assets v on v.id = c.asset_id
+       where c.shot_id = $1 order by c.n`, [s.id])).rows
+    const generations = (await db.q(`select id, round, model, status, error, prompt_version, requested_by, created_at, finished_at, duration_ms
+        from generations where shot_id = $1 order by created_at desc limit 60`, [s.id])).rows
+    const sheets = (await db.q(`select id, tags, created_at from assets where shot_id = $1 and kind = 'sheet' order by created_at desc limit 10`, [s.id])).rows
+    const reviews = (await db.q('select verdict, pick, route, reason, note, attempt, reviewer, created_at from reviews where shot_id = $1 order by id', [s.id])).rows
+    return { code: s.code, scene, status: s.status, priority: s.priority, def: s.def, rejections: s.reject_count,
+      rejects_to_human: REJECTS_TO_HUMAN, prompt_version: s.prompt_version,
+      picked: candidates.find(c => c.asset_id === s.pick_asset_id)?.n ?? null,
+      prompts, candidates, generations, sheets, reviews }
+  }
+
   H['review.history'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
     const s = await shotOf(p, a.shot ?? a.code)

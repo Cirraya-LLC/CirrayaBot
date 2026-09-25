@@ -28,6 +28,8 @@ const T = {
              '{shot} 已被打回 {n} 次，需要人来决定。三次理由：{reasons}',
              '{shot} 已被打回 {n} 次，需要人來決定。三次理由：{reasons}'],
   human:    ['@human', '@人类', '@人類'],
+  approved: ['{shot} approved by a person (take #{pick}).', '{shot} 已由人工通过（第 {pick} 条）。', '{shot} 已由人工通過（第 {pick} 條）。'],
+  byHuman:  [' (rejected by a person)', '（人工打回）', '（人工打回）'],
 }
 const LANGS = ['en', 'zh-Hans', 'zh-Hant']
 const pick = (key, lang, vars = {}) => T[key][Math.max(0, LANGS.indexOf(lang))]
@@ -44,7 +46,10 @@ export function lineFor(ev, lang = 'en') {
       return ev.goes_to === 'human'
         ? { target: 'human', line: pick('toHuman', lang, { shot: ev.shot, n: ev.attempt,
           reasons: ev.reasons.map((r, i) => `${i + 1}) ${r}`).join(' ').slice(0, 1500) }) }
-        : { target: ev.goes_to, line: pick('rejected', lang, { shot: ev.shot, attempt: ev.attempt, route: ev.route, reason: ev.reason.slice(0, 600) }) }
+        : { target: ev.goes_to, line: pick('rejected', lang, { shot: ev.shot, attempt: ev.attempt, route: ev.route, reason: ev.reason.slice(0, 600) })
+            + (ev.by === 'human' ? pick('byHuman', lang) : '') }
+    // 'crew': written into the group for everyone to read, waking nobody.
+    case 'approved': return { target: 'crew', line: pick('approved', lang, { shot: ev.shot, pick: ev.pick }) }
     default: throw new Error(`unknown event ${ev.kind}`)
   }
 }
@@ -88,7 +93,7 @@ export function startNotifier({ quietMs = Number(process.env.NOTIFY_QUIET_MS || 
         // not receive last week's "candidates ready" as if it were news.
         if (!p?.notify_group) { await done('project has no notify_group'); await db.audit('studio', 'notify.skipped', r.project_id, false, 'no notify_group'); continue }
         if (!app || !token) { await done('APP_URL / STUDIO_EVENT_TOKEN not set'); continue }
-        const wake = r.target === 'human' ? [] : (await db.q('select agent_id from crew where role = $1 order by agent_id', [r.target])).rows.map(x => x.agent_id)
+        const wake = r.target === 'human' || r.target === 'crew' ? [] : (await db.q('select agent_id from crew where role = $1 order by agent_id', [r.target])).rows.map(x => x.agent_id)
         try {
           const res = await fetch(`${app}/api/events/group/${encodeURIComponent(p.notify_group)}`, {
             method: 'POST', signal: AbortSignal.timeout(15_000),
@@ -129,6 +134,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.equal(compose('human', [h.line], 'zh-Hans'), `@人类 ${h.line}`)
   a.equal(compose('reviewer', ['one']), 'one')
   a.equal(compose('cinematographer', ['one', 'two']), '- one\n- two', 'several lines, one message')
+  a.deepEqual(lineFor({ kind: 'approved', shot: 'X', pick: 2 }, 'zh-Hans'), { target: 'crew', line: 'X 已由人工通过（第 2 条）。' })
+  a.equal(compose('crew', ['one']), 'one', 'a notice for everyone: no @')
+  a.equal(lineFor({ kind: 'reject', shot: 'X', attempt: 1, route: 'prompt', goes_to: 'cinematographer', reason: 'r', by: 'human' }).line,
+    'X rejected (#1, prompt): r (rejected by a person)')
   a.equal(lineFor({ kind: 'round', shot: 'X', ok: 1, failed: 0 }, 'klingon').line.startsWith('Candidates'), true, 'unknown language → English')
   console.log('notify.mjs: all checks passed')
 }

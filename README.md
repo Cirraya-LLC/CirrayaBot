@@ -1,6 +1,9 @@
-# Multi-Agent
+# Multi-Agent — CirrayaBot Studio
 
-An open-source "AI coworker": a column of Agents and group chats on the left. Each Agent has
+An open-source AI film studio: a crew of AI coworkers (director, art director, cinematographer,
+reviewer…) making a film together, and a workbench where a person follows every shot and has the
+final say. Underneath it is a general "AI coworker" platform: a column of crew members and group
+chats on the left. Each Agent has
 its own persona, its own container and its own memory; put them in a group and they
 **hand the work to each other with @mentions** until a job is done, instead of each
 answering on their own.
@@ -52,6 +55,26 @@ the symptom is being stuck forever at "waiting for PostgreSQL…".
 
 **podman**: `./start.sh` detects it by itself and points the socket at podman's.
 The socket has to be running: `systemctl --user enable --now podman.socket`.
+
+### Modules, and the smallest machine it runs on
+
+Two parts are optional modules, set by `MODULES` in `.env` (comma-separated); change it and rerun
+`./start.sh`, which turns it into compose profiles and tells the app:
+
+| Module | What it is | Disk (its image, on top of the shared base) |
+| --- | --- | --- |
+| *(always)* | PostgreSQL + the platform | ~0.7 GB |
+| `studio` | the film studio: workbench, shots, Seedance / GPT image / ComfyUI, contact sheets (ffmpeg) | ~0.5 GB |
+| `dsh` | DeepSeek Harness, for crew members on `deepseek-*` models | ~0.45 GB |
+| `AGENT_TOOLS=on` | each crew member's own container with a shell and a browser | ~1.2 GB (one image) |
+
+The target minimum is **2 cores, 4 GB of memory, ~10 GB of disk** (with both modules, tools off).
+On a first run `start.sh` sizes `.env` to the machine: every service gets a memory ceiling
+(`DB_MEMORY`, `APP_MEMORY`, `STUDIO_MEMORY`, `DSH_MEMORY` — about 3.3 GB in all on a 4 GB box),
+agent containers get 1 GB / 1 CPU instead of 2 / 2, and below 2 GB it starts the chat alone.
+Values you set yourself are kept. Measured with the end-to-end suites running: ~400 MB for
+everything at the busiest moment; a contact sheet of eight 1080p HEVC takes peaked the studio at
+~150 MB. Building leaves a cache about as large as the images: `docker builder prune` returns it.
 
 ## Configuring model upstreams
 
@@ -175,7 +198,8 @@ python3 check-bots.py     # check the seed definitions in bots/
 
 The studio has its own self-tests (`node studio/<module>.mjs`) and two end-to-end checks against
 fakes: `studio/e2e.mjs` and `studio/e2e-platform.mjs` — see `CLAUDE.md` 2.28. DeepSeek Harness
-and the Keys panel have one too, against a running deployment: `node deploy/dsh/e2e.mjs <dir>`.
+and the Keys panel have one too, against a running deployment: `node deploy/dsh/e2e.mjs <dir>`, and so
+does the workbench: `node studio/e2e-workbench.mjs <dir>` (it leaves a small demo film behind).
 
 Without compose, pointing at an existing PostgreSQL:
 
@@ -190,6 +214,11 @@ reviewer (`studio/crew/`), working in a group against the **studio** service —
 Seedance video, GPT image / ComfyUI stills, contact sheets. The studio holds every model key; agents
 reach it only through the platform's `studio` tool, and each can do only its own job.
 
+0. With the `studio` module on (the default), the app opens on the **workbench**: a project, its shot
+   board (every shot by state), each shot's takes, contact sheets, prompt versions and review
+   history, the script cut into scenes, the bible (characters and locations) and the project's
+   settings. A person can **approve a take or reject a shot** there, with a reason and who fixes it
+   — the crew is told in its group exactly as when the reviewer does it. Generating stays the crew's.
 1. Model keys: sidebar → **Keys** (each card has a **Test** that costs nothing), or in `.env` before
    `./start.sh`. What the panel holds wins over `.env`; either way the keys live in the studio
    only — the panel's in the studio's own table, `.env`'s in the studio container's environment.
@@ -198,8 +227,8 @@ reach it only through the platform's `studio` tool, and each can do only its own
 2. Import the crew — 4 Agents, 5 skills, a group, their studio roles:
    `docker compose exec app node studio/crew/import.mjs` (safe to rerun; `--dry-run` shows the plan).
 3. In **Edit Agent**, give each one an upstream and a model (the reviewer's must accept images).
-4. In the **Studio** panel (sidebar), create the project and pick the crew's group as its notice group.
-   Locking characters and locations as final also happens there — only a person can.
+4. In the workbench, create the project and, in **Project settings**, pick the crew's group as its
+   notice group. Locking characters and locations as final is in the **Bible** — only a person can.
 
 Then post the script in the group. Generation is limited to 40 videos an hour and 4 at once per
 project (`SEEDANCE_PER_HOUR` / `SEEDANCE_CONCURRENT`, or per project in its settings). Studio files
@@ -225,6 +254,8 @@ work in the client, on the same data as the web UI. Details in `app/README.md`.
 
 - **Containers have no egress restrictions** — Agents can reach anything on the internet.
 - **DeepSeek Agents don't see images tools return**, and their replies aren't streamed token by token.
+- **1080p / 4K takes are 10-bit HEVC**, which many Chrome / Firefox setups can't play: the workbench
+  shows the last frame and a download link instead (720p takes, the default, are H.264).
 - **No multi-user**: one token, one data set, no account system.
 - `run.sh` / `bots.patch.yml` / `headless.patch.yml` are an earlier experiment running DeepSeek
   Harness, **not part of the product**, kept only for the record (the story is in `CLAUDE.md`

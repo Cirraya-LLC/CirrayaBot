@@ -4,10 +4,12 @@
 # on them (CLAUDE.md 2.9.3). The lockfile pins all ~560 packages; they ship prebuilt binaries, so
 # no compiler is needed.
 FROM node:24-slim
-RUN npm install -g --no-audit --no-fund pnpm@9.15.9
 WORKDIR /opt/dsh
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod --store-dir /tmp/pnpm-store && rm -rf /tmp/pnpm-store /root/.cache
+# pnpm is only the installer: it comes and goes in one layer (~35 MB less in the image).
+RUN npm install -g --no-audit --no-fund pnpm@9.15.9 \
+ && pnpm install --frozen-lockfile --prod --store-dir /tmp/pnpm-store \
+ && npm uninstall -g pnpm && npm cache clean --force && rm -rf /tmp/pnpm-store /root/.cache /root/.local
 COPY run.mjs ./
 # Runtimes run as an ordinary user, each in its own /tmp/dsh/<id> (deleted when the turn ends).
 USER node

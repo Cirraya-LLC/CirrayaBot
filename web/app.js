@@ -153,6 +153,7 @@ $('#q').oninput = e => { filter = e.target.value; renderConvs() }
 let shown = 0
 
 async function openConv(c) {
+  wsLeave()
   const ticket = ++shown
   cur = { kind: c.kind, id: c.id }
   const log = $('#log'); log.innerHTML = ''
@@ -1050,112 +1051,490 @@ async function loadBotSkills() {
 }
 $('#addsk').onclick = () => openSkills(null, cur ? [cur.id] : [])
 
-// ═══ Studio panel ═══
-// Setting up a film and locking what is final. Reviewing is the crew's work and happens in the
-// group; this panel only does what the studio reserves for a person (project settings, who is on
-// the crew, lock / unlock).
+// ═══ The film studio: the workbench ═══
+// With the studio configured the product opens here, on a project: its shot board, the script cut
+// into scenes, the bible (characters and locations, and locking them) and the project's settings.
+// The crew's chats stay in the list below the project; opening one leaves the workbench.
+// A person can review here (the boss, 2026-09-25): pick a take and approve it, or reject with a
+// reason and a route. The studio tells the crew exactly as when the reviewer does it. Generating
+// is not here — prompts and takes are the crew's work.
 const ROLES = ['director', 'art', 'cinematographer', 'reviewer']
+const STATUSES = ['planned', 'prompted', 'generating', 'review', 'rejected', 'approved', 'locked']
+const STATUS_COL = { planned: 'var(--dim2)', prompted: 'var(--chipink)', generating: 'var(--warn)', review: 'var(--accent)',
+  rejected: 'var(--bad)', approved: 'var(--ok)', locked: 'var(--ok)' }
 const stCall = async (action, args = {}) => {
   const r = await fetch(api('/api/studio/call'), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action, args }) })
   if (!r.ok) throw new Error(await errText(r))
   return r.json()
 }
-let stProjects = [], stShown = 0
-fetch(api('/api/studio/status')).then(r => r.json()).then(j => { $('#studiobtn').hidden = !j.enabled }).catch(() => {})
+const fileUrl = id => api(`/api/studio/file/${encodeURIComponent(id)}`)
+const WS = { on: false, projects: [], project: null, view: null, shot: null, scene: '', board: null, sig: '' }
+let wsTicket = 0
+const wsBody = () => $('#wsb')
+// Who did it, as a person reads it: the platform's names for agents, "a person" for the human actor.
+const actorName = a => a === 'human' ? t('ws.person') : String(a ?? '').startsWith('agent:') ? (bot(a.slice(6))?.name ?? a.slice(6))
+  : a === 'studio' ? t('st.speaker') : (a || '—')
+const stamp = d => (d ? new Date(d).toLocaleString(lang, { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '')
+const openImage = id => window.open(fileUrl(id), '_blank', 'noopener')
 
-async function openStudio(select = null) {
-  try { stProjects = await stCall('project.list') } catch (e) { alert(e.message); return }
-  const sel = $('#stproj')
-  sel.innerHTML = stProjects.length ? stProjects.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.id)})</option>`).join('')
-    : `<option value="">${esc(t('st.noProjects'))}</option>`
-  if (select) sel.value = select
-  $('#stbody').hidden = !stProjects.length
-  if (!$('#stdlg').open) $('#stdlg').showModal()
-  if (stProjects.length) await loadStudioProject(sel.value)
+/** Is the studio here? Shows the project block and loads the projects. */
+async function wsInit() {
+  const st = await fetch(api('/api/studio/status')).then(r => r.json()).catch(() => ({ enabled: false }))
+  WS.on = !!st.enabled
+  $('#proj').hidden = !WS.on
+  $('#convhead').hidden = !WS.on
+  if (!WS.on) return false
+  await wsProjects()
+  return true
 }
 
-async function loadStudioProject(id) {
-  const ticket = ++stShown                           // switching projects quickly: drop the late answer
-  let info, crew, chars, locs
-  try { [info, crew, chars, locs] = await Promise.all([stCall('project.info', { project: id }), stCall('crew.list'),
-    stCall('char.list', { project: id }), stCall('loc.list', { project: id })]) }
+async function wsProjects(select = null) {
+  try { WS.projects = await stCall('project.list') } catch { WS.projects = [] }
+  let saved = null
+  try { saved = localStorage.getItem('ma_project') } catch {}
+  const want = select ?? WS.project ?? saved
+  WS.project = WS.projects.some(p => p.id === want) ? want : WS.projects[0]?.id ?? null
+  $('#wsproj').innerHTML = (WS.projects.length
+    ? WS.projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
+    : `<option value="">${esc(t('ws.noProject'))}</option>`) + `<option value="+">${esc(t('ws.newProject'))}</option>`
+  $('#wsproj').value = WS.project ?? ''
+}
+$('#wsproj').onchange = e => {
+  if (e.target.value === '+') { e.target.value = WS.project ?? ''; wsNewProject(); return }
+  WS.project = e.target.value
+  try { localStorage.setItem('ma_project', WS.project) } catch {}
+  WS.scene = ''
+  wsShow(!WS.view || WS.view === 'shot' ? 'board' : WS.view)
+}
+async function wsNewProject() {
+  const pid = prompt(t('st.newIdPrompt'))?.trim(); if (!pid) return
+  const name = prompt(t('st.newNamePrompt'), pid)?.trim(); if (!name) return
+  try { await stCall('project.create', { id: pid, name, info: { lang: lang === 'en' ? 'en' : lang } }) }
   catch (e) { alert(e.message); return }
-  if (ticket !== stShown) return
-  $('#stname').value = info.name
+  await wsProjects(pid)
+  try { localStorage.setItem('ma_project', pid) } catch {}
+  wsShow('settings')
+}
+for (const b of document.querySelectorAll('#proj [data-view]')) b.onclick = () => wsShow(b.dataset.view)
+
+/** Into the workbench. The chat's current conversation is let go, so the list shows none selected. */
+async function wsShow(view, arg = null) {
+  const ticket = ++wsTicket
+  WS.view = view; WS.shot = view === 'shot' ? arg : null
+  cur = null; renderConvs()
+  $('main').classList.add('ws-on'); document.body.classList.add('ws-mode')
+  for (const b of document.querySelectorAll('#proj [data-view]')) b.classList.toggle('on', b.dataset.view === (view === 'shot' ? 'board' : view))
+  if (!WS.project) return wsNoProject()
+  try {
+    if (view === 'board') await wsBoard(ticket)
+    else if (view === 'shot') await wsShot(ticket, arg)
+    else if (view === 'script') await wsScript(ticket)
+    else if (view === 'bible') await wsBible(ticket)
+    else await wsSettings(ticket)
+  } catch (e) {
+    if (ticket !== wsTicket) return
+    wsBody().innerHTML = `<div class="wempty"><p>⚠ ${esc(e.message ?? e)}</p></div>`
+  }
+}
+function wsLeave() {
+  if (!WS.view) return
+  ++wsTicket
+  WS.view = null
+  $('main').classList.remove('ws-on'); document.body.classList.remove('ws-mode')
+  for (const b of document.querySelectorAll('#proj [data-view]')) b.classList.remove('on')
+}
+
+function wsHead(title, sub = '', { back = false, quota = null } = {}) {
+  const p = WS.projects.find(x => x.id === WS.project)
+  $('#wsh').innerHTML = `${back ? `<button class="btn back">${esc(t('ws.back'))}</button>` : ''}
+    <div style="min-width:0"><div class="t">${esc(title)}</div><small>${esc(sub || p?.name || '')}</small></div>
+    ${quota ? `<div class="quota${quota.used >= quota.per_hour ? ' w' : ''}" title="${esc(t('ws.quotaTip'))}">${esc(t('ws.quota', quota))}</div>` : ''}`
+  $('#wsh .back')?.addEventListener('click', () => wsShow('board'))
+}
+
+function wsNoProject() {
+  wsHead(t('ws.title'), ' ')
+  wsBody().innerHTML = `<div class="wempty"><h2>${esc(t('ws.welcome'))}</h2><p>${esc(t('ws.welcomeText'))}</p>
+    <button class="btn pri">${esc(t('ws.newProject'))}</button></div>`
+  wsBody().querySelector('button').onclick = wsNewProject
+}
+
+// ─── Board: every shot of the film, one column per state ───
+async function wsBoard(ticket) {
+  const b = await stCall('project.board', { project: WS.project })
+  if (ticket !== wsTicket) return
+  WS.board = b
+  wsBoardRender()
+}
+function wsBoardRender() {
+  const b = WS.board
+  wsHead(t('ws.board'), b.project.name, { quota: b.quota })
+  const box = wsBody(), keep = [box.scrollLeft, box.scrollTop]
+  box.innerHTML = ''
+  if (!b.seedance_ready) box.insertAdjacentHTML('beforeend', `<p class="lead" style="color:var(--warn)">${esc(t('ws.noSeedance'))}</p>`)
+  if (!b.shots.length) {
+    box.insertAdjacentHTML('beforeend', `<div class="wempty"><h2>${esc(t('ws.noShots'))}</h2>
+      <p>${esc(t(b.scenes.length ? 'ws.noShotsYet' : 'ws.noScenes'))}</p><button class="btn pri">${esc(t('ws.goScript'))}</button></div>`)
+    box.querySelector('.wempty button').onclick = () => wsShow('script')
+    return
+  }
+  if (WS.scene && !b.scenes.some(s => s.code === WS.scene)) WS.scene = ''
+  const chips = document.createElement('div'); chips.className = 'chips'
+  chips.innerHTML = [['', t('ws.allScenes')], ...b.scenes.map(s => [s.code, `${s.code}${s.title ? ` · ${s.title}` : ''}`])]
+    .map(([c, label]) => `<button class="chip${WS.scene === c ? ' on' : ''}" data-c="${esc(c)}">${esc(label)}</button>`).join('')
+  chips.onclick = e => { const c = e.target.closest('.chip'); if (c) { WS.scene = c.dataset.c; wsBoardRender() } }
+  box.appendChild(chips)
+  const kan = document.createElement('div'); kan.className = 'kanban'
+  for (const st of STATUSES) {
+    const shots = b.shots.filter(s => s.status === st && (!WS.scene || s.scene === WS.scene))
+    const col = document.createElement('div'); col.className = 'kcol'
+    col.innerHTML = `<h5><i style="background:${STATUS_COL[st]}"></i>${esc(t(`ws.st.${st}`))}<span>${shots.length}</span></h5>${shots.length ? '' : '<div class="none">—</div>'}`
+    for (const s of shots) {
+      const c = document.createElement('button'); c.className = 'card'
+      c.innerHTML = `${s.thumb ? `<img src="${fileUrl(s.thumb)}" alt="" loading="lazy">` : ''}
+        <div class="top2"><span class="code mono">${esc(s.code)}</span>${s.priority === 'hero' ? `<span class="badge hero">${esc(t('ws.hero'))}</span>` : ''}${
+          s.pending ? `<span class="badge">${esc(t('ws.pending', { n: s.pending }))}</span>` : ''}</div>
+        ${s.story_beat ? `<div class="beat">${esc(s.story_beat)}</div>` : ''}
+        <div class="meta">${s.duration_s ? `<span>${esc(t('ws.secs', { n: s.duration_s }))}</span>` : ''}${
+          s.candidates ? `<span>${esc(t('ws.takes', { n: s.candidates }))}</span>` : ''}${
+          s.rejections ? `<span style="color:var(--bad)">${esc(t('ws.rejections', { n: s.rejections, max: b.rejects_to_human }))}</span>` : ''}${
+          s.picked ? `<span style="color:var(--ok)">${esc(t('ws.pickedN', { n: s.picked }))}</span>` : ''}</div>`
+      c.onclick = () => wsShow('shot', s.code)
+      col.appendChild(c)
+    }
+    kan.appendChild(col)
+  }
+  box.appendChild(kan)
+  ;[box.scrollLeft, box.scrollTop] = keep
+}
+
+// ─── One shot: what it is, its takes, and the decision ───
+const shotSig = d => JSON.stringify([d.status, d.candidates.length, d.reviews.length, d.sheets.length, d.generations.map(g => g.status)])
+async function wsShot(ticket, code) {
+  const d = await stCall('shot.detail', { project: WS.project, shot: code })
+  if (ticket !== wsTicket) return
+  if (!WS.board) WS.board = await stCall('project.board', { project: WS.project }).catch(() => null)
+  if (ticket !== wsTicket) return
+  WS.sig = shotSig(d)
+  wsShotRender(d)
+}
+const DEF_KEYS = ['story_beat', 'duration_s', 'shot_size', 'angle', 'camera_move', 'characters', 'location', 'light', 'continuity']
+function defValue(k, v) {
+  if (k === 'characters') return (v ?? []).map(c => [c.name, c.look && `(${c.look})`, c.expr, c.action].filter(Boolean).join(' ')).join('\n')
+  if (k === 'continuity') return [v?.in_from && `${t('ws.def.in')} ${v.in_from}`, v?.out_to && `${t('ws.def.out')} ${v.out_to}`].filter(Boolean).join('\n')
+  if (k === 'duration_s') return t('ws.secs', { n: v })
+  return typeof v === 'object' ? JSON.stringify(v) : String(v)
+}
+function wsShotRender(d) {
+  const sceneLine = `${d.scene?.code ?? ''}${d.scene?.title ? ` · ${d.scene.title}` : ''}`
+  wsHead(d.code, sceneLine, { back: true, quota: WS.board?.quota })
+  const box = wsBody(); box.innerHTML = ''
+  box.insertAdjacentHTML('beforeend', `<div class="rowb" style="margin-bottom:16px">
+    <span class="badge" style="color:${STATUS_COL[d.status]}">● ${esc(t(`ws.st.${d.status}`))}</span>
+    ${d.priority === 'hero' ? `<span class="badge hero">${esc(t('ws.hero'))}</span>` : ''}
+    ${d.rejections ? `<span class="badge bad">${esc(t('ws.rejections', { n: d.rejections, max: d.rejects_to_human }))}</span>` : ''}
+    ${d.picked ? `<span class="badge ok">${esc(t('ws.pickedN', { n: d.picked }))}</span>` : ''}</div>`)
+
+  // The decision, when there is one to make.
+  if (d.status === 'review') box.appendChild(reviewBar(d))
+
+  // Takes, newest round first.
+  const sec = document.createElement('div'); sec.className = 'sec'
+  sec.innerHTML = `<h4>${esc(t('ws.candidates'))} <small>${esc(t('ws.candidatesHint'))}</small></h4>`
+  if (!d.candidates.length) sec.insertAdjacentHTML('beforeend', `<p class="lead">${esc(t(d.status === 'generating' ? 'ws.generatingNow' : 'ws.noTakes'))}</p>`)
+  const rounds = [...new Set(d.candidates.map(c => c.round))].reverse()
+  for (const r of rounds) {
+    const takes = d.candidates.filter(c => c.round === r)
+    sec.insertAdjacentHTML('beforeend', `<div class="rhint" style="margin:8px 0 6px">${esc(t('ws.round', {
+      model: takes[0].model, v: takes[0].prompt_version ?? '—', at: stamp(takes[0].created_at) }))}</div>`)
+    const grid = document.createElement('div'); grid.className = 'cands'
+    for (const c of takes) {
+      const el = document.createElement('div'); el.className = 'cand' + (d.picked === c.n ? ' picked' : '')
+      el.innerHTML = `<video controls preload="metadata" playsinline ${c.frame ? `poster="${fileUrl(c.frame)}"` : ''} src="${fileUrl(c.asset_id)}"></video>
+        <div class="row"><b class="mono">#${c.n}</b>${c.duration_ms ? `<span>${esc(t('ws.secs', { n: (c.duration_ms / 1000).toFixed(1) }))}</span>` : ''}${
+          c.width ? `<span>${c.width}×${c.height}</span>` : ''}${c.trim_to ? `<span title="${esc(t('ws.trimTip'))}">${esc(t('ws.trim', { n: c.trim_to }))}</span>` : ''}${
+          d.picked === c.n ? `<span class="badge ok">${esc(t('ws.picked'))}</span>` : ''}${
+          `<a class="dl" href="${fileUrl(c.asset_id)}" download="${esc(d.code)}-${c.n}.mp4">${esc(t('ws.download'))}</a>`}${
+          d.status === 'review' ? `<button class="btn pri">${esc(t('ws.approveThis'))}</button>` : ''}</div>`
+      el.querySelector('button')?.addEventListener('click', () => wsApprove(d, c.n))
+      // 1080p / 4K takes are 10-bit HEVC, which many browsers can't decode: show the last frame and
+      // say so, rather than a black box that looks like a broken take.
+      el.querySelector('video').addEventListener('error', e => {
+        const box = document.createElement('div'); box.className = 'noplay'
+        box.innerHTML = `${c.frame ? `<img src="${fileUrl(c.frame)}" alt="">` : ''}<small>${esc(t('ws.cantPlay'))}</small>`
+        e.target.replaceWith(box)
+      })
+      grid.appendChild(el)
+    }
+    sec.appendChild(grid)
+  }
+  box.appendChild(sec)
+
+  // The contact sheet the reviewer (or you) made.
+  if (d.sheets.length) {
+    const sh = document.createElement('div'); sh.className = 'sec sheet'
+    sh.innerHTML = `<h4>${esc(t('ws.sheet'))} <small>${esc(stamp(d.sheets[0].created_at))}</small></h4>
+      <img src="${fileUrl(d.sheets[0].id)}" alt="${esc(t('ws.sheet'))}" loading="lazy">`
+    sh.querySelector('img').onclick = () => openImage(d.sheets[0].id)
+    box.appendChild(sh)
+  }
+
+  // What the shot is.
+  const def = d.def ?? {}
+  const rows = DEF_KEYS.filter(k => def[k] != null && def[k] !== '' && !(Array.isArray(def[k]) && !def[k].length))
+  const dsec = document.createElement('div'); dsec.className = 'sec'
+  dsec.innerHTML = `<h4>${esc(t('ws.definition'))}</h4><dl class="kv">${rows.map(k =>
+    `<dt>${esc(t(`ws.def.${k}`))}</dt><dd>${esc(defValue(k, def[k]))}</dd>`).join('')}</dl>
+    <details style="margin-top:8px"><summary class="rhint" style="cursor:pointer">${esc(t('ws.rawJson'))}</summary>
+    <pre class="rhint mono" style="white-space:pre-wrap">${esc(JSON.stringify(def, null, 2))}</pre></details>`
+  box.appendChild(dsec)
+
+  // Every prompt version, newest first.
+  const psec = document.createElement('div'); psec.className = 'sec'
+  psec.innerHTML = `<h4>${esc(t('ws.prompts'))} <small>${esc(t('ws.promptsHint'))}</small></h4>` +
+    (d.prompts.length ? '' : `<p class="lead">${esc(t('ws.noPrompt'))}</p>`)
+  for (const [i, p] of d.prompts.entries()) {
+    const v = document.createElement('div'); v.className = 'ver' + (i === 0 ? ' now' : '')
+    v.innerHTML = `<div class="who">v${p.version} · ${esc(actorName(p.created_by))} · ${esc(stamp(p.created_at))}${p.note ? ` · ${esc(p.note)}` : ''}</div>
+      <pre></pre>${p.refs?.length ? `<div class="thumbs" style="margin-top:6px">${p.refs.map(id => `<img src="${fileUrl(id)}" alt="" loading="lazy" data-id="${esc(id)}">`).join('')}</div>` : ''}`
+    v.querySelector('pre').textContent = p.text
+    v.querySelectorAll('img[data-id]').forEach(img => { img.onclick = () => openImage(img.dataset.id) })
+    psec.appendChild(v)
+  }
+  box.appendChild(psec)
+
+  // The review history.
+  if (d.reviews.length) {
+    const rsec = document.createElement('div'); rsec.className = 'sec'
+    rsec.innerHTML = `<h4>${esc(t('ws.reviews'))}</h4>`
+    for (const r of [...d.reviews].reverse()) {
+      const el = document.createElement('div'); el.className = `rev ${r.verdict}`
+      el.innerHTML = `<div class="who">${esc(actorName(r.reviewer))} · ${esc(stamp(r.created_at))}</div><b></b><div class="txt"></div>`
+      el.querySelector('b').textContent = r.verdict === 'approve' ? t('ws.approvedN', { n: r.pick })
+        : t('ws.rejectedN', { n: r.attempt, route: t(`ws.route.${r.route}`) })
+      el.querySelector('.txt').textContent = [r.reason, r.note].filter(Boolean).join('\n')
+      rsec.appendChild(el)
+    }
+    box.appendChild(rsec)
+  }
+
+  // Every generation, including the failures and why.
+  if (d.generations.length) {
+    const gsec = document.createElement('details'); gsec.className = 'sec'
+    gsec.innerHTML = `<summary style="cursor:pointer;font-size:13px;font-weight:600">${esc(t('ws.generations', { n: d.generations.length }))}</summary>
+      <table class="gens" style="margin-top:8px"><tr><th>${esc(t('ws.g.status'))}</th><th>${esc(t('ws.g.model'))}</th><th>${esc(t('ws.g.prompt'))}</th><th>${esc(t('ws.g.by'))}</th><th>${esc(t('ws.g.at'))}</th><th></th></tr>
+      ${d.generations.map(g => `<tr><td>${esc(t(`ws.gs.${g.status}`))}</td><td class="mono">${esc(g.model)}</td><td>v${g.prompt_version ?? '—'}</td>
+        <td>${esc(actorName(g.requested_by))}</td><td>${esc(stamp(g.created_at))}${g.duration_ms ? ` · ${Math.round(g.duration_ms / 1000)}s` : ''}</td>
+        <td class="err">${esc(g.error)}</td></tr>`).join('')}</table>`
+    box.appendChild(gsec)
+  }
+}
+
+/** The bar above the takes when a shot waits for a verdict: make a sheet, or reject. Approving is per take. */
+function reviewBar(d) {
+  const bar = document.createElement('div'); bar.className = 'sec'
+  bar.innerHTML = `<div class="rform" style="border-color:var(--accent)"><b>${esc(t('ws.reviewTitle'))}</b>
+    <p class="rhint" style="margin:6px 0 10px">${esc(t('ws.reviewHint'))}</p>
+    <div class="rowb"><button class="btn" data-a="sheet">${esc(t('ws.makeSheet'))}</button>
+    <button class="btn" data-a="reject" style="color:var(--bad)">${esc(t('ws.reject'))}</button></div></div>`
+  bar.querySelector('[data-a=sheet]').onclick = async e => {
+    e.target.disabled = true; e.target.textContent = t('ws.making')
+    try { await stCall('shot.sheet', { project: WS.project, shot: d.code }); await wsShow('shot', d.code) }
+    catch (err) { alert(err.message); e.target.disabled = false; e.target.textContent = t('ws.makeSheet') }
+  }
+  bar.querySelector('[data-a=reject]').onclick = () => {
+    if (bar.querySelector('.rjf')) return
+    const next = d.rejections + 1
+    const f = document.createElement('div'); f.className = 'rform rjf'
+    f.innerHTML = `<b>${esc(t('ws.rejectTitle', { shot: d.code }))}</b>
+      <p class="rhint" style="margin:6px 0 10px;${next >= d.rejects_to_human ? 'color:var(--warn)' : ''}">${esc(t(next >= d.rejects_to_human ? 'ws.rejectLast' : 'ws.rejectNth', { n: next, max: d.rejects_to_human }))}</p>
+      <textarea class="fi" placeholder="${esc(t('ws.reasonPh'))}"></textarea>
+      <select class="fi">${['prompt', 'asset', 'plan'].map(r => `<option value="${r}">${esc(t(`ws.route.${r}`))}</option>`).join('')}</select>
+      <div class="rowb"><button class="btn" data-a="cancel">${esc(t('common.cancel'))}</button>
+      <button class="btn pri" data-a="send">${esc(t('ws.rejectSend'))}</button></div>`
+    f.querySelector('[data-a=cancel]').onclick = () => f.remove()
+    f.querySelector('[data-a=send]').onclick = async () => {
+      const reason = f.querySelector('textarea').value.trim()
+      if (reason.length < 15) { alert(t('ws.reasonShort')); return }
+      try {
+        await stCall('shot.reject', { project: WS.project, shot: d.code, reason, route: f.querySelector('select').value })
+        await wsShow('shot', d.code)
+      } catch (e) { alert(e.message) }
+    }
+    bar.appendChild(f)
+    f.querySelector('textarea').focus()
+  }
+  return bar
+}
+async function wsApprove(d, n) {
+  if (!confirm(t('ws.confirmApprove', { shot: d.code, n }))) return
+  try { await stCall('shot.approve', { project: WS.project, shot: d.code, pick: n }); await wsShow('shot', d.code) }
+  catch (e) { alert(e.message) }
+}
+
+// ─── Script: the scenes the film is cut into, each with its slice of the script ───
+async function wsScript(ticket) {
+  const scenes = await stCall('scene.list', { project: WS.project })
+  if (ticket !== wsTicket) return
+  wsHead(t('ws.script'))
+  const box = wsBody(); box.innerHTML = `<p class="lead">${esc(t('ws.scriptLead'))}</p>`
+  // A new scene, by a person: code, title and its text, exactly as written.
+  const add = document.createElement('details'); add.className = 'scr'
+  add.innerHTML = `<summary><b>＋ ${esc(t('ws.addScene'))}</b></summary>
+    <div class="brow"><input class="fi mono" placeholder="${esc(t('ws.sceneCodePh'))}" style="max-width:160px"><input class="fi" placeholder="${esc(t('ws.sceneTitlePh'))}"></div>
+    <textarea class="fi" style="min-height:160px" placeholder="${esc(t('ws.sceneScriptPh'))}"></textarea>
+    <div class="rowb"><button class="btn pri">${esc(t('ws.addScene'))}</button></div>`
+  add.querySelector('.btn.pri').onclick = async () => {
+    const [code, title] = [...add.querySelectorAll('input')].map(i => i.value.trim())
+    const script = add.querySelector('textarea').value.trim()
+    if (!code || !script) { alert(t('ws.sceneNeed')); return }
+    try { await stCall('scene.add', { project: WS.project, code, title, script, ord: scenes.length }); wsShow('script') }
+    catch (e) { alert(e.message) }
+  }
+  box.appendChild(add)
+  if (!scenes.length) box.insertAdjacentHTML('beforeend', `<p class="lead">${esc(t('ws.noScenesYet'))}</p>`)
+  for (const sc of scenes) {
+    const el = document.createElement('details'); el.className = 'scr'
+    el.innerHTML = `<summary><b class="mono">${esc(sc.code)}</b><span>${esc(sc.title)}</span>
+      <span class="badge" style="margin-left:auto">${esc(t('ws.sceneShots', { ok: sc.approved, n: sc.shots }))}</span>
+      ${sc.locked ? `<span class="badge ok">${esc(t('ws.sceneLocked'))}</span>` : ''}</summary><div class="body"></div>`
+    el.ontoggle = async () => {
+      if (!el.open || el.dataset.loaded) return
+      el.dataset.loaded = '1'
+      const full = await stCall('scene.show', { project: WS.project, scene: sc.code }).catch(e => ({ error: e.message }))
+      const body = el.querySelector('.body')
+      if (full.error) { body.textContent = full.error; return }
+      body.innerHTML = `<pre></pre>
+        ${full.shots.length ? `<div class="chips" style="margin:12px 0 4px">${full.shots.map(s =>
+          `<button class="chip" data-shot="${esc(s.code)}" title="${esc(s.story_beat ?? '')}"><span style="color:${STATUS_COL[s.status]}">●</span> ${esc(s.code)}</button>`).join('')}</div>` : `<p class="rhint" style="margin-top:10px">${esc(t('ws.sceneNoShots'))}</p>`}
+        <div class="rowb" style="margin-top:10px">${sc.locked ? '' : `<button class="btn" data-a="edit">${esc(t('ws.editScript'))}</button>`}
+        ${!sc.locked && sc.shots && sc.approved === sc.shots ? `<button class="btn pri" data-a="lock">${esc(t('ws.lockScene'))}</button>` : ''}</div>`
+      body.querySelector('pre').textContent = full.script
+      body.querySelectorAll('[data-shot]').forEach(b => { b.onclick = () => wsShow('shot', b.dataset.shot) })
+      body.querySelector('[data-a=lock]')?.addEventListener('click', async () => {
+        if (!confirm(t('ws.confirmLockScene', { code: sc.code }))) return
+        try { await stCall('shot.lock', { project: WS.project, scene: sc.code }); wsShow('script') } catch (e) { alert(e.message) }
+      })
+      body.querySelector('[data-a=edit]')?.addEventListener('click', () => {
+        body.innerHTML = `<input class="fi" value="${esc(sc.title)}"><textarea class="fi" style="min-height:220px"></textarea>
+          <div class="rowb"><button class="btn" data-a="cancel">${esc(t('common.cancel'))}</button><button class="btn pri" data-a="save">${esc(t('common.save'))}</button></div>`
+        body.querySelector('textarea').value = full.script
+        body.querySelector('[data-a=cancel]').onclick = () => wsShow('script')
+        body.querySelector('[data-a=save]').onclick = async () => {
+          try {
+            await stCall('scene.edit', { project: WS.project, scene: sc.code, title: body.querySelector('input').value.trim(), script: body.querySelector('textarea').value })
+            wsShow('script')
+          } catch (e) { alert(e.message) }
+        }
+      })
+    }
+    box.appendChild(el)
+  }
+}
+
+// ─── Bible: characters (and their looks) and locations, and locking them as final ───
+async function wsBible(ticket) {
+  const [chars, locs] = await Promise.all([stCall('char.list', { project: WS.project }), stCall('loc.list', { project: WS.project })])
+  if (ticket !== wsTicket) return
+  wsHead(t('ws.bible'))
+  const box = wsBody(); box.innerHTML = `<p class="lead">${esc(t('ws.bibleLead'))}</p>`
+  if (!chars.length && !locs.length) { box.insertAdjacentHTML('beforeend', `<p class="lead">${esc(t('st.nothingYet'))}</p>`); return }
+  const item = (grid, label, status, onToggle, refs) => {
+    const el = document.createElement('div'); el.className = 'bitem'
+    el.innerHTML = `<div class="rowb"><b>${esc(label)}</b><span class="badge${status === 'locked' ? ' ok' : ''}">${esc(t(status === 'locked' ? 'st.locked' : 'st.draft'))}</span>
+      <button class="btn" style="margin-left:auto">${esc(t(status === 'locked' ? 'st.unlock' : 'st.lock'))}</button></div><div class="thumbs"></div>`
+    el.querySelector('button').onclick = async () => {
+      if (status !== 'locked' && !confirm(t('st.confirmLock', { name: label }))) return
+      try { await onToggle(status !== 'locked'); wsShow('bible') } catch (e) { alert(e.message) }
+    }
+    // You lock what you have looked at: the references it would freeze, beside the button.
+    stCall(refs[0], { project: WS.project, ...refs[1], limit: 6 }).then(r => {
+      if (ticket !== wsTicket) return
+      el.querySelector('.thumbs').innerHTML = (r.refs ?? []).map(a =>
+        `<img src="${fileUrl(a.id)}" alt="${esc(a.tags.join(' '))}" title="${esc(a.tags.join(' '))}" data-id="${esc(a.id)}" loading="lazy">`).join('')
+        || `<small class="rhint" style="margin:0">${esc(t('st.noRefs'))}</small>`
+      el.querySelectorAll('img[data-id]').forEach(img => { img.onclick = () => openImage(img.dataset.id) })
+    }).catch(() => {})
+    grid.appendChild(el)
+  }
+  const section = (title, fill) => {
+    const s = document.createElement('div'); s.className = 'sec'
+    s.innerHTML = `<h4>${esc(title)}</h4><div class="bible"></div>`
+    fill(s.querySelector('.bible')); box.appendChild(s)
+  }
+  if (chars.length) section(t('ws.characters'), grid => {
+    for (const c of chars) {
+      item(grid, c.name, c.status, lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: WS.project, name: c.name }), ['char.refs', { name: c.name }])
+      for (const l of c.looks) item(grid, `${c.name} / ${l.name}`, l.status,
+        lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: WS.project, name: c.name, look: l.name }), ['char.refs', { name: c.name, look: l.name }])
+    }
+  })
+  if (locs.length) section(t('ws.locations'), grid => {
+    for (const l of locs) item(grid, l.name, l.status, lock => stCall(lock ? 'loc.lock' : 'loc.unlock', { project: WS.project, name: l.name }), ['loc.refs', { name: l.name }])
+  })
+}
+
+// ─── Settings: the project itself and who is on the crew ───
+async function wsSettings(ticket) {
+  if (!WS.project) return wsNoProject()
+  const [info, crew] = await Promise.all([stCall('project.info', { project: WS.project }), stCall('crew.list')])
+  if (ticket !== wsTicket) return
+  wsHead(t('ws.settings'))
+  const box = wsBody()
   const { lang: plang = 'en', ...rest } = info.info ?? {}
-  $('#stlang').innerHTML = ['en', 'zh-Hans', 'zh-Hant'].map(l => `<option value="${l}">${esc(t(`st.lang.${l}`))}</option>`).join('')
-  $('#stlang').value = ['en', 'zh-Hans', 'zh-Hant'].includes(plang) ? plang : 'en'
   const groups = CONVS.filter(c => c.kind === 'group')
-  $('#stgroup').innerHTML = `<option value="">${esc(t('st.noGroup'))}</option>` +
-    groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('')
+  box.innerHTML = `<div style="max-width:720px">
+    <div class="sec"><h4>${esc(t('st.projectSec'))} <small class="mono">${esc(info.id)}</small></h4>
+      <input class="fi" id="stname" placeholder="${esc(t('st.namePh'))}">
+      <div class="brow"><select class="fi" id="stlang" title="${esc(t('st.langTitle'))}">${['en', 'zh-Hans', 'zh-Hant'].map(l => `<option value="${l}">${esc(t(`st.lang.${l}`))}</option>`).join('')}</select>
+        <select class="fi" id="stgroup" title="${esc(t('st.groupTitle'))}"><option value="">${esc(t('st.noGroup'))}</option>${groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('')}</select></div>
+      <small class="rhint">${esc(t('st.groupHint'))}</small>
+      <textarea class="fi mono" id="stinfo" rows="6" spellcheck="false" placeholder="${esc(t('st.infoPh'))}"></textarea>
+      <small class="rhint">${esc(t('st.infoHint'))}</small>
+      <div class="rowb"><button class="btn pri" id="stsave">${esc(t('common.save'))}</button><button class="btn" id="stnew">${esc(t('ws.newProject'))}</button></div></div>
+    <div class="sec"><h4>${esc(t('st.crewSec'))}</h4><small class="rhint">${esc(t('st.crewHint'))}</small><div id="stcrew"></div></div></div>`
+  $('#stname').value = info.name
+  $('#stlang').value = ['en', 'zh-Hans', 'zh-Hant'].includes(plang) ? plang : 'en'
   $('#stgroup').value = groups.some(g => g.id === info.notify_group) ? info.notify_group : ''
   $('#stinfo').value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''
-
-  // Crew: one role per agent, saved as soon as it is picked.
+  $('#stnew').onclick = wsNewProject
+  $('#stsave').onclick = async () => {
+    let extra = {}
+    if ($('#stinfo').value.trim()) {
+      try { extra = JSON.parse($('#stinfo').value) } catch { alert(t('st.infoBad')); return }
+      if (!extra || typeof extra !== 'object' || Array.isArray(extra)) { alert(t('st.infoBad')); return }
+    }
+    try {
+      await stCall('project.edit', { project: WS.project, name: $('#stname').value.trim(), notify_group: $('#stgroup').value, info: { ...extra, lang: $('#stlang').value } })
+      await wsProjects(WS.project); wsShow('settings')
+    } catch (e) { alert(e.message) }
+  }
+  // One role per crew member, saved as soon as it is picked.
   const roleOf = new Map(crew.map(c => [c.agent_id, c.role]))
-  const box = $('#stcrew'); box.innerHTML = ''
   for (const b of BOTS) {
-    const row = document.createElement('div'); row.className = 'prow'
-    row.style.flexWrap = 'nowrap'
-    row.innerHTML = `<span style="flex:1;min-width:0">${esc(b.name)}</span><select style="width:200px;flex:0 0 200px;margin:0">${['', ...ROLES]
-      .map(r => `<option value="${r}">${esc(t(r ? `st.role.${r}` : 'st.role.none'))}</option>`).join('')}</select>`
+    const row = document.createElement('div'); row.className = 'mem'; row.style.padding = '6px 0'
+    row.innerHTML = `<div class="av" style="background:${col(b.color)}">${esc(b.name.slice(0, 1))}</div><span style="flex:1;min-width:0">${esc(b.name)}</span>
+      <select class="fi" style="width:200px;margin:0">${['', ...ROLES].map(r => `<option value="${r}">${esc(t(r ? `st.role.${r}` : 'st.role.none'))}</option>`).join('')}</select>`
     const s = row.querySelector('select'); s.value = roleOf.get(b.id) ?? ''
     s.onchange = async () => {
       try { await stCall('crew.set', { agent_id: b.id, role: s.value || null }) }
       catch (e) { alert(e.message); s.value = roleOf.get(b.id) ?? '' }
     }
-    box.appendChild(row)
+    $('#stcrew').appendChild(row)
   }
-
-  // Locks: characters (with their looks) and locations, each with its current references.
-  const locks = $('#stlocks'); locks.innerHTML = ''
-  if (!chars.length && !locs.length) locks.innerHTML = `<small class="rhint">${esc(t('st.nothingYet'))}</small>`
-  const lockRow = (label, status, onToggle, refsArgs) => {
-    const row = document.createElement('div'); row.className = 'pitem'; row.style.cursor = 'default'
-    row.innerHTML = `<div class="pn"><b>${esc(label)} <span class="st" style="font-size:10.5px;font-weight:400;color:${status === 'locked' ? 'var(--ok)' : 'var(--dim)'}">· ${
-      esc(t(status === 'locked' ? 'st.locked' : 'st.draft'))}</span></b><div class="thumbs" style="display:flex;gap:4px;margin-top:6px"></div></div>
-      <button class="btn">${esc(t(status === 'locked' ? 'st.unlock' : 'st.lock'))}</button>`
-    row.querySelector('button').onclick = async () => {
-      if (status !== 'locked' && !confirm(t('st.confirmLock', { name: label }))) return
-      try { await onToggle(status !== 'locked'); await loadStudioProject(id) } catch (e) { alert(e.message) }
-    }
-    // Thumbnails of what would become final: you lock what you have looked at.
-    stCall(refsArgs[0], { project: id, ...refsArgs[1], limit: 4 }).then(r => {
-      if (ticket !== stShown) return
-      row.querySelector('.thumbs').innerHTML = (r.refs ?? []).map(a =>
-        `<img src="${api(`/api/studio/file/${a.id}`)}" alt="${esc(a.tags.join(' '))}" title="${esc(a.tags.join(' '))}" style="height:64px;border-radius:6px;background:var(--field)">`).join('')
-        || `<small class="rhint" style="margin:0">${esc(t('st.noRefs'))}</small>`
-    }).catch(() => {})
-    locks.appendChild(row)
-  }
-  for (const c of chars) {
-    lockRow(c.name, c.status, lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: id, name: c.name }), ['char.refs', { name: c.name }])
-    for (const l of c.looks) lockRow(`${c.name} / ${l.name}`, l.status,
-      lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: id, name: c.name, look: l.name }), ['char.refs', { name: c.name, look: l.name }])
-  }
-  for (const l of locs) lockRow(l.name, l.status, lock => stCall(lock ? 'loc.lock' : 'loc.unlock', { project: id, name: l.name }), ['loc.refs', { name: l.name }])
 }
 
-$('#studiobtn').onclick = () => openStudio()
-$('#stclose').onclick = () => $('#stdlg').close()
-$('#stproj').onchange = () => loadStudioProject($('#stproj').value)
-$('#stnew').onclick = async () => {
-  const pid = prompt(t('st.newIdPrompt'))?.trim(); if (!pid) return
-  const name = prompt(t('st.newNamePrompt'), pid)?.trim(); if (!name) return
-  try { await stCall('project.create', { id: pid, name, info: { lang: lang === 'en' ? 'en' : lang } }); await openStudio(pid) }
-  catch (e) { alert(e.message) }
-}
-$('#stsave').onclick = async () => {
-  let rest = {}
-  if ($('#stinfo').value.trim()) {
-    try { rest = JSON.parse($('#stinfo').value) } catch { alert(t('st.infoBad')); return }
-    if (!rest || typeof rest !== 'object' || Array.isArray(rest)) { alert(t('st.infoBad')); return }
-  }
-  try {
-    await stCall('project.edit', { project: $('#stproj').value, name: $('#stname').value.trim(),
-      notify_group: $('#stgroup').value, info: { ...rest, lang: $('#stlang').value } })
-    await openStudio($('#stproj').value)
-  } catch (e) { alert(e.message) }
+/** Called by the 15-second poll: keep the board current, and a shot's page when something changed. */
+async function wsPoll() {
+  if (!WS.view || document.hidden) return
+  if (WS.view === 'board') return wsBoard(wsTicket).catch(() => {})
+  if (WS.view !== 'shot') return
+  // Never under someone: not while a take is playing or a rejection is being written.
+  if ([...document.querySelectorAll('#wsb video')].some(v => !v.paused) || document.querySelector('#wsb .rjf')) return
+  const ticket = wsTicket
+  const d = await stCall('shot.detail', { project: WS.project, shot: WS.shot }).catch(() => null)
+  if (!d || ticket !== wsTicket || shotSig(d) === WS.sig) return
+  WS.sig = shotSig(d); wsShotRender(d)
 }
 
 // ═══ Keys ═══
@@ -1328,6 +1707,7 @@ $('#rrun').onclick = async () => {
 // and redraw the open conversation on new messages. Not while busy — a reply is streaming.
 setInterval(async () => {
   if (busy || document.hidden || $('dialog[open]')) return
+  wsPoll()
   const before = cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)?.at
   CONVS = await fetch(api('/api/conversations')).then(r => r.json()).catch(() => CONVS)
   renderConvs()
@@ -1349,7 +1729,9 @@ async function reload() {
 ;(async () => {
   try {
     await reload()
-    if (CONVS.length) openConv(CONVS[0])
+    // A film studio opens on its project; without the studio configured it is the chat as before.
+    if (await wsInit()) wsShow('board')
+    else if (CONVS.length) openConv(CONVS[0])
     await loadProvs()
     if (!PROVS.length) { fillProv(null); $('#pdlg').showModal()
       hint(t('p.first')) }

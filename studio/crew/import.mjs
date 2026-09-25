@@ -123,7 +123,7 @@ async function main(o) {
   console.log(`\nGroup: ${o.group} (${groupId})`)
   console.log('\nNext, by hand (these are yours to choose):')
   for (const a of agents) console.log(`  - Edit Agent ${a.name}: pick an upstream and a model — suggested: ${a.upstream || '—'}`)
-  console.log(`  - Studio panel: create the project, set its notice group to "${o.group}" and its notice language`)
+  console.log(`  - Workbench → Project settings: create the project, set its notice group to "${o.group}" and its notice language`)
 }
 
 // ---------- self-test ----------

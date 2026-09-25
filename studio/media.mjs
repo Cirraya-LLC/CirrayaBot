@@ -14,6 +14,9 @@ import { mkdtemp, rm, readFile, writeFile, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
+// The labels carry character names, which are Chinese more often than not: DejaVu has no CJK and
+// drew 蛮吉 as boxes, on the sheet the reviewer judges. The image sets STUDIO_FONT to WenQuanYi Micro
+// Hei (~5 MB, Latin and CJK); DejaVu stays the fallback for running this outside the image.
 export const FONT = process.env.STUDIO_FONT || '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 const CELL_W = 320, CELL_H = 180, PER_ROW = 4
 export const MAX_ROWS = 8
