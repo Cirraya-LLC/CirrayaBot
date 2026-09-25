@@ -47,7 +47,7 @@ CirrayaBot 上的 AI 剧组：4 个 agent + 5 个 skill，配合 `studio` 片场
 | 林野 | 全部读；`shot gen`；`shot prompt` |
 | 严青 | 全部读；`shot sheet`；`shot approve`；`shot reject`；`review *` |
 
-`char lock` / `loc lock`（定稿）和项目设定修改只有人类能做，在 Web UI 的「片场」面板里操作。
+`char lock` / `loc lock`（定稿）和项目设定修改只有人类能做，在 Web UI 的片场工作台里操作（「设定库」锁定，「项目设置」改项目）。人也可以在工作台的镜头页直接通过 / 打回，剧组会在群里收到通知。
 
 ## 导入方式
 
@@ -60,4 +60,4 @@ docker compose exec app node studio/crew/import.mjs --dry-run  # 只看会做什
 
 可以重复运行：已有的 agent 只更新名字、职位和性格描述，**不动你选的上游和模型**；skill 按名字更新。
 导入的 agent 没有模型——按上表的「建议上游」，在「编辑 Agent」里给每个人选好上游和模型，
-审片（严青）的模型必须支持图片输入。然后在「片场」面板里建项目，通知群选这个群。
+审片（严青）的模型必须支持图片输入。然后在片场工作台里建项目，在「项目设置」里把通知群选成这个群。

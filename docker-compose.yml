@@ -1,6 +1,13 @@
 # One command brings up everything: PostgreSQL + Multi-Agent.
-#   ./start.sh            the first time (generates .env and the access token)
+#   ./start.sh            the first time (generates .env and the access token), and after changing MODULES
 #   docker compose up -d  afterwards
+#
+# Two parts are optional modules (compose profiles), chosen by MODULES in .env: `studio` (the film
+# studio) and `dsh` (DeepSeek Harness). Without them it is db + app. start.sh writes MODULES,
+# COMPOSE_PROFILES and the variables that tell the app which modules exist; set MODULES and rerun it.
+#
+# Memory: every service has a ceiling (the *_MEMORY variables), sized by start.sh to the machine —
+# on a 4 GB box they add up to about 3.3 GB, so one runaway part can't take the others down with it.
 #
 # podman: ./start.sh detects it and uses podman compose; it also points DOCKER_SOCK at
 # podman's socket, so the docker client in the container still works.
@@ -10,6 +17,9 @@ services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
+    # Small by default: the two pools together use 16 connections.
+    command: ["postgres", "-c", "max_connections=40", "-c", "shared_buffers=${PG_SHARED_BUFFERS:-128MB}"]
+    mem_limit: ${DB_MEMORY:-768m}
     environment:
       POSTGRES_USER: multiagent
       POSTGRES_DB: multiagent
@@ -26,6 +36,7 @@ services:
   app:
     build: .
     restart: unless-stopped
+    mem_limit: ${APP_MEMORY:-768m}
     depends_on:
       db:
         condition: service_healthy
@@ -55,7 +66,10 @@ services:
       BOT_LLM_CONTEXT: ${BOT_LLM_CONTEXT:-}
       # The studio (below). The app creates the studio's database role from this password,
       # and is the only thing that holds the token that talks to it.
-      STUDIO_URL: http://studio:8090
+      # A heap ceiling below the container's, so Node collects instead of being OOM-killed.
+      NODE_OPTIONS: --max-old-space-size=${APP_HEAP_MB:-512}
+      # Which optional modules this deployment has (start.sh writes these from MODULES; empty = off).
+      STUDIO_URL: ${STUDIO_URL:-}
       STUDIO_TOKEN: ${STUDIO_TOKEN:?run ./start.sh first to generate .env}
       STUDIO_DB_PASSWORD: ${STUDIO_DB_PASSWORD:?run ./start.sh first to generate .env}
       # The other direction: the studio posts "candidates ready" into a group with this token. It opens
@@ -63,7 +77,7 @@ services:
       STUDIO_EVENT_TOKEN: ${STUDIO_EVENT_TOKEN:?run ./start.sh first to generate .env}
       # DeepSeek Harness (below): agents whose model is deepseek-* run their turns there. The app
       # serves their tools on DSH_MCP_PORT, which nothing publishes — only the dsh container reaches it.
-      DSH_CONTAINER: ${AGENT_PREFIX:-ma}-dsh
+      DSH_CONTAINER: ${DSH_CONTAINER:-}
       DSH_MCP_PORT: 8081
       DSH_MCP_URL: http://app:8081/mcp
     volumes:
@@ -75,7 +89,9 @@ services:
   # Seedance / GPT image / ComfyUI live here and nowhere else.
   studio:
     build: ./studio
+    profiles: [studio]
     restart: unless-stopped
+    mem_limit: ${STUDIO_MEMORY:-1g}
     depends_on:
       # the app creates the studio's database role on startup
       app:
@@ -86,6 +102,7 @@ services:
       APP_URL: http://app:8080
       STUDIO_EVENT_TOKEN: ${STUDIO_EVENT_TOKEN}
       NOTIFY_QUIET_MS: ${NOTIFY_QUIET_MS:-15000}
+      NODE_OPTIONS: --max-old-space-size=${STUDIO_HEAP_MB:-512}
       # Model keys: here and nowhere else (not the app, not any agent container).
       SEEDANCE_BASE_URL: ${SEEDANCE_BASE_URL:-}
       SEEDANCE_API_KEY: ${SEEDANCE_API_KEY:-}
@@ -110,7 +127,10 @@ services:
   # are global on the host, hence AGENT_PREFIX, like the agent containers.
   dsh:
     build: ./deploy/dsh
+    profiles: [dsh]
     restart: unless-stopped
+    # Each turn is a node process of ~150–250 MB; this ceiling is what several at once may use.
+    mem_limit: ${DSH_MEMORY:-1g}
     container_name: ${AGENT_PREFIX:-ma}-dsh
 
 volumes:

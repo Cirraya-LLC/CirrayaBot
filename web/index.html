@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Multi-Agent</title>
+<title>CirrayaBot Studio</title>
 <script>
   // Before first paint: a deferred module would show a dark flash in light mode,
   // and the sidebar would appear wide and then snap.
@@ -11,7 +11,9 @@
     var t = localStorage.getItem('ma_theme') || 'system'
     document.documentElement.dataset.theme =
       t === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : t
-    if (localStorage.getItem('ma_rail') === '1') document.documentElement.classList.add('rail')
+    // A narrow window starts with the rail, unless the person expanded it there before.
+    var rail = localStorage.getItem('ma_rail')
+    if (rail === '1' || (rail === null && innerWidth < 760)) document.documentElement.classList.add('rail')
   } catch (e) {}
 </script>
 <style>
@@ -135,9 +137,20 @@
   .fitem b{width:22px;height:22px;border-radius:6px;background:var(--chip);display:grid;place-items:center;
            font-size:11px;font-weight:600;color:var(--dim)}
 
-  .foot select{flex:1;min-width:0;background:none;border:0;padding:0;color:inherit;font:inherit;
+  .foot select,.proj select{flex:1;min-width:0;background:none;border:0;padding:0;color:inherit;font:inherit;
                outline:none;cursor:pointer}
-  html.rail .foot select{position:absolute;inset:0;width:100%;opacity:0}
+  html.rail .foot select,html.rail .proj select{position:absolute;inset:0;width:100%;opacity:0}
+  .proj select option,.foot select option{background:var(--panel);color:var(--ink)}
+
+  /* ═══ The film studio: project block in the sidebar ═══ */
+  .proj{padding:0 14px 6px;display:flex;flex-direction:column;gap:2px}
+  .proj[hidden]{display:none}
+  .proj .fitem.cur{color:var(--ink);font-weight:600}
+  .fitem.on{background:var(--on);color:var(--ink)}
+  .sech{padding:10px 25px 4px;font-size:11px;font-weight:600;color:var(--dim2);letter-spacing:.3px;
+        transition:opacity var(--dur2) var(--ease)}
+  .sech[hidden]{display:none}
+  html.rail .sech{opacity:0}
 
   /* Collapsed, the name is the only thing left to identify a row by. One
      floating tip serves the whole rail — an absolutely positioned one would be
@@ -224,6 +237,89 @@
   .mention div.on{background:var(--on)}
   .mention .av{width:22px;height:22px;font-size:10px}
   .mention small{color:var(--dim2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ═══ Middle, studio mode: the workbench replaces the chat ═══ */
+  main.ws-on>header,main.ws-on>.log,main.ws-on>.composer{display:none}
+  .ws{display:none;flex:1;min-height:0;flex-direction:column}
+  main.ws-on .ws{display:flex}
+  body.ws-mode .side2{display:none}
+  .wsh{height:54px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;border-bottom:1px solid var(--line)}
+  .wsh .t{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .wsh small{color:var(--dim2);font-size:12px;white-space:nowrap}
+  .wsh .back{padding:4px 10px}
+  .quota{margin-left:auto;font-size:12px;color:var(--dim);background:var(--raise);border-radius:8px;padding:4px 10px;white-space:nowrap}
+  .quota.w{color:var(--warn);background:var(--warnbg)}
+  .wsb{flex:1;overflow:auto;padding:16px 20px 28px}
+  .wsb .lead{color:var(--dim);font-size:13px;margin:0 0 14px;max-width:760px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+  .chip{background:var(--chip);color:var(--chipink);border-radius:14px;padding:3px 11px;font-size:12px;white-space:nowrap}
+  @media (max-width:760px){ .quota{display:none} .wsb{padding:12px} }
+  .chip.on{background:var(--accent);color:var(--onacc)}
+  /* Seven states side by side: shared out across the width, scrolling sideways only when a
+     column would drop below 140px — a board you have to scroll to see "approved" hides the point. */
+  .kanban{display:flex;gap:10px;align-items:flex-start}
+  .kcol{flex:1 1 0;min-width:140px;background:var(--side);border:1px solid var(--line);border-radius:12px;padding:8px;
+        display:flex;flex-direction:column;gap:8px}
+  .kcol h5{margin:2px 4px;font-size:12px;font-weight:600;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .kcol h5 i{width:7px;height:7px;border-radius:50%;flex:none}
+  .kcol h5 span{margin-left:auto;font-weight:400;color:var(--dim2)}
+  .kcol .none{color:var(--dim2);font-size:11.5px;padding:2px 4px 4px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 9px;cursor:pointer;
+        display:flex;flex-direction:column;gap:5px;text-align:left}
+  .card:hover{border-color:var(--accent)}
+  .card img,.card .noimg{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:6px;background:var(--field)}
+  .card .top2{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .card .code{font-size:12px;font-weight:600}
+  .card .beat{font-size:12px;color:var(--dim);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .card .meta{display:flex;gap:8px;font-size:11px;color:var(--dim2);flex-wrap:wrap}
+  .badge{font-size:10.5px;padding:1px 6px;border-radius:5px;background:var(--chip);color:var(--chipink);white-space:nowrap}
+  .badge.hero{background:var(--warnbg);color:var(--warn)}
+  .badge.bad{background:var(--badbg);color:var(--bad)}
+  .badge.ok{background:var(--tint);color:var(--tintink)}
+  .sec{margin:0 0 24px}
+  .sec>h4{font-size:13px;margin:0 0 10px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .sec>h4 small{color:var(--dim2);font-weight:400;font-size:12px}
+  .cands{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+  .cand{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:7px}
+  .cand.picked{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok)}
+  .cand video{width:100%;aspect-ratio:16/9;background:#000;border-radius:6px}
+  .cand .noplay img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:6px;display:block}
+  .cand .noplay small{display:block;color:var(--warn);font-size:11.5px;margin-top:4px}
+  .cand .dl{color:var(--dim);font-size:11.5px}
+  .cand .dl:hover{color:var(--ink)}
+  .cand .row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim);flex-wrap:wrap}
+  .cand .row .btn{margin-left:auto}
+  .sheet img{max-width:100%;border:1px solid var(--line);border-radius:8px;cursor:zoom-in}
+  .kv{display:grid;grid-template-columns:130px 1fr;gap:5px 14px;font-size:13px;margin:0}
+  .kv dt{color:var(--dim2)} .kv dd{margin:0;white-space:pre-wrap;word-break:break-word}
+  .ver{border-left:2px solid var(--line);padding:2px 0 2px 12px;margin-bottom:14px}
+  .ver.now{border-left-color:var(--accent)}
+  .ver .who,.rev .who{font-size:11.5px;color:var(--dim2);margin-bottom:4px}
+  .ver pre,.scr pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12.5px/1.65 ui-monospace,Menlo,monospace;color:var(--ink)}
+  .rev{padding:8px 12px;border-radius:9px;background:var(--tool);border:1px solid var(--line);margin-bottom:8px;font-size:13px}
+  .rev.reject{border-left:3px solid var(--bad)} .rev.approve{border-left:3px solid var(--ok)}
+  .gens{width:100%;border-collapse:collapse;font-size:12px}
+  .gens td,.gens th{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  .gens th{color:var(--dim2);font-weight:500}
+  .gens .err{color:var(--bad)}
+  .rform{background:var(--panel);border:1px solid var(--warn);border-radius:10px;padding:12px 14px;margin:0 0 14px;max-width:760px}
+  .fi{width:100%;background:var(--field);color:var(--ink);border:1px solid var(--line);border-radius:9px;
+      padding:9px 11px;font:inherit;font-size:13px;margin-bottom:10px;outline:none}
+  textarea.fi{resize:vertical;min-height:90px;line-height:1.65}
+  .rowb{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .scr{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:10px}
+  .scr summary{cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13.5px;list-style:none}
+  .scr summary::-webkit-details-marker{display:none}
+  .scr[open] summary{margin-bottom:10px}
+  .bible{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+  .bitem{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+  .bitem .rowb b{font-size:13.5px}
+  .thumbs{display:flex;gap:5px;flex-wrap:wrap}
+  .thumbs img{height:72px;border-radius:6px;background:var(--field);cursor:zoom-in}
+  .wempty{max-width:520px;margin:60px auto;text-align:center;color:var(--dim)}
+  .wempty h2{color:var(--ink);font-size:17px;font-weight:600;margin:0 0 10px}
+  .wempty p{font-size:13px;line-height:1.7}
 
   /* ═══ Right: members ═══ */
   /* Same trick as the aside: animate the width only, keep the contents pinned at
@@ -358,13 +454,20 @@
       <button class="plus" id="railnew" data-i18n-title="side.newGroup">＋</button>
     </div>
   </div>
+  <div class="proj" id="proj" hidden>
+    <label class="fitem cur" data-tip-key="ws.project"><b>🎬</b> <select id="wsproj" data-i18n-aria-label="ws.project"></select></label>
+    <button class="fitem" data-view="board" data-tip-key="ws.board"><b>▤</b> <span data-i18n="ws.board"></span></button>
+    <button class="fitem" data-view="script" data-tip-key="ws.script"><b>✎</b> <span data-i18n="ws.script"></span></button>
+    <button class="fitem" data-view="bible" data-tip-key="ws.bible"><b>◎</b> <span data-i18n="ws.bible"></span></button>
+    <button class="fitem" data-view="settings" data-tip-key="ws.settings"><b>⚙</b> <span data-i18n="ws.settings"></span></button>
+  </div>
+  <div class="sech" id="convhead" data-i18n="ws.crewChat" hidden></div>
   <div class="convs" id="convs"></div>
   <div class="foot">
     <button class="fitem" id="collapse"><b id="collapseicon">«</b> <span data-i18n="side.collapse"></span></button>
     <button class="fitem" id="newbot" data-tip-key="side.newAgent"><b>＋</b> <span data-i18n="side.newAgent"></span></button>
     <button class="fitem" id="prov" data-tip-key="side.providers"><b>⚙</b> <span data-i18n="side.providers"></span></button>
     <button class="fitem" id="skills" data-tip-key="side.skills"><b>✦</b> <span data-i18n="side.skills"></span></button>
-    <button class="fitem" id="studiobtn" data-tip-key="side.studio" hidden><b>S</b> <span data-i18n="side.studio"></span></button>
     <button class="fitem" id="keysbtn" data-tip-key="side.keys"><b>K</b> <span data-i18n="side.keys"></span></button>
     <label class="fitem" data-tip-key="common.theme"><b class="half"></b> <select id="theme" data-i18n-aria-label="common.theme"></select></label>
     <label class="fitem" data-tip-key="common.language"><b>🌐</b> <select id="lang" data-i18n-aria-label="common.language"></select></label>
@@ -395,6 +498,10 @@
       <button class="go" id="send" disabled>↑</button>
     </div>
   </div>
+  <section class="ws" id="ws">
+    <div class="wsh" id="wsh"></div>
+    <div class="wsb" id="wsb"></div>
+  </section>
 </main>
 
 <div class="side2" id="side2">
@@ -457,36 +564,6 @@
   </div>
 </dialog>
 
-<dialog id="stdlg" style="width:720px">
-  <h4 data-i18n="st.title"></h4>
-  <small class="rhint" data-i18n="st.intro"></small>
-  <div class="prow" style="flex-wrap:nowrap">
-    <select id="stproj" data-i18n-aria-label="st.project" style="flex:1;margin:0"></select>
-    <button class="btn" id="stnew" data-i18n="st.newProject"></button>
-  </div>
-  <div id="stbody">
-    <div class="psplit"></div>
-    <h4 data-i18n="st.projectSec"></h4>
-    <input type="text" id="stname" data-i18n-placeholder="st.namePh" autocomplete="off">
-    <div class="brow">
-      <select id="stlang" data-i18n-title="st.langTitle"></select>
-      <select id="stgroup" data-i18n-title="st.groupTitle"></select>
-    </div>
-    <small class="rhint" data-i18n="st.groupHint"></small>
-    <textarea id="stinfo" rows="6" spellcheck="false" style="font:12.5px/1.6 ui-monospace,Menlo,monospace" data-i18n-placeholder="st.infoPh"></textarea>
-    <small class="rhint" data-i18n="st.infoHint"></small>
-    <div class="acts" style="margin-top:0"><button class="btn pri" id="stsave" data-i18n="common.save"></button></div>
-    <div class="psplit"></div>
-    <h4 data-i18n="st.crewSec"></h4>
-    <small class="rhint" data-i18n="st.crewHint"></small>
-    <div id="stcrew"></div>
-    <div class="psplit"></div>
-    <h4 data-i18n="st.lockSec"></h4>
-    <small class="rhint" data-i18n="st.lockHint"></small>
-    <div id="stlocks"></div>
-  </div>
-  <div class="acts"><button class="btn" id="stclose" data-i18n="common.close"></button></div>
-</dialog>
 
 <dialog id="keydlg" style="width:640px">
   <h4 data-i18n="key.title"></h4>

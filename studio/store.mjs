@@ -67,7 +67,8 @@ export function createStore(root) {
   }
 
   const has = sha => isSha(sha) ? stat(objPath(sha)).then(s => s.isFile(), () => false) : Promise.resolve(false)
-  const open = sha => createReadStream(objPath(sha))
+  // {start, end} (inclusive) serves a byte range: a <video> seeking asks for one.
+  const open = (sha, range) => createReadStream(objPath(sha), range ?? {})
   const read = sha => readFile(objPath(sha))
 
   /** Re-hash an object. A mismatch means the disk (or someone with root) changed it. */
@@ -78,6 +79,21 @@ export function createStore(root) {
   }
 
   return { root, put, has, open, read, verify, path: objPath }
+}
+
+/**
+ * An HTTP Range header against a file of `size` bytes → {start, end} (inclusive), null when there
+ * is no usable header (serve it all), or false when it can't be satisfied (416). One range only —
+ * that is all a video element asks for.
+ */
+export function byteRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header ?? '').trim())
+  if (!m || (m[1] === '' && m[2] === '')) return null
+  let start, end
+  if (m[1] === '') { start = Math.max(0, size - Number(m[2])); end = size - 1 }    // the last N bytes
+  else { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1) }
+  if (start >= size || start > end) return false
+  return { start, end }
 }
 
 // ---------- self-test ----------
@@ -121,6 +137,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     a.throws(() => s.path('../../etc/passwd'), /not a sha256/)
     a.equal(await s.has('x'.repeat(64)), false)
 
+    a.deepEqual(byteRange('bytes=0-', 100), { start: 0, end: 99 })
+    a.deepEqual(byteRange('bytes=10-19', 100), { start: 10, end: 19 })
+    a.deepEqual(byteRange('bytes=90-500', 100), { start: 90, end: 99 }, 'an end past the file is cut to it')
+    a.deepEqual(byteRange('bytes=-10', 100), { start: 90, end: 99 }, 'the last ten bytes')
+    a.equal(byteRange('bytes=100-', 100), false, 'starting past the end → 416')
+    a.equal(byteRange(undefined, 100), null); a.equal(byteRange('bytes=0-1,5-6', 100), null, 'several ranges → the whole file')
+    const rr = await s.put(Buffer.from('ranged studio bytes'))
+    const part = []; for await (const c of s.open(rr.sha256, { start: 7, end: 12 })) part.push(c)
+    a.equal(Buffer.concat(part).toString(), 'studio', 'open() serves the range')
     console.log('store.mjs: all checks passed')
   } finally {
     await rm(dir, { recursive: true, force: true })

@@ -1,5 +1,5 @@
 // The platform's side of the film studio (studio/): the `studio` tool agents call, and the
-// helpers the Studio panel and the event endpoint use.
+// helpers the workbench (web UI) and the event endpoint use.
 //
 // Agents never talk to the studio themselves. This process holds STUDIO_TOKEN and says which
 // agent it is acting for — the identity comes from code, so no model can claim to be the
@@ -38,6 +38,15 @@ export async function file(assetId) {
     headers: { authorization: `Bearer ${env.STUDIO_TOKEN}` }, signal: AbortSignal.timeout(60_000) })
   if (!res.ok) throw new Error(`studio file ${assetId}: HTTP ${res.status}`)
   return { buf: Buffer.from(await res.arrayBuffer()), mime: res.headers.get('content-type') ?? 'application/octet-stream' }
+}
+
+/**
+ * An asset as a stream, for the browser: a Range header passes through, so a <video> can seek.
+ * Returns the studio's Response (status 200/206/416), or throws when the studio can't be reached.
+ */
+export function fileStream(assetId, range) {
+  return fetch(`${URL_()}/v1/files/${encodeURIComponent(assetId)}`, {
+    headers: { authorization: `Bearer ${env.STUDIO_TOKEN}`, ...range ? { range } : {} } })
 }
 
 // Who is on the crew, asked of the studio and kept for half a minute: every agent turn asks, and
@@ -125,13 +134,18 @@ export async function runTool(args, ctx, { readFile } = {}) {
   }
 }
 
-// What the Studio panel (a person, holding ACCESS_TOKEN) may do through the platform. The panel is
-// for setting up and locking — reviewing is the crew's work and happens in the group.
+// What the web UI (a person, holding ACCESS_TOKEN) may do through the platform: set up projects and
+// the crew, lock what is final, write the script into scenes, and — in the workbench — review: a
+// person may approve, reject and pick takes, as the reviewer does (the boss, 2026-09-25). It does
+// not generate: prompts and takes stay the crew's work.
 export const PANEL_ACTIONS = new Set([
-  'project.list', 'project.info', 'project.create', 'project.edit',
+  'project.list', 'project.info', 'project.create', 'project.edit', 'project.board',
   'crew.list', 'crew.set',
   'char.list', 'char.show', 'char.refs', 'char.lock', 'char.unlock',
   'loc.list', 'loc.show', 'loc.refs', 'loc.lock', 'loc.unlock',
+  'scene.list', 'scene.show', 'scene.add', 'scene.edit', 'shot.lock',
+  'shot.show', 'shot.detail', 'review.history', 'asset.show',
+  'shot.sheet', 'shot.approve', 'shot.reject',
   // The Keys panel: the studio's model keys (studio/keys.mjs). The answer carries hints, never keys.
   'keys.get', 'keys.set', 'keys.test',
 ])

@@ -16,7 +16,7 @@ import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { access, mkdir, constants } from 'node:fs/promises'
 import * as db from './db.mjs'
-import { createStore } from './store.mjs'
+import { createStore, byteRange } from './store.mjs'
 import { parseActor, deny } from './roles.mjs'
 import { makeActions, StudioError, fail } from './actions.mjs'
 import { startWorker } from './worker.mjs'
@@ -77,7 +77,7 @@ const server = createServer(async (req, res) => {
       const result = await handler(args && typeof args === 'object' ? args : {}, { actor, actorKey, role }, action)
       // Reads aren't audited: they are most of the traffic and change nothing. A key edit is, by
       // name only — the audit table must never hold a key.
-      if (!/\.(list|show|refs|current|info|history|get)$/.test(action))
+      if (!/\.(list|show|refs|current|info|history|get|board|detail)$/.test(action))
         await db.audit(actorKey, action, action.startsWith('keys.') ? String(args.name ?? '') : args.project ?? args.id ?? '', true)
       return send(200, { ok: true, result })
     }
@@ -87,9 +87,14 @@ const server = createServer(async (req, res) => {
     if (fm && (req.method === 'GET' || req.method === 'HEAD')) {
       const a = (await db.q('select sha256, mime, bytes from assets where id = $1', [fm[1]])).rows[0]
       if (!a || !await store.has(a.sha256)) return send(404, { ok: false, error: { code: 'no_such_asset', message: `no asset ${fm[1]}` } })
-      res.writeHead(200, { 'content-type': a.mime, 'content-length': a.bytes, etag: `"${a.sha256}"`, 'cache-control': 'private, max-age=31536000, immutable' })
+      const head = { 'content-type': a.mime, etag: `"${a.sha256}"`, 'cache-control': 'private, max-age=31536000, immutable', 'accept-ranges': 'bytes' }
+      // A <video> seeks with Range requests; without 206 it can only play from the start.
+      const range = byteRange(req.headers.range, Number(a.bytes))
+      if (range === false) { res.writeHead(416, { 'content-range': `bytes */${a.bytes}` }); return res.end() }
+      if (range) res.writeHead(206, { ...head, 'content-length': range.end - range.start + 1, 'content-range': `bytes ${range.start}-${range.end}/${a.bytes}` })
+      else res.writeHead(200, { ...head, 'content-length': a.bytes })
       if (req.method === 'HEAD') return res.end()
-      return store.open(a.sha256).pipe(res)
+      return store.open(a.sha256, range ?? undefined).pipe(res)
     }
     return send(404, { ok: false, error: { code: 'not_found', message: 'no such endpoint' } })
   } catch (e) {

@@ -36,7 +36,8 @@ the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
 model is `deepseek-*` run their turns on dsh** (the rest of the platform stays ours).
 
 **For the current shape see 2.12 and 2.18**: PostgreSQL + one container per Agent + one-command
-compose deployment.
+compose deployment. **Since 2.30 the product presents itself as a film studio** (the workbench, 2.28 +
+2.30); the studio and DeepSeek Harness are optional modules.
 
 ```bash
 ./start.sh     # this is how you start it
@@ -1641,7 +1642,7 @@ migration therefore never creates the schema; the app does.
 
 ### Deployment
 
-- compose: `studio` builds from `./studio` (node:24-slim + ffmpeg, which decodes the 10-bit HEVC
+- compose: `studio` (an optional module since 2.30, profile `studio`) builds from `./studio` (node:24-slim + ffmpeg, which decodes the 10-bit HEVC
   that Seedance 2.5 1080p / 2.0 4k return), `depends_on: app: service_healthy` (the role must
   exist first), named volume `studiodata` (nothing else mounts it, so no host path — unlike
   agent workspaces, 2.18.2). The app gets `STUDIO_URL`, `STUDIO_TOKEN`, `STUDIO_DB_PASSWORD`.
@@ -1761,10 +1762,9 @@ shapes); prefilter scores (`candidates.prefilter_score` is always null — no si
   (en / zh-Hans / zh-Hant). A project with no `notify_group` drops its notices (marked, audited) —
   a group set later must not receive last week's "candidates ready" as news.
 - **`agents.max_steps`** (1–60, empty = 12) in the Agent editor.
-- **Studio panel** (web, sidebar "Studio/片场", hidden when the studio isn't configured): create a
-  project, name / notice language / notify group / info JSON, crew roles, and **lock / unlock with
-  the reference thumbnails beside each item** (you lock what you have looked at). It goes through
-  `POST /api/studio/call` with an allowlist (`PANEL_ACTIONS`) — the panel doesn't generate or review.
+- **Studio panel** — *replaced in 2.30 by the workbench*, which keeps its parts (project settings,
+  crew roles, locking with the reference thumbnails beside each item: you lock what you have looked
+  at). Everything goes through `POST /api/studio/call` with an allowlist (`PANEL_ACTIONS`).
 
 **`node studio/e2e-platform.mjs <deploy dir>`** drives the real deployment with a scripted fake model
 (one persona per `ROLE:` marker) and a fake Seedance, and checks the log and the studio: gen → "@严青
@@ -1806,7 +1806,7 @@ The boss, on fixing the spec to match: "可以，你来改，接下来不用每�
 **Still not verified for the whole feature**: real Seedance / GPT image / ComfyUI and a real vision
 model on a real sheet (no keys here — everything upstream is a fake built from documented shapes);
 podman; the Flutter client (untouched). **Not built**: candidate prefilter scores; trimming
-`trim_to` takes; a human review UI (the boss: not this round).
+`trim_to` takes. (The human review UI the boss had put off came in 2.30.)
 
 ⚠️ Testing in a sandbox whose egress proxy re-signs TLS: builds fail with
 `SELF_SIGNED_CERT_IN_CHAIN` at `npm install`. That's the sandbox, not the Dockerfile — test with a
@@ -1846,7 +1846,7 @@ model is used). Then, asked:
 ### DeepSeek Harness: the shape
 
 ```
-runAgent ─(model deepseek-*)─▶ runDshTurn: docker exec -i <AGENT_PREFIX>-dsh node /opt/dsh/run.mjs
+runAgent ─(model deepseek-*)─▶ runDshTurn: docker exec -i $DSH_CONTAINER node /opt/dsh/run.mjs   (<AGENT_PREFIX>-dsh; set by start.sh when MODULES has dsh)
    │                              stdin line 1 = {rt, key, base_url, system, mcp_url, mcp_token}
    │                              then dsh's SDK JSON-RPC both ways (profile sdk)
    └─ execTool ◀── MCP tools/call ◀── dsh      app:8081/mcp — unpublished port, per-turn bearer token
@@ -1922,6 +1922,109 @@ still pass on the refactored loop. In a browser (en, zh-Hans): the panel, Test r
 declares image input (`deepseek-v4-flash-vision-exp` in 0.1.5-rc.3) — we set `noImages` and send
 text. That is the way to a DeepSeek reviewer, and it is unbuilt and unverified.
 
+## 2.30 The whole product becomes a film studio; the smallest machine it runs on (2026-09-25)
+
+The boss: "再把webui进行影视创作定制化，都跑完了看一下怎么优化本地部署方案，能部署最低配置"
+(customise the web UI for film-making; when everything has run, see how to optimise the local
+deployment so it deploys on a minimal configuration). Asked, he chose:
+
+| Asked | The boss chose |
+| --- | --- |
+| What "影视创作定制化" means | "整个产品改成影视工作室" — open into the studio, Agents are called 剧组成员, the sidebar centres on the project |
+| May a person decide in the workbench? (he had said "not this round" before) | "可以，人能通过/打回/选条" |
+| The smallest machine | "2 核 4GB、约 10GB 硬盘，用 Docker" — modules as compose profiles, slimmer images, memory ceilings, start.sh sizing to the machine |
+
+### The workbench (web/app.js "The film studio")
+
+- **With the studio module on, the app lands on the project's shot board**; without it, the chat as
+  before (`wsInit`). Sidebar: project select + Board / Script & scenes / Bible / Project settings,
+  the crew's chats below under "Crew chat". Opening a chat leaves the workbench (`wsLeave` in
+  `openConv`); the chat's right panel is hidden in the workbench. The old Studio dialog is gone.
+- **Two views, one call each**: `project.board` and `shot.detail` — human-only in roles.mjs (shaped
+  for a screen, not for a model's context; the agents' tool doesn't advertise them).
+- **Board**: seven columns by state, sharing the width with a 140 px minimum. Cards show the last
+  frame of the picked (else newest) take — the worker's `frame` asset — code, hero, beat, takes,
+  rejections n/3, the pick.
+- **Shot page**: the decision bar when the shot is in review (make a sheet; reject with a reason
+  ≥ 15 characters and a route; approve per take), takes by round as `<video>` with the last frame
+  as poster and a download link, the newest sheet, the definition labelled (and as JSON), every
+  prompt version newest first, the review history with who, every generation with its error.
+- **Script & scenes**: a person adds scenes (code, title, text as written), reads and edits the
+  text (`scene.edit`, human-only), locks a scene once every shot is approved.
+- **The 15-second poll** redraws the board (scroll kept) and a shot page only when its signature
+  changed — never while a take is playing or a rejection is being written.
+- **Wording**: Agent → crew member / 剧组成员 / 劇組成員 in the web UI and the server's messages; API
+  terms ("agent ids") keep the word. **The Flutter client's own labels still say Agent** (untouched).
+
+### A person reviewing
+
+- `PANEL_ACTIONS` gained `shot.approve / shot.reject / shot.sheet / shot.lock / scene.add /
+  scene.edit` and the views; **not** `shot.gen` / `shot.prompt` — generating stays the crew's (the
+  e2e asserts the 400).
+- A person's approval puts "S01-SH001 已由人工通过（第 2 条）。" into the group **waking nobody**
+  (notify target `crew`); a person's rejection routes like the reviewer's, marked "（人工打回）".
+  The studio's rules hold for a person too: a reason of 15+ characters, the 3rd rejection goes to a
+  person (the form says when this one is the last).
+- **Files**: `/api/studio/file/:id` streams images **and videos**, passing `Range` through; the studio
+  answers 206 / 416 (`byteRange` in store.mjs, self-tested). It used to buffer whole files, images only.
+
+### ⚠️ What was hit
+
+1. **The sandbox's Chromium has no H.264** (`canPlayType('video/mp4; codecs="avc1…"')` is empty):
+   every take failed with `DEMUXER_ERROR_NO_SUPPORTED_STREAMS`, while the range requests were fine.
+   Real Chrome / Edge / Safari play H.264 — but **1080p / 4K Seedance takes are 10-bit HEVC**, which
+   many Chrome / Firefox setups can't play either. So a take that can't play shows its last frame,
+   a note and a download link; the e2e's takes are **VP9 in MP4** so playback and seeking are checked
+   here. **Not built: an H.264 proxy per take** (ffmpeg in the worker) — the fix if HEVC is common.
+2. **The contact sheet drew Chinese names as boxes** (`REF □□/□□□`): DejaVu has no CJK, so the
+   reviewer model saw boxes where 蛮吉/战斗装 should be. The studio image now carries
+   `fonts-wqy-microhei` (+7 MB) and `STUDIO_FONT` points at it. Found only by looking at a sheet.
+3. Seven fixed 228 px columns put "approved" off-screen at 1440 px — the one column a board is for.
+4. `pkill -f` killed the calling shell again (2.9.5, fifth time): stopping a memory sampler. Match the
+   exact `/proc/<pid>/cmdline` instead.
+5. ffmpeg's `mandelbrot` source has no `duration` option (use `-t`); a store self-test read back an
+   object an earlier step of the same test had tampered with on purpose.
+
+### The smallest machine
+
+- **`MODULES` in .env** (`studio`, `dsh`) → compose `profiles`. start.sh writes `COMPOSE_PROFILES`,
+  passes `--profile` itself (podman-compose may not read the variable), sets `STUDIO_URL` /
+  `DSH_CONTAINER` for the app (empty = off), and **removes a module switched off** — compose leaves
+  containers of inactive profiles running. `MODULES=` (empty) is a real choice, so it gets a presence
+  check, not `ensure`. A deployment from before modules keeps both.
+- **Ceilings**: `mem_limit` per service, a Node heap cap below it (`NODE_OPTIONS`), Postgres
+  `max_connections=40` (the two pools use 16). start.sh sizes on memory (`MEM_MB` overrides the
+  detection): under 6 GB DB 768m / app 768m / studio 1g / dsh 768m (~3.3 GB), agent containers
+  1g / 1 CPU on a first run; above, larger; **under 2 GB a first run starts the chat alone**.
+  Values set by hand are kept (`ensure`).
+- **Measured** with the e2e suites running under those ceilings, sampled every second: dsh 104 MiB
+  (one turn's runtime), app 77, studio 62, db 30 — and the studio at 153 MiB making one sheet of
+  **eight 1080p 10-bit HEVC takes** (11 s on 4 cores). The ceilings are loose; they are there so one
+  runaway part can't starve the others.
+- **Disk**: ~0.7 GB always (postgres, node base, app), studio +0.5 GB (ffmpeg), dsh +0.45 GB, the agent
+  image +1.2 GB with tools on; building leaves a cache of the same order (`docker builder prune`;
+  start.sh warns under 4 GB free).
+- **Rejected**: a static ffmpeg (mwader/static-ffmpeg: ffmpeg + ffprobe are 270 MB vs Debian's 477 MB
+  layer) — ~200 MB saved for a third-party image supplying a core binary. dsh's node_modules can't be
+  pruned safely (plugins load dynamically); pnpm now leaves with the install layer (−40 MB).
+- bash 3.2 (macOS): an empty array under `set -u` is an error — `${a[@]+"${a[@]}"}`.
+
+### Verified / not verified
+
+Verified: `studio/e2e-workbench.mjs` (a seeded film; board and shot page; takes by range 206 / 200 /
+416, a still, a 404; a person makes a sheet, approves, rejects; 400 for a short reason and for
+generating from the page; 409 approving twice; both notices in the group with their marks; audit
+rows; a scene lock refused while shots are open). In the browser (en dark, zh-Hans light): lands on
+the board, all seven columns at 1440, takes play and seek, rejecting from the page, script, bible,
+settings, a chat leaves the workbench, the rail, a phone width. All four earlier e2e suites pass
+under the small ceilings. start.sh: an existing deployment upgraded (ceilings added, modules kept,
+a rerun leaves .env byte-identical); a fresh install sized as 1.5 GB ran db + app only, the UI fell
+back to the chat and the Keys panel said why; switching `studio` on brought it up, off removed it.
+
+**Not verified**: a real 2-core / 4 GB machine (the ceilings were applied on a 4-core / 16 GB host);
+podman with profiles; H.264 playback in a real browser (this Chromium has none — VP9 stood in); the
+Flutter client.
+
 ## 3. What runs now
 
 ```bash
@@ -1943,6 +2046,8 @@ node web/studio.mjs        # self-test for the platform's studio tool
 node web/dsh.mjs           # self-test for driving DeepSeek Harness: turns, MCP, keys (see 2.29)
 node studio/keys.mjs       # self-test for the Keys panel's studio side (see 2.29)
 node deploy/dsh/e2e.mjs <deploy dir>        # DeepSeek Harness + Keys panel through the running platform (see 2.29)
+node studio/e2e-workbench.mjs <deploy dir>  # the workbench: board, shot page, files by range, a person reviewing (see 2.30)
+MODULES=… ./start.sh / MEM_MB=4096 ./start.sh   # modules → profiles; size .env as if for a 4 GB box (see 2.30)
 node studio/crew/import.mjs --self-test     # the crew spec parses the way the importer needs
 docker compose exec app node studio/crew/import.mjs   # import the crew into a deployment (see 2.28)
 python3 check-bots.py      # check the seed definitions in bots/
