@@ -43,6 +43,7 @@ ensure ACCESS_TOKEN "$(rand)"
 # The studio: the app talks to it with STUDIO_TOKEN; it logs into postgres as its own role.
 ensure STUDIO_TOKEN "$(rand)"
 ensure STUDIO_DB_PASSWORD "$(rand)"
+ensure STUDIO_EVENT_TOKEN "$(rand)"
 ensure BIND_ADDR 127.0.0.1
 ensure WEB_PORT 8080
 ensure AGENT_TOOLS off

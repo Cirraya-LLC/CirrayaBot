@@ -233,6 +233,23 @@ create table if not exists loras (
   created_at   timestamptz not null default now()
 );
 
+-- Messages the studio owes a group ("candidates ready", "rejected, over to you"). An outbox, not
+-- a call made on the spot: a notice lost to a restart or an app that is down means a reviewer who
+-- is never told and a shot that sits in review forever. Lines to the same person are sent as one
+-- message after a short quiet period — eight rejections are one message to the cinematographer,
+-- not eight turns.
+create table if not exists notifications (
+  id          bigserial primary key,
+  project_id  text not null references projects(id) on delete cascade,
+  target      text not null,                     -- a role, or 'human'
+  line        text not null,
+  created_at  timestamptz not null default now(),
+  sent_at     timestamptz,
+  attempts    int  not null default 0,
+  error       text not null default ''
+);
+create index if not exists notifications_unsent on notifications (project_id, target) where sent_at is null;
+
 -- Who did what. Refusals are recorded too: an agent trying a command outside its job is the
 -- first sign that something it read has been talking to it.
 create table if not exists audit (
