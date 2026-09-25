@@ -1647,7 +1647,10 @@ migration therefore never creates the schema; the app does.
 - `start.sh` generates `STUDIO_TOKEN` / `STUDIO_DB_PASSWORD` with `ensure`, so **an existing
   deployment upgrades by rerunning `./start.sh`**; a plain `compose up` without it stops at the
   `:?run ./start.sh first` guard instead of starting half-configured.
-- Model keys (Seedance relay, GPT image, ComfyUI) go into the studio's environment only (phase 2).
+- Model keys go into the studio's environment only: `SEEDANCE_BASE_URL/_API_KEY` (ModelArk or the
+  boss's relay, same paths), `GPT_IMAGE_BASE_URL/_API_KEY/_MODEL` (OpenAI or his relay; base
+  includes `/v1`), `COMFY_URL` (his own ComfyUI; `host.docker.internal` works from the studio via
+  `extra_hosts: host-gateway` — verified with docker, **not verified with podman**).
 
 ### Seedance facts (from ModelArk's docs, 2026-09-25 — not memory)
 
@@ -1670,9 +1673,63 @@ the studio is unreachable from the host and from a bridge container.
 Not verified: **podman** (as for the rest of the product, 2.18.6). The studio needs no socket
 and uses a named volume, so it adds nothing podman-specific, but "adds nothing" isn't "ran".
 
-Not built yet: everything past projects/crew — phase 2 is the asset/shot/review actions and the
-generation adapters, phase 3 the platform side (the `studio` tool, image results, event
-notifications into groups, per-agent step limit, the lock panel), phase 4 the crew import.
+### Phase 2: actions, engines, worker, sheets (2026-09-25)
+
+The boss: GPT image "直接走我的gpt账户，或者也是我自建的转发站", "ComfyUI本地", Seedance limits
+as proposed (40 videos/hour/project, 4 at once).
+
+- **All the skills' commands exist as actions** (`studio/actions.mjs`): project, char/look/loc
+  list/show/refs/add/edit/lock, asset gen/edit/save/show/tag, scene list/show/add/edit, shot
+  plan/show/prompt/gen/sheet/approve/reject/lock, review.history. Every lookup is scoped to the
+  caller's project; an asset id from another film is "no such asset".
+- **The shot state machine is `studio/shots.mjs`** (pure, self-tested) and every move is a
+  guarded `update … where status = <what I read>` — two agents acting on one shot can't both win.
+  `shot.reject` returns `goes_to`: the route's owner, or `human` on the 3rd rejection.
+- **The hourly cap is checked and the takes inserted in one transaction under a per-project
+  advisory lock**; checked separately, two `shot.gen` calls would both see "36 used" and add 8
+  each. The cap refuses; the concurrency limit only queues (a hero shot draws 8).
+- **The worker (`studio/worker.mjs`) downloads every finished take into the store at once**
+  (the URL dies in 24 h) plus its last frame, numbers candidates per shot (never reused), and
+  closes the round: shot → `review`, or back to `prompted` if every take failed.
+  **A take claimed but whose remote id was never saved is failed on restart with "may have been
+  billed", never resubmitted** — resubmitting is paying twice.
+- **A 3-second shot is generated at Seedance's 4-second minimum** and tagged `trim_to:3`; the
+  edit trims it. `generate_audio` is always sent (the API defaults it to true).
+- **`asset.gen` (images) is synchronous** — an agent waits for its picture; `shot.gen` (video) is
+  queued. GPT image with references goes to the edits endpoint; ComfyUI runs the **project's own
+  workflow** (`info.comfy.workflow`, API-format export with `{{prompt}}`/`{{seed}}`/`{{ref}}`/`{{lora}}`…
+  placeholders) — a built-in graph would only work by luck on his checkpoints. A placeholder the
+  request can't fill is an error, never an empty string.
+- **Files are sniffed, not trusted**: `asset.save` with `mime: image/gif` on a PNG stores a PNG.
+- **Locked means final**: nothing linked to a locked character/look/location changes, except
+  adding a `negative` example. Locking a character locks its looks.
+- `GET /v1/files/<asset id>` (token required) serves the bytes, for the platform in phase 3.
+
+⚠️ **The contact sheet had the right size and the wrong pictures — twice.** First: a PNG still
+decodes to `yuvj444p`, video frames to `yuvj420p`, and when the format changes mid-sequence
+ffmpeg's tile filter **drops that frame and shifts every later cell left** — the reference vanished
+and "#1" sat at the end of the reference row. Fix: every cell ends in `format=yuvj420p`. Second:
+the label `Mang'ji: front` escaped by hand ended drawtext's quoting early and **swallowed the
+format filter after it**, so the first fix silently didn't apply to that cell. Fix: labels go
+through `textfile=`. Both were caught only by looking at the image; the self-test now samples
+pixels (reference cell is red, the next is blank, row two is a real frame), not just dimensions.
+
+**`node studio/e2e.mjs`** (needs `STUDIO_DATABASE_URL` and ffmpeg) runs the whole flow against real
+PostgreSQL + ffmpeg with fake Seedance / GPT-image servers and checks artifacts: stored bytes equal
+what the engine returned, the Seedance body field by field, ≤ 2 running at once, lineage on every
+take, the sheet's reference pixel, the 3rd rejection going to a person, the hourly cap, project
+isolation, the restart orphan. **Mutation-checked**: making the 3rd rejection not go to a person,
+or sending `generate_audio: true`, each fails it. Run it with the long-running studio **stopped**
+(`docker compose stop studio; docker compose run --rm --no-deps studio node e2e.mjs`) — two
+workers on one database would race for the same queue.
+
+Verified: the above, inside the real studio image under compose (ffmpeg + font + 10-bit HEVC),
+and `host.docker.internal` reaching a server on the host. **Not verified**: real Seedance, real
+GPT image, real ComfyUI (no keys / no ComfyUI here — only fakes built from their documented
+shapes); prefilter scores (`candidates.prefilter_score` is always null — no similarity check yet).
+
+Not built yet: phase 3 the platform side (the `studio` tool, image results, event notifications
+into groups, reject routing, per-agent step limit, the lock panel), phase 4 the crew import.
 
 ⚠️ Testing in a sandbox whose egress proxy re-signs TLS: builds fail with
 `SELF_SIGNED_CERT_IN_CHAIN` at `npm install`. That's the sandbox, not the Dockerfile — test with a
@@ -1693,6 +1750,8 @@ node web/protocols.mjs     # self-test for translating the three protocols (incl
 node web/i18n.mjs          # server message tables self-test
 node studio/store.mjs      # self-test for the studio's content-addressed file store
 node studio/roles.mjs      # self-test for who may do what in the studio
+node studio/shots.mjs      # self-test for the shot state machine (studio has refs/seedance/gptimage/comfy/media too)
+STUDIO_DATABASE_URL=… node studio/e2e.mjs   # the whole studio flow against fakes (see 2.28)
 python3 check-bots.py      # check the seed definitions in bots/
 
 cd app && flutter analyze . && flutter test    # desktop client (see 2.19)

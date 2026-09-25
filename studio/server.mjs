@@ -16,85 +16,19 @@ import { timingSafeEqual } from 'node:crypto'
 import { access, mkdir, constants } from 'node:fs/promises'
 import * as db from './db.mjs'
 import { createStore } from './store.mjs'
-import { parseActor, deny, ROLES } from './roles.mjs'
+import { parseActor, deny } from './roles.mjs'
+import { makeActions, StudioError, fail } from './actions.mjs'
+import { startWorker } from './worker.mjs'
 
 const CFG = {
   token: process.env.STUDIO_TOKEN || '',
   port: Number(process.env.STUDIO_PORT || 8090),
   data: process.env.STUDIO_DATA || '/data',
 }
-export const store = createStore(CFG.data)
-
-/** An error the caller should see as-is: 4xx, a stable code, an English sentence an agent can act on. */
-export class StudioError extends Error {
-  constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
-}
-const fail = (code, message, status) => { throw new StudioError(code, message, status) }
-
-const slugOk = s => /^[a-z0-9][a-z0-9-]{0,39}$/.test(String(s ?? ''))
-const text = (v, max = 200) => (typeof v === 'string' ? v.trim().slice(0, max) : '')
-
-/** The caller's current project, or a clear instruction to pick one. */
-async function projectOf(actorKey, args = {}) {
-  const id = text(args.project) || await db.currentProject(actorKey)
-  if (!id) fail('no_project', 'no current project — run project.use with a project slug first (project.list shows them)')
-  const p = await db.getProject(id)
-  if (!p) fail('no_such_project', `there is no project "${id}" (project.list shows them)`, 404)
-  return p
-}
-
-const projectView = p => ({ id: p.id, name: p.name, notify_group: p.notify_group, info: p.info })
-
-// action → handler(args, ctx). ctx = {actor, actorKey, role}. Phase 1: projects and the crew.
-const HANDLERS = {
-  'project.list': async () => (await db.listProjects()).map(p => ({ id: p.id, name: p.name })),
-
-  'project.current': async (_a, ctx) => {
-    const id = await db.currentProject(ctx.actorKey)
-    return id ? { project: id } : { project: null, hint: 'run project.use <slug>' }
-  },
-
-  'project.use': async (a, ctx) => {
-    const p = await db.getProject(text(a.project))
-    if (!p) fail('no_such_project', `there is no project "${text(a.project)}" (project.list shows them)`, 404)
-    await db.useProject(ctx.actorKey, p.id)
-    return { project: p.id, name: p.name }
-  },
-
-  'project.info': async (a, ctx) => projectView(await projectOf(ctx.actorKey, a)),
-
-  'project.create': async a => {
-    if (!slugOk(a.id)) fail('bad_slug', 'project id must be lowercase letters, digits and dashes (max 40)')
-    const name = text(a.name, 80)
-    if (!name) fail('name_required', 'a project needs a name')
-    if (await db.getProject(a.id)) fail('exists', `project "${a.id}" already exists`, 409)
-    return projectView(await db.createProject({ id: a.id, name, info: a.info === undefined ? {} : objOr(a.info), notify_group: text(a.notify_group, 80) }))
-  },
-
-  'project.edit': async a => {
-    const p = await db.getProject(text(a.project))
-    if (!p) fail('no_such_project', `there is no project "${text(a.project)}"`, 404)
-    return projectView(await db.updateProject(p.id, {
-      name: a.name === undefined ? undefined : text(a.name, 80) || p.name,
-      info: a.info === undefined ? undefined : objOr(a.info),
-      notify_group: a.notify_group === undefined ? undefined : text(a.notify_group, 80),
-    }))
-  },
-
-  'crew.set': async a => {
-    const id = text(a.agent_id, 63)
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) fail('bad_agent', 'agent_id must be a platform agent id')
-    const role = a.role ? text(a.role, 30) : null
-    if (role && !ROLES.includes(role)) fail('bad_role', `role must be one of ${ROLES.join(' / ')}, or empty to remove`)
-    await db.setRole(id, role)
-    return { agent_id: id, role }
-  },
-}
-
-function objOr(v) {
-  if (v && typeof v === 'object' && !Array.isArray(v)) return v
-  fail('bad_info', 'info must be a JSON object')
-}
+const store = createStore(CFG.data)
+let worker = null
+const actions = makeActions({ store, kick: () => worker?.kick() })
+const HANDLERS = actions.handlers
 
 // ---------- HTTP ----------
 function authorized(req) {
@@ -103,7 +37,8 @@ function authorized(req) {
   return got.length === want.length && timingSafeEqual(got, want)
 }
 
-async function readJson(req, max = 1 << 20) {
+// Agents save images through the platform as base64 (asset.save): 25 MB of image is ~34 MB here.
+async function readJson(req, max = 40 << 20) {
   let n = 0, chunks = []
   for await (const c of req) { n += c.length; if (n > max) fail('too_large', 'request body too large', 413); chunks.push(c) }
   if (!n) return {}
@@ -136,10 +71,20 @@ const server = createServer(async (req, res) => {
       }
       const handler = HANDLERS[action]
       if (!handler) return send(501, { ok: false, error: { code: 'not_implemented', message: `${action} is not available yet` } })
-      const result = await handler(args && typeof args === 'object' ? args : {}, { actor, actorKey, role })
+      const result = await handler(args && typeof args === 'object' ? args : {}, { actor, actorKey, role }, action)
       // Reads aren't audited: they are most of the traffic and change nothing.
       if (!/\.(list|show|refs|current|info|history)$/.test(action)) await db.audit(actorKey, action, args.project ?? args.id ?? '', true)
       return send(200, { ok: true, result })
+    }
+    // The bytes of an asset, for the platform: a sheet the reviewer's model must see, a video a
+    // person plays. Immutable, so cacheable forever by its sha.
+    const fm = url.pathname.match(/^\/v1\/files\/([\w-]{1,60})$/)
+    if (fm && (req.method === 'GET' || req.method === 'HEAD')) {
+      const a = (await db.q('select sha256, mime, bytes from assets where id = $1', [fm[1]])).rows[0]
+      if (!a || !await store.has(a.sha256)) return send(404, { ok: false, error: { code: 'no_such_asset', message: `no asset ${fm[1]}` } })
+      res.writeHead(200, { 'content-type': a.mime, 'content-length': a.bytes, etag: `"${a.sha256}"`, 'cache-control': 'private, max-age=31536000, immutable' })
+      if (req.method === 'HEAD') return res.end()
+      return store.open(a.sha256).pipe(res)
     }
     return send(404, { ok: false, error: { code: 'not_found', message: 'no such endpoint' } })
   } catch (e) {
@@ -157,4 +102,8 @@ if (!CFG.token || CFG.token.length < 16) {
 await mkdir(CFG.data, { recursive: true })
 await db.connect()
 await db.migrate()
+// Phase 3 turns a finished round into a message in the project's group ("@reviewer candidates
+// ready"); until then it is logged, so nothing finishes unseen.
+worker = startWorker({ store, stash: actions.stash, addAsset: actions.addAsset, finishGeneration: actions.finishGeneration,
+  onRoundDone: r => console.log(`round done: ${r.shot} ${r.ok} ok / ${r.failed} failed → ${r.status}`) })
 server.listen(CFG.port, '0.0.0.0', () => console.log(`studio listening on :${CFG.port}, files in ${CFG.data}`))
