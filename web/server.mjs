@@ -1186,9 +1186,13 @@ async function checkAgent(b, selfId = null) {
     else if (!Number.isInteger(Number(v)) || Number(v) < 1 || Number(v) > 60) throw new Say('agent.maxSteps')
     else out.max_steps = Number(v)
   }
+  // Creating with an explicitly empty model is allowed: that is the state agents seeded from bots/
+  // start in, and the crew importer uses it — which upstream and model each person runs on is the
+  // person's choice, and the first chat says "no model chosen yet". Omitting the field on create,
+  // or emptying it on an edit, is still an error.
   if (b.model !== undefined || !selfId) {
     const model = str(b.model).trim()
-    if (!model) throw new Say('agent.modelRequired')
+    if (!model && (selfId || b.model !== '')) throw new Say('agent.modelRequired')
     if (model.length > 200) throw new Say('agent.modelLong')
     out.model = model
   }

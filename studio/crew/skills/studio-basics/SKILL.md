@@ -6,7 +6,9 @@ description: 使用 studio 片场服务的基础规则和完整 CLI 命令表。
 # Studio 基础
 
 studio 是剧组的片场服务：资产库、镜头状态机、模型调用、预处理都在里面。
-你通过容器里的 `studio` 命令访问它。所有命令默认输出 JSON，加 `--human` 输出可读格式。
+你通过 `studio` 工具访问它：下面命令表里的每一行，就是一次工具调用 `{action, args}`，
+比如 `studio char refs 蛮吉 --look 战斗装 --angle 3-4` 就是
+`{"action": "char.refs", "args": {"name": "蛮吉", "look": "战斗装", "angle": "3-4"}}`。结果是 JSON。
 
 ## 开工第一步：确认项目
 
@@ -44,6 +46,7 @@ studio project info             # 世界观、画风、基调、禁忌
 | 命令 | 作用 |
 | --- | --- |
 | `studio scene list / show <场次>` | 场次和镜头列表 |
+| `studio scene add <场次> --title ... --script <该场剧本原文>` | 导演把剧本切成场次入库（原文照抄，之后只有人类能改） |
 | `studio shot plan <场次> --file <shots.json>` | 写入镜头表 |
 | `studio shot show <镜头>` | 镜头定义、状态、候选、审片历史 |
 | `studio shot prompt <镜头> --text ... --refs <id>...` | 保存生成方案 |
