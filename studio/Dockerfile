@@ -1,11 +1,12 @@
 # The studio service. Built from ./studio only — it shares no code with the app.
 #
 # ffmpeg is for contact sheets and frame extraction. Debian's build decodes 10-bit HEVC,
-# which is what Seedance 2.5 1080p and 2.0 4k return.
+# which is what Seedance 2.5 1080p and 2.0 4k return. The DejaVu font labels the sheet's cells
+# (#1, #2…); without it a reviewer can't say which candidate it means.
 FROM node:24-slim
 
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources || true
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /studio

@@ -164,6 +164,9 @@ create table if not exists generations (
   duration_ms     int
 );
 create index if not exists generations_recent on generations (engine, created_at);
+-- One shot.gen call = one round: n takes that finish together, get one "candidates ready" notice.
+alter table generations add column if not exists round text not null default '';
+create index if not exists generations_round on generations (shot_id, round);
 create index if not exists generations_shot on generations (shot_id);
 
 create table if not exists assets (
@@ -259,6 +262,20 @@ export async function connect({ tries = 60, waitMs = 2000 } = {}) {
 }
 
 export const migrate = () => q(SCHEMA)
+
+/** Run fn(client) in one transaction. fn gets a `q`-shaped function bound to the transaction. */
+export async function tx(fn) {
+  const c = await pool.connect()
+  try {
+    await c.query('begin')
+    const out = await fn((sql, params) => c.query(sql, params))
+    await c.query('commit')
+    return out
+  } catch (e) {
+    await c.query('rollback').catch(() => {})
+    throw e
+  } finally { c.release() }
+}
 
 export const newId = prefix => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
 
