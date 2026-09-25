@@ -12,7 +12,7 @@ CirrayaBot 上的 AI 剧组：4 个 agent + 5 个 skill，配合 `studio` 片场
 3. **studio 是唯一真源。** 角色包、镜头状态、审片记录只存在 studio 里。
    agent 的 `remember` 只记工作心得，不记设定。
 4. **密钥不进 agent 容器。** Seedance / GPT 图像 / ComfyUI 的 key 只在 studio 服务里，
-   agent 用按角色限权的 `STUDIO_TOKEN`。
+   agent 通过平台的 `studio` 工具访问，平台替它标明身份，studio 按岗位限权。
 
 ## 成员
 
@@ -38,7 +38,7 @@ CirrayaBot 上的 AI 剧组：4 个 agent + 5 个 skill，配合 `studio` 片场
 顾衡 → 整场过审后向人类汇报
 ```
 
-## Token 权限（studio 侧实现）
+## 岗位权限（studio 侧实现）
 
 | Agent | 可用命令 |
 | --- | --- |
@@ -47,9 +47,17 @@ CirrayaBot 上的 AI 剧组：4 个 agent + 5 个 skill，配合 `studio` 片场
 | 林野 | 全部读；`shot gen`；`shot prompt` |
 | 严青 | 全部读；`shot sheet`；`shot approve`；`shot reject`；`review *` |
 
-`char lock` / `loc lock`（定稿）和项目设定修改只有人类能做，走平台的执行前审批。
+`char lock` / `loc lock`（定稿）和项目设定修改只有人类能做，在 Web UI 的「片场」面板里操作。
 
 ## 导入方式
 
-`bots/` 只在首次启动时作为种子，之后改它无效。已部署的实例请在 Web UI 里新建 agent，
-把 `agents/*.md` 的「性格描述」部分粘进去；skill 放进技能库。
+`bots/` 只在首次启动时作为种子，之后改它无效。已部署的实例用导入脚本，一条命令：
+
+```bash
+docker compose exec app node studio/crew/import.mjs            # 建 4 个 agent、装 5 个 skill、建群、分配岗位
+docker compose exec app node studio/crew/import.mjs --dry-run  # 只看会做什么
+```
+
+可以重复运行：已有的 agent 只更新名字、职位和性格描述，**不动你选的上游和模型**；skill 按名字更新。
+导入的 agent 没有模型——按上表的「建议上游」，在「编辑 Agent」里给每个人选好上游和模型，
+审片（严青）的模型必须支持图片输入。然后在「片场」面板里建项目，通知群选这个群。

@@ -16,6 +16,9 @@ RUN npm install --no-audit --no-fund --omit=dev pg@8.23.0
 COPY web ./web
 COPY deploy ./deploy
 COPY bots ./bots
+# The film crew's spec, so `docker compose exec app node studio/crew/import.mjs` works on a deployment
+# that has no Node on the host.
+COPY studio/crew ./studio/crew
 
 ENV NODE_ENV=production WEB_PORT=8080 BIND_HOST=0.0.0.0
 EXPOSE 8080

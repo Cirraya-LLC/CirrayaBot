@@ -140,6 +140,7 @@ printing a warning nobody reads.
 | --- | --- | --- |
 | Agents, groups, chat history, shared memory, upstream config | PostgreSQL (`pgdata` volume) | `docker compose exec db pg_dump -U multiagent multiagent > x.sql` |
 | Each Agent's working directory, group shared drives | `./data/workspace/` | Just archive this directory |
+| Studio files (references, takes, contact sheets) | `studiodata` volume | `docker run --rm -v <project>_studiodata:/d -v $PWD:/b alpine tar czf /b/studio.tgz -C /d .` |
 
 The `bots/` directory is only **the seed for the first start** (the first run imports the Agents in
 it into the database, and also moves over the groups and chat history of an old `./workspace/`).
@@ -152,14 +153,39 @@ node web/model.mjs        # self-test for context budgeting and window inference
 node web/i18n.mjs         # self-test for the server message tables
 node web/memory.mjs       # self-test for an agent's self-notes (cap, duplicates)
 node web/approve.mjs      # self-test for which tool calls need a person first
+node studio/crew/import.mjs --self-test   # the crew spec parses the way the importer needs
 python3 check-bots.py     # check the seed definitions in bots/
 ```
+
+The studio has its own self-tests (`node studio/<module>.mjs`) and two end-to-end checks against
+fakes: `studio/e2e.mjs` and `studio/e2e-platform.mjs` — see `CLAUDE.md` 2.28.
 
 Without compose, pointing at an existing PostgreSQL:
 
 ```bash
 DATABASE_URL=postgres://user:pass@127.0.0.1:5432/multiagent node web/server.mjs
 ```
+
+## Film crew (studio)
+
+An AI film crew runs on top of the platform: a director, an art director, a cinematographer and a
+reviewer (`studio/crew/`), working in a group against the **studio** service — asset library, shots,
+Seedance video, GPT image / ComfyUI stills, contact sheets. The studio holds every model key; agents
+reach it only through the platform's `studio` tool, and each can do only its own job.
+
+1. Model keys in `.env` (they go to the studio container only), then `./start.sh`:
+   `SEEDANCE_BASE_URL` / `SEEDANCE_API_KEY` (ModelArk, or a relay with the same paths),
+   `GPT_IMAGE_BASE_URL` / `GPT_IMAGE_API_KEY` (OpenAI, or a relay; the base includes `/v1`),
+   `COMFY_URL` (a ComfyUI on this machine is `http://host.docker.internal:8188`).
+2. Import the crew — 4 Agents, 5 skills, a group, their studio roles:
+   `docker compose exec app node studio/crew/import.mjs` (safe to rerun; `--dry-run` shows the plan).
+3. In **Edit Agent**, give each one an upstream and a model (the reviewer's must accept images).
+4. In the **Studio** panel (sidebar), create the project and pick the crew's group as its notice group.
+   Locking characters and locations as final also happens there — only a person can.
+
+Then post the script in the group. Generation is limited to 40 videos an hour and 4 at once per
+project (`SEEDANCE_PER_HOUR` / `SEEDANCE_CONCURRENT`, or per project in its settings). Studio files
+live in the `studiodata` volume, its tables in the `studio` schema of the same database.
 
 ## Desktop client (Windows / macOS)
 

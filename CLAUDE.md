@@ -1585,7 +1585,7 @@ Decisions the boss made after the phase-0 report (his words, then the meaning):
 | scenes: "导演用 scene add 把它拆成场次" | The human posts the script; the director cuts it into scenes (code, title, script text). Only a person edits the text |
 | "把步数上限做成按 agent 可配" | `MAX_STEPS` (12) becomes a per-agent setting — a reviewer's batch is 5 steps per shot |
 | "Seedance 我填自己的转发站", "和官方路径一致" | Base URL + key are config; the relay speaks ModelArk's `/api/v3/contents/generations/tasks` |
-| "每个 agent 用哪个上游、哪个模型 手动选择" | The importer leaves `model` empty (same state as agents seeded from `bots/`) |
+| "每个 agent 用哪个上游、哪个模型 手动选择" | The importer leaves `model` empty (same state as agents seeded from `bots/`); a person picks it in Edit Agent |
 
 ### Shape
 
@@ -1778,7 +1778,33 @@ Verified in a browser too: the Studio bubble, the panel in zh-Hans, locking from
 sent); podman; the Flutter client (not touched — it shows Studio notices as a speaker named
 "Studio" and ignores `max_steps`).
 
-Not built yet: phase 4, the crew import.
+### Phase 4: importing the crew (2026-09-25)
+
+The boss, on fixing the spec to match: "可以，你来改，接下来不用每一步停，直接完成".
+
+- **`studio/crew/import.mjs`**, run as `docker compose exec app node studio/crew/import.mjs` (the app
+  image now carries `studio/crew/`, so the host needs no Node). Through the platform's HTTP API —
+  same validation as the UI. Agents get stable ids `crew-<role>` (Chinese names can't make slugs,
+  2.15, and the studio keys roles by id); skills installed on whoever lists them; group `剧组` with
+  the director as lead; studio roles set. `--dry-run` prints the plan.
+- **Idempotent, and it never touches what a person chose**: a rerun updates name / job / persona and
+  skill text only. Verified: gave 严青 an upstream, a model and `max_steps: 40`, reimported — all three
+  still there; second run created nothing new.
+- **Agents are created without a model** (the boss: "手动选择"). `POST /api/bots` now accepts an
+  explicitly empty `model: ''` on create — the state `bots/` seeds already start in, answered on the
+  first chat with "no model chosen yet". Omitting the field, or emptying it on an edit, is still 400.
+- **The spec was edited only where it no longer matched what was built** (diff is in git): the tool
+  instead of a CLI in the container (studio-basics); the 3rd rejection is the studio's, not the
+  reviewer's @ (persona + footage-review — otherwise a person gets told twice); `scene add` added to
+  the command table and to shot-breakdown step 1 (the scenes decision); README: token → platform
+  identity, locking in the Studio panel, import instructions. `--self-test` pins all of it.
+- Verified with a recording fake upstream: an imported reviewer's real turn carries her persona, her
+  two skills and not the director's, the studio section, and exactly one tool, `studio`.
+
+**Still not verified for the whole feature**: real Seedance / GPT image / ComfyUI and a real vision
+model on a real sheet (no keys here — everything upstream is a fake built from documented shapes);
+podman; the Flutter client (untouched). **Not built**: candidate prefilter scores; trimming
+`trim_to` takes; a human review UI (the boss: not this round).
 
 ⚠️ Testing in a sandbox whose egress proxy re-signs TLS: builds fail with
 `SELF_SIGNED_CERT_IN_CHAIN` at `npm install`. That's the sandbox, not the Dockerfile — test with a
@@ -1803,6 +1829,8 @@ node studio/shots.mjs      # self-test for the shot state machine (studio has re
 STUDIO_DATABASE_URL=… node studio/e2e.mjs   # the whole studio flow against fakes (see 2.28)
 node studio/e2e-platform.mjs <deploy dir>   # the crew loop through the running platform (see 2.28)
 node web/studio.mjs        # self-test for the platform's studio tool
+node studio/crew/import.mjs --self-test     # the crew spec parses the way the importer needs
+docker compose exec app node studio/crew/import.mjs   # import the crew into a deployment (see 2.28)
 python3 check-bots.py      # check the seed definitions in bots/
 
 cd app && flutter analyze . && flutter test    # desktop client (see 2.19)

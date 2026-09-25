@@ -8,6 +8,8 @@ description: 把剧本或场次描述拆成可生成的镜头表（shot list）�
 ## 流程
 
 1. `studio project info` 读画风和基调；`studio scene show <场次>` 读剧本段落。
+   剧本还没切成场次时，先按场切分，每场 `studio scene add <场次> --title ... --script <该场原文>`，
+   原文一字不改。
 2. 列出本场需要的角色、造型、场景，逐个 `studio char show` / `studio loc show` 确认资产存在且足够。
    缺了就先 @苏棠 补，写清楚缺什么（哪个角色、哪个造型、需要哪些角度或表情），等补齐再继续。
 3. 拆镜头，写 shots.json，`studio shot plan` 入库。
