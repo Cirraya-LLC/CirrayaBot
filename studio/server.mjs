@@ -19,6 +19,7 @@ import { createStore } from './store.mjs'
 import { parseActor, deny } from './roles.mjs'
 import { makeActions, StudioError, fail } from './actions.mjs'
 import { startWorker } from './worker.mjs'
+import { enqueue, startNotifier } from './notify.mjs'
 
 const CFG = {
   token: process.env.STUDIO_TOKEN || '',
@@ -102,8 +103,9 @@ if (!CFG.token || CFG.token.length < 16) {
 await mkdir(CFG.data, { recursive: true })
 await db.connect()
 await db.migrate()
-// Phase 3 turns a finished round into a message in the project's group ("@reviewer candidates
-// ready"); until then it is logged, so nothing finishes unseen.
+// A finished round becomes a line in the outbox: "candidates ready" for the reviewer, or "all
+// failed" for the cinematographer. The notifier delivers the outbox to the project's group.
 worker = startWorker({ store, stash: actions.stash, addAsset: actions.addAsset, finishGeneration: actions.finishGeneration,
-  onRoundDone: r => console.log(`round done: ${r.shot} ${r.ok} ok / ${r.failed} failed → ${r.status}`) })
+  onRoundDone: r => enqueue(r.project_id, { kind: 'round', ...r }) })
+startNotifier()
 server.listen(CFG.port, '0.0.0.0', () => console.log(`studio listening on :${CFG.port}, files in ${CFG.data}`))

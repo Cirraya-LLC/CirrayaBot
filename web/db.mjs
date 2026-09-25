@@ -160,6 +160,10 @@ alter table agents add column if not exists effort text not null default '';
 -- 'off', 'match' (only commands the pattern list catches) or 'all'.
 alter table agents add column if not exists approval text not null default '';
 
+-- Tool steps allowed in one turn. Null = the platform default (12). A reviewer going through a
+-- batch of shots needs about five per shot.
+alter table agents add column if not exists max_steps int;
+
 -- A tool call is a message too, so reopening a conversation still shows which commands ran.
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
 alter table messages drop constraint if exists messages_role_check;
@@ -216,18 +220,18 @@ export async function getAgent(id) {
 
 export async function upsertAgent(a) {
   const { rows } = await q(`
-    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, max_steps)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
-      approval = excluded.approval
+      approval = excluded.approval, max_steps = excluded.max_steps
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
-     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? ''])
+     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.max_steps ?? null])
   return rows[0]
 }
 

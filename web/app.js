@@ -183,8 +183,10 @@ async function drawHistory(c, ticket) {
       finishTool(toolLine(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, toolLabel(e.name, e.args)), e.output)
       continue
     }
-    // 'User' is the speaker the server stores for the person in group logs (data, not UI text)
-    if (c.kind === 'group') bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User').innerHTML = fmt(e.text)
+    // 'User' is the speaker the server stores for the person in group logs, 'Studio' the studio's notices
+    // (both data, not UI text). A Studio notice is a user-role row but not something *you* said.
+    if (c.kind === 'group' && e.speaker === 'Studio') bubble(null, false, t('st.speaker')).innerHTML = fmt(e.text)
+    else if (c.kind === 'group') bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User').innerHTML = fmt(e.text)
     else bubble(c.id, e.role === 'user').innerHTML = fmt(e.content)
   }
   if (!log.children.length) empty(c)
@@ -237,15 +239,15 @@ function fmt(text) {
   return h
 }
 
-function bubble(botId, mine) {
+function bubble(botId, mine, label = '') {
   const log = $('#log')
   if (log.querySelector('.empty')) log.innerHTML = ''
   const b = bot(botId)
   const el = document.createElement('div')
   el.className = 'msg' + (mine ? ' me' : '')
   el.innerHTML = `<div class="mav" style="background:${mine ? '#5b8cff' : col(b?.color)}">${
-    mine ? esc(t('msg.you')) : esc(b?.name?.slice(0,1) ?? '?')}</div>
-    <div class="mwrap"><div class="mname" style="color:${b ? col(b.color) : 'var(--dim)'}">${esc(b?.name ?? '')}</div>
+    mine ? esc(t('msg.you')) : esc((b?.name ?? label).slice(0,1) || '?')}</div>
+    <div class="mwrap"><div class="mname" style="color:${b ? col(b.color) : 'var(--dim)'}">${esc(b?.name ?? label)}</div>
     <div class="bub"></div></div>`
   log.appendChild(el); log.scrollTop = log.scrollHeight
   return el.querySelector('.bub')
@@ -516,6 +518,7 @@ function editBot(b) {
   $('#bapproval').innerHTML = ['', 'off', 'match', 'all']
     .map(m => `<option value="${m}">${esc(t(m ? `b.approval${m[0].toUpperCase()}${m.slice(1)}` : 'b.approvalDefault'))}</option>`).join('')
   $('#bapproval').value = ['off', 'match', 'all'].includes(b?.approval) ? b.approval : ''
+  $('#bsteps').value = b?.max_steps ?? ''
   $('#bcap').value = dollars(b?.daily_cap_micro)
   // A cap only means something when the upstream has prices; say so rather than let it look guarded.
   const u = b && spendOf(b.id)
@@ -551,6 +554,7 @@ $('#bsave').onclick = async () => {
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
     provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value,
+    max_steps: $('#bsteps').value.trim() === '' ? null : Number($('#bsteps').value),
     daily_cap_micro: cap === '' ? null : cap }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
@@ -1039,6 +1043,114 @@ async function loadBotSkills() {
   }
 }
 $('#addsk').onclick = () => openSkills(null, cur ? [cur.id] : [])
+
+// ═══ Studio panel ═══
+// Setting up a film and locking what is final. Reviewing is the crew's work and happens in the
+// group; this panel only does what the studio reserves for a person (project settings, who is on
+// the crew, lock / unlock).
+const ROLES = ['director', 'art', 'cinematographer', 'reviewer']
+const stCall = async (action, args = {}) => {
+  const r = await fetch(api('/api/studio/call'), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action, args }) })
+  if (!r.ok) throw new Error(await errText(r))
+  return r.json()
+}
+let stProjects = [], stShown = 0
+fetch(api('/api/studio/status')).then(r => r.json()).then(j => { $('#studiobtn').hidden = !j.enabled }).catch(() => {})
+
+async function openStudio(select = null) {
+  try { stProjects = await stCall('project.list') } catch (e) { alert(e.message); return }
+  const sel = $('#stproj')
+  sel.innerHTML = stProjects.length ? stProjects.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.id)})</option>`).join('')
+    : `<option value="">${esc(t('st.noProjects'))}</option>`
+  if (select) sel.value = select
+  $('#stbody').hidden = !stProjects.length
+  if (!$('#stdlg').open) $('#stdlg').showModal()
+  if (stProjects.length) await loadStudioProject(sel.value)
+}
+
+async function loadStudioProject(id) {
+  const ticket = ++stShown                           // switching projects quickly: drop the late answer
+  let info, crew, chars, locs
+  try { [info, crew, chars, locs] = await Promise.all([stCall('project.info', { project: id }), stCall('crew.list'),
+    stCall('char.list', { project: id }), stCall('loc.list', { project: id })]) }
+  catch (e) { alert(e.message); return }
+  if (ticket !== stShown) return
+  $('#stname').value = info.name
+  const { lang: plang = 'en', ...rest } = info.info ?? {}
+  $('#stlang').innerHTML = ['en', 'zh-Hans', 'zh-Hant'].map(l => `<option value="${l}">${esc(t(`st.lang.${l}`))}</option>`).join('')
+  $('#stlang').value = ['en', 'zh-Hans', 'zh-Hant'].includes(plang) ? plang : 'en'
+  const groups = CONVS.filter(c => c.kind === 'group')
+  $('#stgroup').innerHTML = `<option value="">${esc(t('st.noGroup'))}</option>` +
+    groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('')
+  $('#stgroup').value = groups.some(g => g.id === info.notify_group) ? info.notify_group : ''
+  $('#stinfo').value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''
+
+  // Crew: one role per agent, saved as soon as it is picked.
+  const roleOf = new Map(crew.map(c => [c.agent_id, c.role]))
+  const box = $('#stcrew'); box.innerHTML = ''
+  for (const b of BOTS) {
+    const row = document.createElement('div'); row.className = 'prow'
+    row.style.flexWrap = 'nowrap'
+    row.innerHTML = `<span style="flex:1;min-width:0">${esc(b.name)}</span><select style="width:200px;flex:0 0 200px;margin:0">${['', ...ROLES]
+      .map(r => `<option value="${r}">${esc(t(r ? `st.role.${r}` : 'st.role.none'))}</option>`).join('')}</select>`
+    const s = row.querySelector('select'); s.value = roleOf.get(b.id) ?? ''
+    s.onchange = async () => {
+      try { await stCall('crew.set', { agent_id: b.id, role: s.value || null }) }
+      catch (e) { alert(e.message); s.value = roleOf.get(b.id) ?? '' }
+    }
+    box.appendChild(row)
+  }
+
+  // Locks: characters (with their looks) and locations, each with its current references.
+  const locks = $('#stlocks'); locks.innerHTML = ''
+  if (!chars.length && !locs.length) locks.innerHTML = `<small class="rhint">${esc(t('st.nothingYet'))}</small>`
+  const lockRow = (label, status, onToggle, refsArgs) => {
+    const row = document.createElement('div'); row.className = 'pitem'; row.style.cursor = 'default'
+    row.innerHTML = `<div class="pn"><b>${esc(label)} <span class="st" style="font-size:10.5px;font-weight:400;color:${status === 'locked' ? 'var(--ok)' : 'var(--dim)'}">· ${
+      esc(t(status === 'locked' ? 'st.locked' : 'st.draft'))}</span></b><div class="thumbs" style="display:flex;gap:4px;margin-top:6px"></div></div>
+      <button class="btn">${esc(t(status === 'locked' ? 'st.unlock' : 'st.lock'))}</button>`
+    row.querySelector('button').onclick = async () => {
+      if (status !== 'locked' && !confirm(t('st.confirmLock', { name: label }))) return
+      try { await onToggle(status !== 'locked'); await loadStudioProject(id) } catch (e) { alert(e.message) }
+    }
+    // Thumbnails of what would become final: you lock what you have looked at.
+    stCall(refsArgs[0], { project: id, ...refsArgs[1], limit: 4 }).then(r => {
+      if (ticket !== stShown) return
+      row.querySelector('.thumbs').innerHTML = (r.refs ?? []).map(a =>
+        `<img src="${api(`/api/studio/file/${a.id}`)}" alt="${esc(a.tags.join(' '))}" title="${esc(a.tags.join(' '))}" style="height:64px;border-radius:6px;background:var(--field)">`).join('')
+        || `<small class="rhint" style="margin:0">${esc(t('st.noRefs'))}</small>`
+    }).catch(() => {})
+    locks.appendChild(row)
+  }
+  for (const c of chars) {
+    lockRow(c.name, c.status, lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: id, name: c.name }), ['char.refs', { name: c.name }])
+    for (const l of c.looks) lockRow(`${c.name} / ${l.name}`, l.status,
+      lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: id, name: c.name, look: l.name }), ['char.refs', { name: c.name, look: l.name }])
+  }
+  for (const l of locs) lockRow(l.name, l.status, lock => stCall(lock ? 'loc.lock' : 'loc.unlock', { project: id, name: l.name }), ['loc.refs', { name: l.name }])
+}
+
+$('#studiobtn').onclick = () => openStudio()
+$('#stclose').onclick = () => $('#stdlg').close()
+$('#stproj').onchange = () => loadStudioProject($('#stproj').value)
+$('#stnew').onclick = async () => {
+  const pid = prompt(t('st.newIdPrompt'))?.trim(); if (!pid) return
+  const name = prompt(t('st.newNamePrompt'), pid)?.trim(); if (!name) return
+  try { await stCall('project.create', { id: pid, name, info: { lang: lang === 'en' ? 'en' : lang } }); await openStudio(pid) }
+  catch (e) { alert(e.message) }
+}
+$('#stsave').onclick = async () => {
+  let rest = {}
+  if ($('#stinfo').value.trim()) {
+    try { rest = JSON.parse($('#stinfo').value) } catch { alert(t('st.infoBad')); return }
+    if (!rest || typeof rest !== 'object' || Array.isArray(rest)) { alert(t('st.infoBad')); return }
+  }
+  try {
+    await stCall('project.edit', { project: $('#stproj').value, name: $('#stname').value.trim(),
+      notify_group: $('#stgroup').value, info: { ...rest, lang: $('#stlang').value } })
+    await openStudio($('#stproj').value)
+  } catch (e) { alert(e.message) }
+}
 
 // ═══ Scheduled tasks ═══
 // Weekday names from Intl; 2024-01-07 was a Sunday, so index 0 = Sunday

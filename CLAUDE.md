@@ -1728,8 +1728,57 @@ and `host.docker.internal` reaching a server on the host. **Not verified**: real
 GPT image, real ComfyUI (no keys / no ComfyUI here — only fakes built from their documented
 shapes); prefilter scores (`candidates.prefilter_score` is always null — no similarity check yet).
 
-Not built yet: phase 3 the platform side (the `studio` tool, image results, event notifications
-into groups, reject routing, per-agent step limit, the lock panel), phase 4 the crew import.
+### Phase 3: the platform side (2026-09-25)
+
+- **The `studio` tool** (`web/studio.mjs`): `{action, args}`, the skills' CLI lines mapped in its
+  description ("studio char refs 蛮吉 --look 战斗装" → `char.refs {name, look}`). **Offered only to
+  agents the studio has on the crew** (`crew.list`, cached 30 s, forgotten when the panel changes a
+  role) — and **it works with `AGENT_TOOLS` off**: a film crew needs no shell, so an agent can have
+  the studio tool and nothing else. The actor is `agent:<bot.id>`, set by the platform; args can't
+  smuggle one in (self-tested). `asset.save {path}` / `shot.plan {file}` read the file off the
+  agent's own machine and send bytes.
+- **`shot.sheet` returns the sheet as an image the model sees**; `asset.show {view:true}` too.
+  runAgent now keeps **all images of the newest step (≤ 4)**, not just one. A model that can't see
+  images gets "you have NOT seen it — don't judge", never a silent text stand-in.
+- ⚠️ **A 429 used to blind the reviewer.** Any 4xx on a request carrying an image was read as "this
+  model can't see images": images dropped, `noImages` set for the rest of the turn — a rate limit
+  made the reviewer judge sheets it never saw. Now 408/409/429 go through the normal backoff with
+  the image kept. The platform e2e serves one 429 on the first sheet; **with the old condition put
+  back it fails** ("the rejection goes to the cinematographer" never happens).
+- **Studio → group: `POST /api/events/group/<gid>`, its own `STUDIO_EVENT_TOKEN`** (ACCESS_TOKEN
+  does not open it, and the studio never holds ACCESS_TOKEN). Stored as speaker **`Studio`**
+  (reserved like `User`; web shows "片场/Studio", not your own bubble); `wake: [agent ids]` → the
+  first one in the group is @-ed and the relay runs **unattended** (no stream for an approval card).
+  No wake → stored only. Answers 202 at once.
+- **One relay per group at a time** (`withGroup`, around the whole group branch of `converse`). A
+  person typing while "candidates ready" wakes the reviewer would otherwise run two relays over one log.
+- **The studio's outbox** (`studio/notify.mjs`, table `notifications`): round done → reviewer
+  ("candidates ready") or, if every take failed, the cinematographer; `shot.reject` → the route's
+  owner; the **3rd rejection → `@人类`/`@human` with the three reasons, waking nobody**. Lines to the
+  same target are merged after `NOTIFY_QUIET_MS` (15 s). Text in the project's `info.lang`
+  (en / zh-Hans / zh-Hant). A project with no `notify_group` drops its notices (marked, audited) —
+  a group set later must not receive last week's "candidates ready" as news.
+- **`agents.max_steps`** (1–60, empty = 12) in the Agent editor.
+- **Studio panel** (web, sidebar "Studio/片场", hidden when the studio isn't configured): create a
+  project, name / notice language / notify group / info JSON, crew roles, and **lock / unlock with
+  the reference thumbnails beside each item** (you lock what you have looked at). It goes through
+  `POST /api/studio/call` with an allowlist (`PANEL_ACTIONS`) — the panel doesn't generate or review.
+
+**`node studio/e2e-platform.mjs <deploy dir>`** drives the real deployment with a scripted fake model
+(one persona per `ROLE:` marker) and a fake Seedance, and checks the log and the studio: gen → "@严青
+候选已就绪" → the reviewer calls `shot.sheet` **and the next request carries the image** → reject →
+"@林野 被打回" → the cinematographer writes v2 and regenerates → … → "@人类 已被打回 3 次" and nobody
+answers it; the crew is offered `studio` and nothing else; an off-crew agent is offered nothing;
+`max_steps: 1` stops after one tool; both tokens are checked. Needs in `.env`:
+`SEEDANCE_BASE_URL=http://host.docker.internal:18777/sd SEEDANCE_API_KEY=sd-key NOTIFY_QUIET_MS=1000`.
+Verified in a browser too: the Studio bubble, the panel in zh-Hans, locking from the panel lands
+`locked` in the database.
+
+**Not verified**: a real vision model reading a real sheet (the fake only proves the image was
+sent); podman; the Flutter client (not touched — it shows Studio notices as a speaker named
+"Studio" and ignores `max_steps`).
+
+Not built yet: phase 4, the crew import.
 
 ⚠️ Testing in a sandbox whose egress proxy re-signs TLS: builds fail with
 `SELF_SIGNED_CERT_IN_CHAIN` at `npm install`. That's the sandbox, not the Dockerfile — test with a
@@ -1752,6 +1801,8 @@ node studio/store.mjs      # self-test for the studio's content-addressed file s
 node studio/roles.mjs      # self-test for who may do what in the studio
 node studio/shots.mjs      # self-test for the shot state machine (studio has refs/seedance/gptimage/comfy/media too)
 STUDIO_DATABASE_URL=… node studio/e2e.mjs   # the whole studio flow against fakes (see 2.28)
+node studio/e2e-platform.mjs <deploy dir>   # the crew loop through the running platform (see 2.28)
+node web/studio.mjs        # self-test for the platform's studio tool
 python3 check-bots.py      # check the seed definitions in bots/
 
 cd app && flutter analyze . && flutter test    # desktop client (see 2.19)

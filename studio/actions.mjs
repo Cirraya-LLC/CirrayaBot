@@ -12,6 +12,7 @@ import * as seedance from './seedance.mjs'
 import * as gptimage from './gptimage.mjs'
 import * as comfy from './comfy.mjs'
 import { probe, contactSheet, MAX_ROWS } from './media.mjs'
+import { enqueue } from './notify.mjs'
 
 export class StudioError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
@@ -220,6 +221,7 @@ export function makeActions({ store, kick = () => {} }) {
       notify_group: a.notify_group === undefined ? undefined : text(a.notify_group, 80),
     }))
   }
+  H['crew.list'] = async () => db.listCrew()
   H['crew.set'] = async a => {
     const id = text(a.agent_id, 63)
     if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) fail('bad_agent', 'agent_id must be a platform agent id')
@@ -676,6 +678,10 @@ export function makeActions({ store, kick = () => {} }) {
     await db.q('insert into reviews (shot_id, verdict, route, reason, note, scores, attempt, reviewer) values ($1,$2,$3,$4,$5,$6,$7,$8)',
       [s.id, 'reject', route, reason, text(a.note, 2000), obj(a.scores, 'scores') ?? {}, s2.reject_count, ctx.actorKey])
     const to = rejectTarget(s2.reject_count, route)
+    // The routing is the studio's job, not the reviewer's: the owner of the route (or a person, on
+    // the 3rd rejection) is told through the project's group.
+    const reasons = to === 'human' ? (await db.q(`select reason from reviews where shot_id = $1 and verdict = 'reject' order by id`, [s.id])).rows.map(r => r.reason) : []
+    await enqueue(p.id, { kind: 'reject', shot: s.code, attempt: s2.reject_count, route, reason, goes_to: to, reasons })
     return { shot: s.code, status: 'rejected', attempt: s2.reject_count, route, goes_to: to,
       note: to === 'human' ? `this is rejection #${s2.reject_count}: it goes to a person now, not back to the crew`
         : `the ${to} will be told; you don't need to @ them` }

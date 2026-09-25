@@ -33,7 +33,7 @@ const WRITE = {
 // token that can do it can be talked into doing it.
 export const HUMAN_ONLY = new Set([
   'char.lock', 'char.unlock', 'loc.lock', 'loc.unlock',
-  'project.create', 'project.edit', 'scene.edit', 'crew.set',
+  'project.create', 'project.edit', 'scene.edit', 'crew.set', 'crew.list',
 ])
 
 export const ACTIONS = new Set([...READ, ...Object.values(WRITE).flat(), ...HUMAN_ONLY])

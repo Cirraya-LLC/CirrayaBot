@@ -58,6 +58,9 @@ services:
       STUDIO_URL: http://studio:8090
       STUDIO_TOKEN: ${STUDIO_TOKEN:?run ./start.sh first to generate .env}
       STUDIO_DB_PASSWORD: ${STUDIO_DB_PASSWORD:?run ./start.sh first to generate .env}
+      # The other direction: the studio posts "candidates ready" into a group with this token. It opens
+      # only /api/events/…, not the platform — the studio never holds ACCESS_TOKEN.
+      STUDIO_EVENT_TOKEN: ${STUDIO_EVENT_TOKEN:?run ./start.sh first to generate .env}
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH}:/app/workspace
@@ -75,6 +78,9 @@ services:
     environment:
       STUDIO_DATABASE_URL: postgres://studio:${STUDIO_DB_PASSWORD}@db:5432/multiagent
       STUDIO_TOKEN: ${STUDIO_TOKEN}
+      APP_URL: http://app:8080
+      STUDIO_EVENT_TOKEN: ${STUDIO_EVENT_TOKEN}
+      NOTIFY_QUIET_MS: ${NOTIFY_QUIET_MS:-15000}
       # Model keys: here and nowhere else (not the app, not any agent container).
       SEEDANCE_BASE_URL: ${SEEDANCE_BASE_URL:-}
       SEEDANCE_API_KEY: ${SEEDANCE_API_KEY:-}

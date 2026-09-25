@@ -13,12 +13,13 @@ import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
+import * as studio from './studio.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 
 const WEB = join(ROOT, 'web')
 const WORKROOT = join(ROOT, 'workspace')
@@ -47,6 +48,9 @@ const toBot = (r, lang = 'en') => ({
   effort: r.effort ?? '',
   // When this one has to ask before acting. '' = follow the platform setting.
   approval: r.approval ?? '',
+  // Tool steps in one turn. null = the default (MAX_STEPS). A reviewer going through a batch needs
+  // about five per shot, which twelve can't hold.
+  max_steps: r.max_steps ?? null,
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
   tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
@@ -95,6 +99,7 @@ function transcriptRow(m, text) {
 }
 
 const MAX_HANDOFFS = 5       // max handoffs between agents in one round, so they can't chat forever
+const DEFAULT_STEPS = 12     // tool steps per turn unless the agent has its own max_steps
 const FETCH_MAX = 300        // how many candidate rows to pull from the DB; the real trimming is by context budget
 const TOOL_TRACE = 400       // how much tool output the transcript keeps, same as the live stream sends
 
@@ -150,7 +155,7 @@ async function groupRecallFor(bot) {
   return chunks.join('\n\n')
 }
 
-function systemFor(bot, memory, peers, box, recall, skills = [], lead = null) {
+function systemFor(bot, memory, peers, box, recall, skills = [], lead = null, studioRole = null) {
   const parts = [bot.persona]
   parts.push(`
 
@@ -197,6 +202,12 @@ Other rules:
 - When the matter is done and nobody needs to follow up, don't @ anyone — that is what stops the group chat.
 - People are watching you, so don't treat "I've done X" as a figure of speech: if you didn't do it, say so.`)
   }
+  if (studioRole) parts.push(`
+
+--- The studio ---
+You are on the film crew as the ${studioRole}. You work in the studio through the studio tool; your skills say which
+actions to use. The studio decides what your role may do and refuses the rest — don't try to get around a refusal.
+Messages from "[Studio]" are the studio itself telling the crew something happened (takes ready, a shot rejected).`)
   if (skills.length) parts.push(box ? `
 
 --- Your skills ---
@@ -302,6 +313,17 @@ function withAgent(id, fn) {
   const tail = run.catch(() => {})
   agentLocks.set(id, tail)
   tail.then(() => { if (agentLocks.get(id) === tail) agentLocks.delete(id) })
+  return run
+}
+
+/** One relay per group at a time — the same chaining as withAgent, keyed by group. */
+const groupLocks = new Map()
+function withGroup(id, fn) {
+  const prev = groupLocks.get(id) ?? Promise.resolve()
+  const run = prev.catch(() => {}).then(fn)
+  const tail = run.catch(() => {})
+  groupLocks.set(id, tail)
+  tail.then(() => { if (groupLocks.get(id) === tail) groupLocks.delete(id) })
   return run
 }
 
@@ -497,6 +519,7 @@ async function runBrowser(c, args, ctx) {
 // write_file goes over stdin instead of building a command line — quotes, newlines and $ in the content can't break anything.
 async function runTool(name, args, ctx) {
   const c = ctx.container
+  if (name === 'studio') return studio.runTool(args, ctx, { readFile: c ? (path, max) => readAgentFile(c, path, max) : null })
   if (name === 'browser') return runBrowser(c, args, ctx)
   if (name === 'read_skill') {
     const mine = await db.skillsFor(ctx.bot.id)
@@ -571,9 +594,28 @@ function noteUsage(ctx, p, usage) {
   }).catch(e => console.error(`usage row lost for ${ctx.bot.id}:`, e.message))
 }
 
-/** Call the model once. Protocol translation and stream parsing live in protocols.mjs; here we only decide whether to send tools. */
-function callModel(p, messages, onDelta, { bare = false, signal } = {}) {
-  return callUpstream(p, messages, CFG.tools && !bare ? TOOL_SPECS : null, onDelta, signal)
+/** Call the model once. Protocol translation and stream parsing live in protocols.mjs; here we only decide which tools to send. */
+function callModel(p, messages, onDelta, { bare = false, signal, tools } = {}) {
+  const list = bare ? null : tools !== undefined ? tools : CFG.tools ? TOOL_SPECS : null
+  return callUpstream(p, messages, list?.length ? list : null, onDelta, signal)
+}
+
+/**
+ * The tools this agent gets this turn: the machine tools when AGENT_TOOLS is on, plus `studio` if
+ * the studio has it on the crew. A film crew works without shells — the studio tool needs none.
+ */
+async function toolsFor(bot) {
+  const list = CFG.tools ? [...TOOL_SPECS] : []
+  if (await studio.roleOf(bot.id).catch(() => null)) list.push(studio.TOOL)
+  return list
+}
+
+/** A file on the agent's own machine, for the studio tool (asset.save, shot.plan from a file). */
+async function readAgentFile(c, path, max) {
+  const r = await execIn(c, ['-w', '/work', c, 'bash', '-lc', 'test -f "$1" || { echo "No such file" >&2; exit 2; }; ' +
+    `s=$(stat -c %s -- "$1"); [ "$s" -le ${max} ] || { echo "larger than ${max} bytes" >&2; exit 3; }; base64 -w0 -- "$1"`, '_', path])
+  if (r.code !== 0) return { error: (r.err || `exit ${r.code}`).trim().slice(0, 200) }
+  return { buf: Buffer.from(r.out.trim(), 'base64') }
 }
 
 // Upstream failures come from protocols.mjs flagged with `upstream` / `upstreamStatus`.
@@ -588,7 +630,7 @@ const upstreamStatus = e => Number(e?.upstreamStatus) || 0
  * and trimming only at the entrance would overflow by step three or four.
  */
 async function runAgent(p, messages, onDelta, onTool, ctx) {
-  const MAX_STEPS = 12
+  const MAX_STEPS = ctx.maxSteps ?? DEFAULT_STEPS
   const lang = ctx.lang ?? 'en'
   let text = ''
   for (let step = 0; step < MAX_STEPS; step++) {
@@ -603,11 +645,15 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     let r
     for (const wait of [0, 2000, 6000]) {
       if (wait) await new Promise(t => setTimeout(t, wait))
-      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal }); break }
+      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal, tools: ctx.tools }); break }
       catch (e) {
         // Rejected with a 4xx while carrying a screenshot: most likely this model doesn't accept images. Drop them and carry on,
         // and stop sending screenshots afterwards — otherwise a model that can't see images fails the whole turn on the browser
-        if (isUpstreamError(e) && upstreamStatus(e) >= 400 && upstreamStatus(e) < 500 && dropImages(messages)) {
+        // ⚠️ Not 408/409/429: those are "slow down", not "can't see images". Treating a rate limit as a
+        // refusal quietly blinded the reviewer for the rest of the turn — it went on judging a sheet it
+        // never saw. Those go through the ordinary backoff below.
+        const st = upstreamStatus(e)
+        if (isUpstreamError(e) && st >= 400 && st < 500 && ![408, 409, 429].includes(st) && dropImages(messages)) {
           ctx.noImages = true
           onTool?.({ phase: 'retry', reason: tr(lang, 'chat.noImages') })
           r = null; break
@@ -627,7 +673,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       content: content || null,
       tool_calls: calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } })),
     })
-    let shot = null
+    const shots = []
     for (const c of calls) {
       if (ctx.signal?.aborted) throw new Say('chat.aborted')
       let args = {}
@@ -645,7 +691,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
         : `Refused${ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
 Do not try this again. Do it another way, or say why you cannot.`
       const out = typeof res === 'string' ? res : res.text
-      if (res?.image) shot = res.image
+      if (res?.image) shots.push(res.image)
       // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored
       onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {} })
       // Keep the call in the transcript, cut to the same length the live stream shows — reopening a
@@ -654,11 +700,12 @@ Do not try this again. Do it another way, or say why you cannot.`
         { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE) })
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
     }
-    // A screenshot can't go into a tool result (Chat protocol tool messages only take text), so it follows as a user message.
-    // Keep only the newest one: ten screenshots in a turn would each be paid for at every step, and the old ones are useless
-    if (shot) {
-      dropImages(messages, '(a screenshot was here; it has been replaced by a newer one)')
-      messages.push({ role: 'user', content: '(this is the page captured by the browser screenshot just now)', images: [shot] })
+    // An image can't go into a tool result (Chat protocol tool messages only take text), so it follows as a user message.
+    // Keep only the newest step's images (at most 4): ten screenshots in a turn would each be paid for at every step,
+    // and the old ones are useless. Several in one step is real — a reviewer compares a sheet with a reference.
+    if (shots.length) {
+      dropImages(messages, '(an image was here; it has been replaced by a newer one)')
+      messages.push({ role: 'user', content: '(the image(s) your last tool call returned)', images: shots.slice(-4) })
     }
   }
   return text || '(hit the tool-use limit; stopping here for now)'
@@ -717,10 +764,11 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate) {
     await db.addMessage('dm', bot.id, { role: 'user', speaker: USER_SPEAKER, content: text })
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
+    const tools = await toolsFor(bot)
     const full = await runAgent(p,
-      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id)) },
+      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id), null, await studio.roleOf(bot.id).catch(() => null)) },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, ...gate })
+      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, tools, maxSteps: bot.max_steps ?? undefined, ...gate })
     await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
     return full
   })
@@ -730,13 +778,14 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate) {
 function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate) {
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
-    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead) }]
+    const tools = await toolsFor(bot)
+    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead, await studio.roleOf(bot.id).catch(() => null)) }]
     for (const e of await db.recent('group', groupId, FETCH_MAX)) {
       messages.push(e.speaker === bot.name
         ? { role: 'assistant', content: e.content }                                   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, ...gate })
+    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, tools, maxSteps: bot.max_steps ?? undefined, ...gate })
   })
 }
 
@@ -767,7 +816,8 @@ function findMention(text, peers) {
  * Sending from the UI and a scheduled task firing both go through this one function — two implementations would drift apart.
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
-async function converse(bots, groupId, providers, text, emit, signal, lang = 'en', { unattended = false } = {}) {
+async function converse(bots, groupId, providers, text, emit, signal, lang = 'en',
+  { unattended = false, from = USER_SPEAKER, first = null } = {}) {
   try {
     const policy = await approvalPolicy()
     // Per agent: its own setting wins, otherwise the platform's. Resolved here so one turn can't
@@ -782,13 +832,16 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
         t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang, gateFor(bot))
       emit('end', { botId: bot.id })
     } else {
-      // Group chat: colleagues relay. Who speaks first — whoever the user @-ed; if nobody, the group's lead;
-      // if no lead is set, whoever sorts first (the old behavior; Chief of Staff is 0).
+      // Group chat: colleagues relay. Who speaks first — whoever the caller names (an event), whoever the user
+      // @-ed; if nobody, the group's lead; if no lead is set, whoever sorts first (Chief of Staff is 0).
       const gid = groupId ?? 'main'
-      await db.addMessage('group', gid, { role: 'user', speaker: USER_SPEAKER, content: text })
+      // One relay per group at a time. A person typing while the studio's "candidates ready" wakes the reviewer
+      // would otherwise run two relays over one log, each reading the other's half-finished turns.
+      await withGroup(gid, async () => {
+      await db.addMessage('group', gid, { role: 'user', speaker: from, content: text })
       const g = (await db.listGroups()).find(x => x.id === gid)
       const lead = bots.find(b => b.id === g?.lead) ?? null
-      let speaker = findMention(text, bots) ?? lead ?? bots[0]
+      let speaker = first ?? findMention(text, bots) ?? lead ?? bots[0]
       const spoken = new Map()
       for (let turn = 0; turn <= MAX_HANDOFFS && !signal.aborted; turn++) {
         const peers = bots.filter(b => b.id !== speaker.id)
@@ -818,6 +871,7 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
         emit('handoff', { from: speaker.id, to: next.id })
         speaker = next
       }
+      })
     }
   } catch (e) {
     emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
@@ -1015,6 +1069,44 @@ async function providerFromBody(b) {
   }
 }
 
+// ---------- Events from the studio ----------
+/**
+ * A studio notice into a group: stored under the speaker "Studio", and — if `wake` names an agent
+ * who is in the group — that agent takes it from there, exactly as if a person had @-ed them.
+ * Unattended: there is no stream for an approval card, so anything gated is refused, not left waiting.
+ * Answers at once (202); the relay runs in the background, queued behind anything already running
+ * in that group.
+ */
+async function postEvent(req, gid) {
+  const want = Buffer.from(env.STUDIO_EVENT_TOKEN || '')
+  const got = Buffer.from(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))
+  if (!want.length || got.length !== want.length || !timingSafeEqual(got, want)) return [401, { error: 'bad event token' }]
+  const b = await readBody(req)
+  const text = str(b.text).trim().slice(0, 8000)
+  if (!text) return [400, { error: 'empty text' }]
+  const g = (await db.listGroups()).find(x => x.id === gid)
+  if (!g) return [404, { error: `no group ${gid}` }]
+  const bots = (await loadBots()).filter(x => g.members.includes(x.id))
+  const first = (Array.isArray(b.wake) ? b.wake : []).map(id => bots.find(x => x.id === id)).find(Boolean) ?? null
+  const content = first ? `@${first.name} ${text}` : text
+  if (!first || bots.length < 2) {
+    await withGroup(gid, () => db.addMessage('group', gid, { role: 'user', speaker: studio.STUDIO_SPEAKER, content }))
+    return [202, { woke: null }]
+  }
+  const providers = new Map()
+  try { for (const x of bots) providers.set(x.id, await providerFor(x)) }
+  catch (e) {
+    // Nobody can answer (an agent without a model, say): the notice is still kept, and the reason logged.
+    await withGroup(gid, () => db.addMessage('group', gid, { role: 'user', speaker: studio.STUDIO_SPEAKER, content }))
+    console.error(`Studio event for ${g.name} stored but nobody woken: ${errorText(e, 'en')}`)
+    return [202, { woke: null, error: errorText(e, 'en') }]
+  }
+  converse(bots, gid, providers, content, (ev, d) => {
+    if (ev === 'error') console.error(`Studio event relay in ${g.name}: ${d.message}`)
+  }, new AbortController().signal, 'en', { unattended: true, from: studio.STUDIO_SPEAKER, first })
+  return [202, { woke: first.id }]
+}
+
 // ---------- HTTP ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' }
 
@@ -1044,7 +1136,7 @@ async function checkAgent(b, selfId = null) {
     if (name.length > 40) throw new Say('agent.nameLong')
     // Group logs identify people by name: duplicate names make two agents take each other's words as their own,
     // and one named like the user marker (or "User", as the model sees it) would take the human's words as its own
-    if (name.toLowerCase() === USER_SPEAKER.toLowerCase()) throw new Say('agent.nameReserved', { name })
+    if ([USER_SPEAKER, studio.STUDIO_SPEAKER].some(r => r.toLowerCase() === name.toLowerCase())) throw new Say('agent.nameReserved', { name })
     const clash = (await db.listAgents()).find(a => a.id !== selfId && a.name.toLowerCase() === name.toLowerCase())
     if (clash) throw new Say('agent.exists', { name: clash.name })
     out.name = name
@@ -1086,6 +1178,13 @@ async function checkAgent(b, selfId = null) {
     const a = str(b.approval).trim()
     if (a && !APPROVAL_MODES.includes(a)) throw new Say('agent.approval', { list: APPROVAL_MODES.join(' / ') })
     out.approval = a
+  }
+  // null / '' = the default. Capped so a looping agent can't run a hundred paid steps in one turn.
+  if (b.max_steps !== undefined) {
+    const v = b.max_steps
+    if (v === null || v === '') out.max_steps = null
+    else if (!Number.isInteger(Number(v)) || Number(v) < 1 || Number(v) > 60) throw new Say('agent.maxSteps')
+    else out.max_steps = Number(v)
   }
   if (b.model !== undefined || !selfId) {
     const model = str(b.model).trim()
@@ -1134,6 +1233,13 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/healthz') {
     try { await db.pool.query('select 1'); return send(200, { ok: true }) }
     catch (e) { return send(503, { ok: false, error: String(e.message ?? e) }) }
+  }
+  // The studio telling a group something ("candidates ready"). Its own token, not ACCESS_TOKEN: the
+  // studio must not hold the key to every container shell just to post a notice.
+  const evm = url.pathname.match(/^\/api\/events\/group\/([\w-]+)$/)
+  if (evm && req.method === 'POST') {
+    try { return send(...await postEvent(req, evm[1])) }
+    catch (e) { return send(e.status ?? 500, { error: e instanceof Say ? e.text('en') : String(e.message ?? e) }) }
   }
   if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
   if (CFG.token && url.searchParams.get('k') === CFG.token)
@@ -1561,6 +1667,24 @@ const server = createServer(async (req, res) => {
       return send(200, (await db.recent('group', gr[1], FETCH_MAX, { tools: true }))
         .map(m => transcriptRow(m, { speaker: m.speaker, text: m.content })))
     if (gr && req.method === 'DELETE') { await db.clearMessages('group', gr[1]); return send(200, { ok: true }) }
+
+    // ---- The Studio panel: a person setting up projects, the crew, and locking what is final ----
+    if (url.pathname === '/api/studio/status' && req.method === 'GET') return send(200, { enabled: studio.enabled() })
+    if (url.pathname === '/api/studio/call' && req.method === 'POST') {
+      const { action, args = {} } = await readBody(req)
+      if (!studio.PANEL_ACTIONS.has(action)) return send(400, { error: t('studio.notPanel', { action: String(action) }) })
+      const r = await studio.call('human', action, args)
+      if (action === 'crew.set') studio.forgetCrew()      // a new role takes effect on the next turn, not in 30 s
+      return r.ok ? send(200, r.result) : send(r.status || 502, { error: r.error?.message ?? 'studio error', code: r.error?.code })
+    }
+    const sf = url.pathname.match(/^\/api\/studio\/file\/([\w-]{1,60})$/)
+    if (sf && req.method === 'GET') {
+      // Images only: the panel shows reference thumbnails, it doesn't play footage.
+      const f = await studio.file(sf[1]).catch(() => null)
+      if (!f || !f.mime.startsWith('image/')) return send(404, { error: t('studio.noFile') })
+      res.writeHead(200, { 'content-type': f.mime, 'cache-control': 'private, max-age=86400' })
+      return res.end(f.buf)
+    }
 
     // Static files
     const p = url.pathname === '/' ? '/index.html' : url.pathname

@@ -363,6 +363,7 @@
     <button class="fitem" id="newbot" data-tip-key="side.newAgent"><b>＋</b> <span data-i18n="side.newAgent"></span></button>
     <button class="fitem" id="prov" data-tip-key="side.providers"><b>⚙</b> <span data-i18n="side.providers"></span></button>
     <button class="fitem" id="skills" data-tip-key="side.skills"><b>✦</b> <span data-i18n="side.skills"></span></button>
+    <button class="fitem" id="studiobtn" data-tip-key="side.studio" hidden><b>S</b> <span data-i18n="side.studio"></span></button>
     <label class="fitem" data-tip-key="common.theme"><b class="half"></b> <select id="theme" data-i18n-aria-label="common.theme"></select></label>
     <label class="fitem" data-tip-key="common.language"><b>🌐</b> <select id="lang" data-i18n-aria-label="common.language"></select></label>
     <div class="fitem" id="spendfoot" style="cursor:default"><b>$</b> <span></span></div>
@@ -454,6 +455,37 @@
   </div>
 </dialog>
 
+<dialog id="stdlg" style="width:720px">
+  <h4 data-i18n="st.title"></h4>
+  <small class="rhint" data-i18n="st.intro"></small>
+  <div class="prow" style="flex-wrap:nowrap">
+    <select id="stproj" data-i18n-aria-label="st.project" style="flex:1;margin:0"></select>
+    <button class="btn" id="stnew" data-i18n="st.newProject"></button>
+  </div>
+  <div id="stbody">
+    <div class="psplit"></div>
+    <h4 data-i18n="st.projectSec"></h4>
+    <input type="text" id="stname" data-i18n-placeholder="st.namePh" autocomplete="off">
+    <div class="brow">
+      <select id="stlang" data-i18n-title="st.langTitle"></select>
+      <select id="stgroup" data-i18n-title="st.groupTitle"></select>
+    </div>
+    <small class="rhint" data-i18n="st.groupHint"></small>
+    <textarea id="stinfo" rows="6" spellcheck="false" style="font:12.5px/1.6 ui-monospace,Menlo,monospace" data-i18n-placeholder="st.infoPh"></textarea>
+    <small class="rhint" data-i18n="st.infoHint"></small>
+    <div class="acts" style="margin-top:0"><button class="btn pri" id="stsave" data-i18n="common.save"></button></div>
+    <div class="psplit"></div>
+    <h4 data-i18n="st.crewSec"></h4>
+    <small class="rhint" data-i18n="st.crewHint"></small>
+    <div id="stcrew"></div>
+    <div class="psplit"></div>
+    <h4 data-i18n="st.lockSec"></h4>
+    <small class="rhint" data-i18n="st.lockHint"></small>
+    <div id="stlocks"></div>
+  </div>
+  <div class="acts"><button class="btn" id="stclose" data-i18n="common.close"></button></div>
+</dialog>
+
 <dialog id="rdlg">
   <h4 id="rtitle" data-i18n="r.new"></h4>
   <input type="text" id="rname" data-i18n-placeholder="r.namePh" autocomplete="off">
@@ -506,6 +538,8 @@
     <select id="bapproval" data-i18n-title="b.approvalTitle"></select>
   </div>
   <small class="rhint" data-i18n="b.effortHint"></small>
+  <input type="number" id="bsteps" min="1" max="60" step="1" data-i18n-placeholder="b.stepsPh" autocomplete="off">
+  <small class="rhint" data-i18n="b.stepsHint"></small>
   <input type="text" id="bcap" data-i18n-placeholder="sp.capPh" autocomplete="off">
   <small class="rhint" id="bcaphint"></small>
   <div class="acts">
