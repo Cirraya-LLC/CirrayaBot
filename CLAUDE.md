@@ -1567,6 +1567,118 @@ and the whole flow runs with zero console errors.
 of standing allowances nobody re-reads is how permission prompts stop meaning anything. The gate
 also doesn't cover the human-driven browser takeover (2.22.2), which is a person acting already.
 
+## 2.28 The film crew / studio (2026-09-25, branch `feat/studio`)
+
+The boss: build an AI film crew on CirrayaBot — 4 agents and 5 skills (`studio/crew/`, the
+spec; its README has the permission table, `skills/studio-basics/SKILL.md` the command list)
+plus a `studio` service that does the grunt work: asset library, shot state machine, model
+adapters (Seedance 2.0/2.5, GPT image, remote ComfyUI), FFmpeg contact sheets. Several films at
+once, everything isolated per project.
+
+Decisions the boss made after the phase-0 report (his words, then the meaning):
+
+| The boss | Meaning |
+| --- | --- |
+| "直接在卷上存" (store it straight on the volume) | No MinIO. Community MinIO has shipped no binaries/images since 2025-10 and was archived 2026-04 |
+| "cli暂时不开发，用webui" + picked option A | **No CLI in agent containers.** Agents get a platform tool; the app calls the studio for them |
+| "加一个很小的定稿面板…只做定稿，不是审片" | A tiny Web UI panel for locking characters/locations. Not a review UI |
+| scenes: "导演用 scene add 把它拆成场次" | The human posts the script; the director cuts it into scenes (code, title, script text). Only a person edits the text |
+| "把步数上限做成按 agent 可配" | `MAX_STEPS` (12) becomes a per-agent setting — a reviewer's batch is 5 steps per shot |
+| "Seedance 我填自己的转发站", "和官方路径一致" | Base URL + key are config; the relay speaks ModelArk's `/api/v3/contents/generations/tasks` |
+| "每个 agent 用哪个上游、哪个模型 手动选择" | The importer leaves `model` empty (same state as agents seeded from `bots/`) |
+
+### Shape
+
+```
+app (web/server.mjs) ──Bearer STUDIO_TOKEN + x-studio-actor──▶ studio (studio/server.mjs, :8090, internal)
+                                                                 ├─ postgres schema `studio`, role `studio`
+                                                                 └─ volume studiodata:/data (content-addressed)
+```
+
+- **The studio publishes no port and agents can't reach it.** Agent containers sit on the
+  default bridge, the studio on the compose network — verified: `studio` doesn't resolve and its
+  IP times out from a bridge container. Agents act through the platform, which says who they are
+  (`x-studio-actor: agent:<id>` or `human`). **Identity is set by code, never by a model**, and no
+  agent container ever holds the token or a model key.
+- **One RPC door**: `POST /v1/call {action, args}` → `{ok, result}` or `{ok:false, error:{code, message}}`.
+  Messages are English sentences an agent can act on ("char.lock can only be done by a person —
+  ask the user"); the UI maps `code` to its three languages.
+- **Permissions are `studio/roles.mjs`** (pure, `node studio/roles.mjs`): everyone on the crew
+  reads; writes per the README table; `char/loc lock|unlock`, `project.create/edit`,
+  `scene.edit`, `crew.set` are **human only** — not "an agent after a human clicks approve",
+  because then the agent's identity could do it. **An agent with no crew row can't even read.**
+  Roles are keyed by agent id (`crew` table), not name — names change.
+- Every write and every refusal lands in `studio.audit`. A refusal is worth reading: an agent
+  trying something outside its job is the first sign that something it read is talking to it.
+- **`project.use` is per caller** (`actor_project`): the director switching films doesn't switch
+  the reviewer. Verified.
+
+### Files: `studio/store.mjs`
+
+`objects/ab/cd/<sha256>`, the name is the hash computed **while** writing, the last step is
+`link(tmp, final)` (fails if it exists → nothing is ever overwritten; two writers of the same
+bytes both succeed), then `chmod 0444`. Oversized input fails without leaving a tmp file. Rows
+in `assets` point at a sha; a row's tags/status may change, the bytes never do. Self-test
+`node studio/store.mjs`, including a tampered object caught by `verify`.
+
+### Database
+
+Tables in schema `studio`: projects, crew, actor_project, characters, looks, locations,
+**scenes**, shots, shot_prompts (every version kept — one variable at a time is useless without
+the old ones), generations (**lineage**: engine, model, prompt, prompt_version, ref asset ids,
+params, remote task id, status, error, usage, timing, outputs), assets, candidates (numbers per
+shot, never reused), reviews (`attempt` counts rejections — the 3rd goes to a person), loras, audit.
+
+**The studio's role can't read the app's tables** (verified: `permission denied for table
+providers`). The app creates it in `provisionStudio` on every start (only the app has the
+superuser password), with the password quoted by the server (`format(%L)`, tested with `'` and `"`).
+
+⚠️ **`create schema if not exists` fails for a role without CREATE on the database even when the
+schema exists** — Postgres checks the privilege first. Symptom: the studio dies at startup with
+"permission denied for database multiagent" although the schema is right there. The studio's
+migration therefore never creates the schema; the app does.
+
+### Deployment
+
+- compose: `studio` builds from `./studio` (node:24-slim + ffmpeg, which decodes the 10-bit HEVC
+  that Seedance 2.5 1080p / 2.0 4k return), `depends_on: app: service_healthy` (the role must
+  exist first), named volume `studiodata` (nothing else mounts it, so no host path — unlike
+  agent workspaces, 2.18.2). The app gets `STUDIO_URL`, `STUDIO_TOKEN`, `STUDIO_DB_PASSWORD`.
+- `start.sh` generates `STUDIO_TOKEN` / `STUDIO_DB_PASSWORD` with `ensure`, so **an existing
+  deployment upgrades by rerunning `./start.sh`**; a plain `compose up` without it stops at the
+  `:?run ./start.sh first` guard instead of starting half-configured.
+- Model keys (Seedance relay, GPT image, ComfyUI) go into the studio's environment only (phase 2).
+
+### Seedance facts (from ModelArk's docs, 2026-09-25 — not memory)
+
+Create `POST {base}/api/v3/contents/generations/tasks`, query `GET …/tasks/{id}`. Model ids
+`dreamina-seedance-2-0-260128` (+ `-fast-260128`, `-mini-260615`), `dreamina-seedance-2-5-260628`.
+Reference images go in `content[]` as `image_url` with role `first_frame` / `last_frame` /
+`reference_image`, URL or `data:` base64 (body ≤ 64 MB); 2.5 takes 1–30 references, 2.0 1–9.
+**`video_url` and `last_frame_url` expire after 24 hours** and tasks are queryable for 7 days —
+download on success, never store only the URL. **`generate_audio` defaults to true** — set it.
+2.0 rejects reference images with real human faces. Draft mode (480p, then a final from the draft
+id) is the cheap way to "draw cards". Rate limits are per model in the console: make ours config.
+
+### Verified / not verified (phase 1)
+
+Verified, real machine: `./start.sh` on an **existing main-branch deployment** upgraded it
+(STUDIO_* added to .env, role created, studio healthy); rerunning `start.sh` left .env
+byte-identical; a project survives a restart; role fence; per-caller project; refusals audited;
+the studio is unreachable from the host and from a bridge container.
+
+Not verified: **podman** (as for the rest of the product, 2.18.6). The studio needs no socket
+and uses a named volume, so it adds nothing podman-specific, but "adds nothing" isn't "ran".
+
+Not built yet: everything past projects/crew — phase 2 is the asset/shot/review actions and the
+generation adapters, phase 3 the platform side (the `studio` tool, image results, event
+notifications into groups, per-agent step limit, the lock panel), phase 4 the crew import.
+
+⚠️ Testing in a sandbox whose egress proxy re-signs TLS: builds fail with
+`SELF_SIGNED_CERT_IN_CHAIN` at `npm install`. That's the sandbox, not the Dockerfile — test with a
+local, uncommitted Dockerfile that adds the proxy CA; never commit that. Docker Hub also
+rate-limits anonymous pulls (429); `mirror.gcr.io/library/<image>` + retag works.
+
 ## 3. What runs now
 
 ```bash
@@ -1579,6 +1691,8 @@ node web/approve.mjs       # self-test for which tool calls need a person
 node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
+node studio/store.mjs      # self-test for the studio's content-addressed file store
+node studio/roles.mjs      # self-test for who may do what in the studio
 python3 check-bots.py      # check the seed definitions in bots/
 
 cd app && flutter analyze . && flutter test    # desktop client (see 2.19)

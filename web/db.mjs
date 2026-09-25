@@ -183,6 +183,25 @@ export async function connect({ tries = 30, waitMs = 2000 } = {}) {
 
 export async function migrate() { await q(SCHEMA) }
 
+/**
+ * The studio's own database role: owns the `studio` schema and has no grants on anything
+ * here, so the studio can't read `providers` (every LLM key) or the chat history.
+ *
+ * Created here because only the app holds the superuser password, and on every start
+ * because .env may have changed the password since. The password is quoted by the server
+ * (format %L), never spliced into SQL by us.
+ */
+export async function provisionStudio(password) {
+  if (!password) return false
+  const exists = (await q(`select 1 from pg_roles where rolname = 'studio'`)).rowCount > 0
+  const { rows } = await q(`select format($1::text, $2::text) as sql`,
+    [exists ? 'alter role studio with login password %L' : 'create role studio with login password %L', password])
+  await q(rows[0].sql)
+  await q('create schema if not exists studio authorization studio')
+  await q('alter role studio set search_path = studio')
+  return true
+}
+
 // ---------- Agent ----------
 const COLORS = ['#4f8cff', '#3ecf8e', '#ffb454', '#c678dd', '#e06c75', '#56b6c2', '#d19a66']
 

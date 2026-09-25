@@ -1596,6 +1596,10 @@ Set one in .env (./start.sh generates it), or change BIND_HOST back to 127.0.0.1
 
 await db.connect()
 await db.migrate()
+// The studio can't start without its role — but the chat must not go down with it (an external
+// DATABASE_URL whose user can't create roles is the likely case). Say it loudly and carry on.
+try { if (await db.provisionStudio(env.STUDIO_DB_PASSWORD)) console.log('Studio database role is ready') }
+catch (e) { console.error(`Could not create the studio's database role, so the studio won't start: ${e.message}`) }
 const s = await db.seed(ROOT)
 if (s.seeded) console.log(`First start, imported from files: ${s.agents} agents, ${s.groups} groups, ${s.messages} messages`)
 if (await db.seedProviderFromEnv(env)) console.log('Created the default upstream from .env (change it later in the UI ⚙)')
