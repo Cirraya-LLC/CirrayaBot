@@ -32,8 +32,8 @@ A **Bot org layer** on top of **DeepSeek Harness (dsh)**, making an open-source 
 
 **⚠️ This section describes the conclusion of the 2026-09-05 round and has been overturned by 2.12** —
 the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
-2.6–2.11 are kept because the dsh source-code findings in them still hold and will be needed the day
-we plug in the runtime.
+2.6–2.11 are kept because the dsh source-code findings in them still hold. **Since 2.29 agents whose
+model is `deepseek-*` run their turns on dsh** (the rest of the platform stays ours).
 
 **For the current shape see 2.12 and 2.18**: PostgreSQL + one container per Agent + one-command
 compose deployment.
@@ -279,7 +279,8 @@ Measured: the Researcher's preset listed only web / fs-search / todo, and it rep
 So **a Bot's off-limits areas only hold after the host composition disables those tool rows**.
 dsh's official web profile does exactly that; the 17 disable rows in `headless.patch.yml` are copied
 from it. **When adding a new tool, keep this list in sync**, otherwise the new tool is unconditionally
-visible to every Bot.
+visible to every Bot. (The product's own use of dsh, 2.29, keeps its list in `deploy/dsh/run.mjs`
+and trips on any leak at runtime.)
 
 ### 2. `agentPresets.mount()` has exactly one call site in the whole codebase
 
@@ -1647,7 +1648,8 @@ migration therefore never creates the schema; the app does.
 - `start.sh` generates `STUDIO_TOKEN` / `STUDIO_DB_PASSWORD` with `ensure`, so **an existing
   deployment upgrades by rerunning `./start.sh`**; a plain `compose up` without it stops at the
   `:?run ./start.sh first` guard instead of starting half-configured.
-- Model keys go into the studio's environment only: `SEEDANCE_BASE_URL/_API_KEY` (ModelArk or the
+- Model keys go into the studio only — its environment, or since 2.29 the Keys panel (stored in the
+  studio's own `config` table, winning over .env): `SEEDANCE_BASE_URL/_API_KEY` (ModelArk or the
   boss's relay, same paths), `GPT_IMAGE_BASE_URL/_API_KEY/_MODEL` (OpenAI or his relay; base
   includes `/v1`), `COMFY_URL` (his own ComfyUI; `host.docker.internal` works from the studio via
   `extra_hosts: host-gateway` — verified with docker, **not verified with podman**).
@@ -1811,6 +1813,115 @@ podman; the Flutter client (untouched). **Not built**: candidate prefilter score
 local, uncommitted Dockerfile that adds the proxy CA; never commit that. Docker Hub also
 rate-limits anonymous pulls (429); `mirror.gcr.io/library/<image>` + retag works.
 
+## 2.29 A Keys panel, and DeepSeek models on DeepSeek Harness (2026-09-25, branch `feat/studio`)
+
+The boss: "填apikey做成ui，单独有个key接入面板，在接入deepseek harness，在使用deepseek模型的时候用这个"
+(put API-key entry in the UI as its own Keys panel; plug in DeepSeek Harness; use it when a DeepSeek
+model is used). Then, asked:
+
+| Asked | The boss chose |
+| --- | --- |
+| What the panel holds | "片场 key + DeepSeek key": Seedance / GPT image / ComfyUI URL, plus a DeepSeek key. Last four characters only, a Test button, studio keys stored **in the studio**, .env as the fallback |
+| When dsh is used | "模型名是 deepseek-* 就自动走" — the model name decides, no switch |
+| The costs | "接受，先接进来": no token streaming, tool images not visible to it, cancel = kill |
+
+### The Keys panel
+
+- **DeepSeek's key is the platform's** (`settings` row `keys.deepseek` = `{base_url, api_key}`, like
+  the upstreams' keys in `providers`); `GET/PUT /api/keys/deepseek`, `POST …/test`.
+- **The studio's keys stay in the studio** (`studio/keys.mjs`, table `studio.config`, one row per
+  field): human-only `keys.get / keys.set / keys.test` through the panel's `/api/studio/call`. The
+  panel wins **per field**, .env is the fallback; the adapters read `value()` synchronously from a
+  cache the studio refreshes after every `keys.set` (one process).
+- **Nothing sends a key back**: views carry `••••` + the last four. An empty key box keeps the key;
+  "Clear key" drops back to .env. The audit row for `keys.set` names the group, never a value —
+  the e2e greps `studio.audit` and `settings` for the key it set.
+- The form shows only what was set **in the panel**; the .env/default value is the placeholder. Filled
+  in instead, one Save would copy .env into the panel and later .env edits would silently stop working.
+- **Test costs nothing**: Seedance lists one task, GPT image lists models, ComfyUI `GET /system_stats`
+  (checked in ComfyUI's server.py), DeepSeek `GET /models` plus `run.mjs --version` in the harness.
+  Test saves first if the form changed — that's what a person pressing it means. Results carry a
+  `code` the UI translates (`key.t.*`).
+
+### DeepSeek Harness: the shape
+
+```
+runAgent ─(model deepseek-*)─▶ runDshTurn: docker exec -i <AGENT_PREFIX>-dsh node /opt/dsh/run.mjs
+   │                              stdin line 1 = {rt, key, base_url, system, mcp_url, mcp_token}
+   │                              then dsh's SDK JSON-RPC both ways (profile sdk)
+   └─ execTool ◀── MCP tools/call ◀── dsh      app:8081/mcp — unpublished port, per-turn bearer token
+```
+
+- **One runtime per turn** (~1 s to start): the system prompt changes every turn (memory, recall,
+  skills), a fresh `HOME`/`DSH_HOME` has no session to go stale (reusing a session id in one home
+  errors "session already exists"), and cancel is just ending it. History travels **inside** the
+  one user message (`renderTurn`), after `fitContext`.
+- **Everything around the loop is the platform's**: `execTool` (factored out of `runAgent`) runs
+  approvals, the tool, the card and the transcript row for both loops; usage rows come from each
+  `assistant/message`'s `usage`; the cap is checked before the turn and before **every tool call**
+  — i.e. before every model call after the first, which is where `runAgent` checks too (dsh's own
+  model calls can't be intercepted; the call that crosses the cap is the last, in both loops).
+  `max_steps` counts `step/start` events and kills the runtime when step N+1 starts — like
+  `runAgent`, the last step's tools run and no wrap-up call follows.
+- **The key never goes on a command line or into `docker exec -e`** (`ps`, `docker inspect`): it is
+  stdin line 1, and `run.mjs` puts it only into the dsh child's environment.
+- **The patch is written as JSON** (YAML reads it), with NEL / LS / PS / BOM escaped — YAML 1.1
+  parsers treat some as line breaks. Verified with CJK, quotes, `#`, `---`, `- ` in the persona.
+- **The `dsh` container holds nothing worth reaching**: no docker socket, no volumes, no secret in
+  its environment, runs as `node`. It can reach app:8080 (no token) and the internet (it must, for
+  DeepSeek). `DSH_PERMISSION_MODE=danger-full-access` only because dsh would otherwise hold every MCP
+  call for an approval nobody can give over the SDK — the platform asks its own question first.
+- Effort: `low → low`, `medium → high`, `high → max` (dsh's vocabulary is off/low/high/max).
+
+### ⚠️ What was hit
+
+1. **The tripwire must watch `request/header`, not `tool/call`.** `request/header` lists exactly the
+   tools the next model call offers. `tool/call` also fires when the model invents a name (`bash`
+   → `UNKNOWN_TOOL`) — watching it would stop turns for the model's mistake. **Mutation-checked**:
+   with the disabled rows removed from `run.mjs`, the real deployment stopped the first turn with
+   "DeepSeek Harness offered its model a tool of its own (write)". When upgrading dsh, run the e2e.
+2. **dsh's defaults are not "send nothing"**: with no effort it sends `thinking: enabled`,
+   `reasoning_effort: high`, `max_tokens: 256000`, and **every request body carries
+   `dsh_plugin_packages`** (the list of its plugin packages). DeepSeek's own API takes that; a strict
+   relay might reject the unknown field. Empty effort = dsh's default, not the model's.
+3. **MCP tool names are `mcp__platform__<name>`**, fixed by dsh-mcp-client; the system prompt gets a
+   line saying so (`TOOL_NOTE`), since skills and personas say "the studio tool".
+4. **The MCP call and the assistant message that asked for it arrive on different channels** (HTTP
+   vs stdout). Unordered, the card rendered above its own words and — worse — the cap check ran before
+   the usage row of the call that crossed it was written. `dshToolCall` waits (≤ 0.5 s) for the
+   message, then awaits its usage insert (`noteUsage` now returns the promise), then checks the cap.
+   The e2e's cap case: exactly one call in the turn that crossed it, zero in the next.
+5. **Killing the `docker exec` client does close the runtime's stdin** (verified: SIGKILL on the
+   client → `run.mjs` ended dsh and deleted `/tmp/dsh/<rt>`). Unlike 2.22.1, where curl was stuck
+   *writing*. `run.mjs --kill <rt>` stays as the backstop, plus a 2-hour lifetime.
+6. A boot failure (bad MCP token, bad patch) is a 40-line stack; the error surfaced is the `Error…`
+   lines, not the last three lines of stack.
+7. The slim image has no `ps`; a `/proc` scan from `sh -c` matches **itself** (its command line says
+   run.mjs) — 2.9.5 once more. The e2e skips `$$`.
+
+### Verified / not verified
+
+Verified (compose deployment, fakes for DeepSeek and Seedance — `node deploy/dsh/e2e.mjs <dir>`):
+the panel stores and hides keys (both kinds), Test reaches the service with the panel's key, an
+agent is refused `keys.get`, clearing falls back to .env, the audit holds no key; a DeepSeek agent's
+turn uses **the panel's key**, is offered **only** `mcp__platform__studio`, has the persona as its whole
+system prompt, stores question → tool row → answer in order, and leaves two usage rows priced from its
+upstream (280 micro-dollars for the scripted tokens); history reaches the next turn; effort high →
+`max`; a 401 surfaces as an error with nothing stored; `max_steps` 2 runs two steps' tools; the cap
+stops mid-turn and before the next; closing the page kills the runtime; a two-agent group relay hands
+off by @; with the panel's key cleared, the agent's own (Chat Completions) upstream key is used; a
+bad MCP token gets 401 and port 8081 isn't published. `e2e-platform` and the studio e2e
+still pass on the refactored loop. In a browser (en, zh-Hans): the panel, Test results, the
+.env placeholder after clearing, the editor's DeepSeek warning.
+
+**Not verified**: the real DeepSeek API (no key here) — in particular dsh's defaults (thinking,
+`max_tokens 256000`) against whatever model names the boss's relay lists; podman; the Flutter client
+(untouched: it gets whole-message deltas, which it should draw like any other).
+
+**Left for later**: dsh-mcp-client *does* admit MCP image blocks when the model's catalog entry
+declares image input (`deepseek-v4-flash-vision-exp` in 0.1.5-rc.3) — we set `noImages` and send
+text. That is the way to a DeepSeek reviewer, and it is unbuilt and unverified.
+
 ## 3. What runs now
 
 ```bash
@@ -1829,6 +1940,9 @@ node studio/shots.mjs      # self-test for the shot state machine (studio has re
 STUDIO_DATABASE_URL=… node studio/e2e.mjs   # the whole studio flow against fakes (see 2.28)
 node studio/e2e-platform.mjs <deploy dir>   # the crew loop through the running platform (see 2.28)
 node web/studio.mjs        # self-test for the platform's studio tool
+node web/dsh.mjs           # self-test for driving DeepSeek Harness: turns, MCP, keys (see 2.29)
+node studio/keys.mjs       # self-test for the Keys panel's studio side (see 2.29)
+node deploy/dsh/e2e.mjs <deploy dir>        # DeepSeek Harness + Keys panel through the running platform (see 2.29)
 node studio/crew/import.mjs --self-test     # the crew spec parses the way the importer needs
 docker compose exec app node studio/crew/import.mjs   # import the crew into a deployment (see 2.28)
 python3 check-bots.py      # check the seed definitions in bots/
@@ -1841,8 +1955,9 @@ built-in web UI, **not part of the product**, kept only for the record.
 
 ## 3.1 Next steps
 
-1. **Plug in the dsh runtime** to replace our own agent loop, gaining bwrap/Landlock sandboxing, session
-   persistence and approvals (see 2.9.x)
+1. **dsh for everything, not just `deepseek-*`?** 2.29 runs DeepSeek models on dsh with our tools over
+   MCP. Its adapters are DeepSeek's; other providers would need dsh's other llm plugins, and the
+   bwrap/Landlock sandbox would need the agent's container to be where dsh runs (see 2.9.x)
 2. ~~**Per-Agent spending cap**~~ **done 2026-09-20, see 2.25** — usage rows, per-upstream
    prices, and a daily cap checked before every model call
 3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)

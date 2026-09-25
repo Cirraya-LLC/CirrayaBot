@@ -1,0 +1,8 @@
+{
+  "name": "multi-agent-dsh",
+  "private": true,
+  "description": "DeepSeek Harness for agents whose model is deepseek-* (see web/dsh.mjs). Install with pnpm, not npm.",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.5-rc.3"
+  }
+}

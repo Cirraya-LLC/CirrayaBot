@@ -7,3 +7,5 @@ data
 runtime
 *.log
 pnpm-lock.yaml
+# The DeepSeek Harness image is built from deploy/dsh on its own; the app doesn't need it.
+deploy/dsh

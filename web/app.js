@@ -539,14 +539,20 @@ async function loadModels(providerId, current) {
     body: JSON.stringify({ id: providerId }) }).then(x => x.json()).catch(() => ({ models: [] }))
   if (seq !== modelsSeq) return                  // provider changed meanwhile; this answer is stale
   const models = r.models ?? []
-  if (!models.length) { sel.hidden = true; box.hidden = false; box.value = current; return }
+  if (!models.length) { sel.hidden = true; box.hidden = false; box.value = current; dshHint(); return }
   // Show a saved model even if the provider dropped it; never silently switch to the first
   const list = current && !models.includes(current) ? [current, ...models] : models
   sel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}${models.includes(m) ? '' : esc(t('b.unlisted'))}</option>`).join('')
   // New Agents default to the model others already use on this provider, not the alphabetically first
   sel.value = current || r.suggested || models[0]; sel.disabled = false
+  dshHint()
 }
 const chosenModel = () => ($('#bmodel').hidden ? $('#bmodelx').value : $('#bmodel').value).trim()
+// A deepseek-* model runs on DeepSeek Harness, which can't show it the images tools return — say so
+// where the model is picked, before someone makes it the reviewer.
+const dshHint = () => { $('#bdshhint').hidden = !/^deepseek/i.test(chosenModel()) }
+$('#bmodel').addEventListener('change', dshHint)
+$('#bmodelx').addEventListener('input', dshHint)
 $('#newbot').onclick = () => editBot(null)
 $('#bcancel').onclick = () => $('#bdlg').close()
 $('#bsave').onclick = async () => {
@@ -1151,6 +1157,83 @@ $('#stsave').onclick = async () => {
     await openStudio($('#stproj').value)
   } catch (e) { alert(e.message) }
 }
+
+// ═══ Keys ═══
+// Model keys: DeepSeek's lives on the platform, the studio's in the studio (keys.* actions). A saved
+// key never comes back to the browser, only its last four characters, so a key box always starts
+// empty: typing replaces the key, leaving it empty keeps it. Other fields show only what was set
+// here; the .env / default value is the placeholder, so saving never copies .env into the panel.
+const KEY_FIELDS = { deepseek: ['base_url', 'api_key'], seedance: ['base_url', 'api_key'], gpt_image: ['base_url', 'api_key', 'model'], comfy: ['url'] }
+async function openKeys() {
+  const [ds, st] = await Promise.all([
+    fetch(api('/api/keys/deepseek')).then(r => (r.ok ? r.json() : null)).catch(() => null),
+    fetch(api('/api/studio/status')).then(r => r.json()).then(j => (j.enabled ? stCall('keys.get') : null)).catch(() => null),
+  ])
+  const box = $('#keylist'); box.innerHTML = ''
+  if (ds) box.appendChild(keyCard('deepseek', { fields: {
+    base_url: { value: ds.base_url || 'https://api.deepseek.com', source: ds.base_url ? 'panel' : 'default' },
+    api_key: { hint: ds.hint, source: ds.set ? 'panel' : 'none' } } }, ds.harness ? '' : t('key.noHarness')))
+  if (st) for (const k of st) box.appendChild(keyCard(k.name, k))
+  else box.insertAdjacentHTML('beforeend', `<div class="psplit"></div><small class="rhint">${esc(t('key.studioOff'))}</small>`)
+  if (!$('#keydlg').open) $('#keydlg').showModal()
+}
+function keyCard(name, k, warn = '') {
+  const el = document.createElement('div'); el.dataset.name = name
+  const f = k.fields
+  const label = x => t(x === 'base_url' ? 'key.baseUrl' : x === 'url' ? 'key.url' : 'key.model')
+  el.innerHTML = `<div class="psplit"></div><h4 style="margin-bottom:6px">${esc(t(`key.${name}`))}</h4>
+    <small class="rhint">${esc(t(`key.${name}Hint`))}</small>
+    ${warn ? `<small class="rhint" style="color:var(--warn)">${esc(warn)}</small>` : ''}
+    ${KEY_FIELDS[name].map(x => x === 'api_key'
+      ? `<input type="password" data-f="api_key" autocomplete="new-password" placeholder="${esc(f.api_key?.hint ? t('key.keepPh', { hint: f.api_key.hint }) : t('key.apiKey'))}">`
+      : `<input type="text" data-f="${x}" autocomplete="off" title="${esc(label(x))}" placeholder="${esc(f[x]?.value && f[x].source !== 'panel' ? t('key.fromPh', { label: label(x), value: f[x].value, src: t(`key.src.${f[x].source}`) }) : label(x))}">`).join('')}
+    ${f.api_key ? `<small class="rhint">${esc(f.api_key.hint ? t('key.keyState', { hint: f.api_key.hint, src: t(`key.src.${f.api_key.source}`) }) : t('key.noKey'))}</small>` : ''}
+    <div class="prow" style="justify-content:flex-end;flex-wrap:nowrap">
+      ${f.api_key?.source === 'panel' ? `<button class="btn kclear" style="margin-right:auto;color:var(--bad)">${esc(t('key.clear'))}</button>` : ''}
+      <button class="btn ktest">${esc(t('key.test'))}</button>
+      <button class="btn pri ksave">${esc(t('common.save'))}</button>
+    </div>
+    <small class="rhint kres" style="white-space:pre-line"></small>`
+  for (const i of el.querySelectorAll('[data-f]')) if (i.dataset.f !== 'api_key' && f[i.dataset.f]?.source === 'panel') i.value = f[i.dataset.f].value
+  const initial = () => [...el.querySelectorAll('[data-f]')].map(i => i.value).join('\n')
+  const start = initial()
+  const values = () => Object.fromEntries([...el.querySelectorAll('[data-f]')].map(i => [i.dataset.f, i.value.trim()]))
+  const put = body => (name === 'deepseek'
+    ? fetch(api('/api/keys/deepseek'), { method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
+      .then(async r => { if (!r.ok) throw new Error(await errText(r)) })
+    : stCall('keys.set', { name, values: body.values ?? {}, clear: body.clear ? ['api_key'] : [] }))
+  const note = async (text, ok) => {
+    await openKeys()                                    // re-read: the card shows what is stored now
+    const r = $(`#keylist [data-name="${name}"] .kres`)
+    if (r) { r.textContent = text; r.style.color = ok == null ? '' : ok ? 'var(--ok)' : 'var(--bad)' }
+  }
+  const save = () => put(name === 'deepseek' ? values() : { values: values() })
+  el.querySelector('.ksave').onclick = async () => {
+    try { await save(); await note(t('key.saved'), null) } catch (e) { alert(e.message) }
+  }
+  el.querySelector('.kclear')?.addEventListener('click', async () => {
+    if (!confirm(t('key.confirmClear'))) return
+    try { await put({ clear: true }); await note('', null) } catch (e) { alert(e.message) }
+  })
+  // Test what is saved — and save first when the form was changed, since that is what people mean.
+  el.querySelector('.ktest').onclick = async () => {
+    const res = el.querySelector('.kres'); res.style.color = ''; res.textContent = t('key.testing')
+    try {
+      if (initial() !== start) await save()
+      if (name === 'deepseek') {
+        const r = await fetch(api('/api/keys/deepseek/test'), { method:'POST' }).then(x => x.json())
+        await note(`${r.message}${r.harness ? `\n${t('key.harness', { msg: r.harness.message })}` : ''}`, r.ok && r.harness?.ok !== false)
+      } else {
+        const r = await stCall('keys.test', { name })
+        const said = t(`key.t.${r.code}`, r.vars ?? {})
+        await note(said === `key.t.${r.code}` ? r.message : said, r.ok)
+      }
+    } catch (e) { res.textContent = e.message; res.style.color = 'var(--bad)' }
+  }
+  return el
+}
+$('#keysbtn').onclick = () => openKeys().catch(e => alert(e.message))
+$('#keyclose').onclick = () => $('#keydlg').close()
 
 // ═══ Scheduled tasks ═══
 // Weekday names from Intl; 2024-01-07 was a Sunday, so index 0 = Sunday

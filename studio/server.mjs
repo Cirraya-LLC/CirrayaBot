@@ -10,7 +10,8 @@
 // One RPC endpoint, POST /v1/call {action, args}, because permissions are per action
 // (roles.mjs) and one door is one place to check them.
 //
-// Model API keys (Seedance, GPT image, ComfyUI) live only in this container's environment.
+// Model API keys (Seedance, GPT image, ComfyUI) live only here: in this container's environment,
+// or typed into the platform's Keys panel and stored in this service's own table (keys.mjs).
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { access, mkdir, constants } from 'node:fs/promises'
@@ -20,6 +21,7 @@ import { parseActor, deny } from './roles.mjs'
 import { makeActions, StudioError, fail } from './actions.mjs'
 import { startWorker } from './worker.mjs'
 import { enqueue, startNotifier } from './notify.mjs'
+import { setPanel } from './keys.mjs'
 
 const CFG = {
   token: process.env.STUDIO_TOKEN || '',
@@ -73,8 +75,10 @@ const server = createServer(async (req, res) => {
       const handler = HANDLERS[action]
       if (!handler) return send(501, { ok: false, error: { code: 'not_implemented', message: `${action} is not available yet` } })
       const result = await handler(args && typeof args === 'object' ? args : {}, { actor, actorKey, role }, action)
-      // Reads aren't audited: they are most of the traffic and change nothing.
-      if (!/\.(list|show|refs|current|info|history)$/.test(action)) await db.audit(actorKey, action, args.project ?? args.id ?? '', true)
+      // Reads aren't audited: they are most of the traffic and change nothing. A key edit is, by
+      // name only — the audit table must never hold a key.
+      if (!/\.(list|show|refs|current|info|history|get)$/.test(action))
+        await db.audit(actorKey, action, action.startsWith('keys.') ? String(args.name ?? '') : args.project ?? args.id ?? '', true)
       return send(200, { ok: true, result })
     }
     // The bytes of an asset, for the platform: a sheet the reviewer's model must see, a video a
@@ -103,6 +107,7 @@ if (!CFG.token || CFG.token.length < 16) {
 await mkdir(CFG.data, { recursive: true })
 await db.connect()
 await db.migrate()
+setPanel(await db.getConfig())
 // A finished round becomes a line in the outbox: "candidates ready" for the reviewer, or "all
 // failed" for the cinematographer. The notifier delivers the outbox to the project's group.
 worker = startWorker({ store, stash: actions.stash, addAsset: actions.addAsset, finishGeneration: actions.finishGeneration,

@@ -9,19 +9,20 @@
 //
 // Self-test: node studio/gptimage.mjs (a fake server stands in for the API)
 
-const env = process.env
+import { value } from './keys.mjs'
 
+// The Keys panel first, then .env, then OpenAI's own defaults (keys.mjs).
 export const config = () => ({
-  base: String(env.GPT_IMAGE_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, ''),
-  key: env.GPT_IMAGE_API_KEY || '',
-  model: env.GPT_IMAGE_MODEL || 'gpt-image-1',
+  base: value('gpt_image', 'base_url').replace(/\/+$/, ''),
+  key: value('gpt_image', 'api_key'),
+  model: value('gpt_image', 'model'),
 })
 
 export const SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536']
 export const QUALITIES = ['auto', 'low', 'medium', 'high']
 
 function need(cfg) {
-  if (!cfg.key) throw new Error('GPT image is not configured (GPT_IMAGE_API_KEY in .env)')
+  if (!cfg.key) throw new Error('GPT image is not configured (the Keys panel, or GPT_IMAGE_API_KEY in .env)')
 }
 
 /** Every image in the answer as a Buffer — b64 inline, or fetched when the relay returns URLs. */

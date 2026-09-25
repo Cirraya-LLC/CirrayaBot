@@ -6,7 +6,7 @@
 // Auth: put ?k=<ACCESS_TOKEN> in the URL once, then a cookie carries it. Without a token we only listen on 127.0.0.1.
 import { env, ROOT } from './env.mjs'
 import * as db from './db.mjs'
-import { fitContext, listModels, probeContext } from './model.mjs'
+import { fitContext, listModels, probeContext, estimateUsage } from './model.mjs'
 import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
@@ -14,12 +14,13 @@ import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import * as studio from './studio.mjs'
+import * as dsh from './dsh.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 
 const WEB = join(ROOT, 'web')
 const WORKROOT = join(ROOT, 'workspace')
@@ -582,11 +583,12 @@ async function checkCap(bot, p) {
 /**
  * Write down what a call cost. Deliberately not awaited: the reply is still streaming and a
  * database round-trip per step would be felt. A row that cannot be written is logged — it may
- * be lost, but never silently.
+ * be lost, but never silently. The promise is returned for the one caller that must wait: a
+ * DeepSeek Harness tool call checks the cap, and the call that crossed it has to be counted.
  */
 function noteUsage(ctx, p, usage) {
-  if (!usage) return
-  db.recordUsage({
+  if (!usage) return Promise.resolve()
+  return db.recordUsage({
     agent_id: ctx.bot.id, scope: ctx.scope ?? 'dm', scope_id: ctx.scopeId ?? ctx.bot.id,
     provider_id: p.id ?? '', model: p.model ?? '',
     prompt_tokens: usage.prompt, completion_tokens: usage.completion,
@@ -630,6 +632,8 @@ const upstreamStatus = e => Number(e?.upstreamStatus) || 0
  * and trimming only at the entrance would overflow by step three or four.
  */
 async function runAgent(p, messages, onDelta, onTool, ctx) {
+  // DeepSeek models run their loop in DeepSeek Harness; everything around the loop is the same.
+  if (dsh.isDsh(p.model)) return runDshTurn(p, messages, onDelta, onTool, ctx)
   const MAX_STEPS = ctx.maxSteps ?? DEFAULT_STEPS
   const lang = ctx.lang ?? 'en'
   let text = ''
@@ -678,26 +682,8 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       if (ctx.signal?.aborted) throw new Say('chat.aborted')
       let args = {}
       try { args = JSON.parse(c.args || '{}') } catch { args = {} }
-      onTool?.({ phase: 'run', name: c.name, args })
-      const allowed = !needsApproval(c.name, args, ctx.approval ?? { mode: 'off' })
-        || await askApproval(ctx, onTool, c.name, args)
-      // Hanging up while a card waits is not a refusal — recording one would leave the transcript
-      // saying the user said no to something they never saw an answer for.
-      if (ctx.signal?.aborted) throw new Say('chat.aborted')
-      // The refusal goes back as the tool result so the agent adapts instead of retrying: it is the
-      // only thing it will ever see about this call.
-      const res = allowed
-        ? await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
-        : `Refused${ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
-Do not try this again. Do it another way, or say why you cannot.`
-      const out = typeof res === 'string' ? res : res.text
-      if (res?.image) shots.push(res.image)
-      // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored
-      onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {} })
-      // Keep the call in the transcript, cut to the same length the live stream shows — reopening a
-      // conversation should show the same cards, not more and not fewer.
-      if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.bot?.name ?? '',
-        { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE) })
+      const { out, image } = await execTool(c.name, args, ctx, onTool)
+      if (image) shots.push(image)
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
     }
     // An image can't go into a tool result (Chat protocol tool messages only take text), so it follows as a user message.
@@ -709,6 +695,170 @@ Do not try this again. Do it another way, or say why you cannot.`
     }
   }
   return text || '(hit the tool-use limit; stopping here for now)'
+}
+
+/**
+ * One tool call, from asking to recording — the same path whether the loop is ours (runAgent) or
+ * DeepSeek Harness's (an MCP call). Returns what the model gets back, and an image if there is one.
+ */
+async function execTool(name, args, ctx, onTool) {
+  onTool?.({ phase: 'run', name, args })
+  const allowed = !needsApproval(name, args, ctx.approval ?? { mode: 'off' })
+    || await askApproval(ctx, onTool, name, args)
+  // Hanging up while a card waits is not a refusal — recording one would leave the transcript
+  // saying the user said no to something they never saw an answer for.
+  if (ctx.signal?.aborted) throw new Say('chat.aborted')
+  // The refusal goes back as the tool result so the agent adapts instead of retrying: it is the
+  // only thing it will ever see about this call.
+  const res = allowed
+    ? await runTool(name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
+    : `Refused${ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)' : ' by the user'}: ${toolSubject(name, args)}
+Do not try this again. Do it another way, or say why you cannot.`
+  const out = typeof res === 'string' ? res : res.text
+  // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored
+  onTool?.({ phase: 'done', name, args, output: out, ...res?.image ? { image: res.image } : {} })
+  // Keep the call in the transcript, cut to the same length the live stream shows — reopening a
+  // conversation should show the same cards, not more and not fewer.
+  if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.bot?.name ?? '',
+    { name, args, output: (out ?? '').slice(0, TOOL_TRACE) })
+  return { out, image: res?.image ?? null }
+}
+
+// ---------- DeepSeek Harness (web/dsh.mjs, deploy/dsh) ----------
+// An agent whose model is deepseek-* runs its turn in DeepSeek Harness, one runtime per turn in the
+// dsh container. It reaches its tools through MCP on DSH.mcpPort — a port compose never publishes,
+// so only the dsh container can knock — with a token that exists for exactly one turn.
+const DSH = {
+  container: env.DSH_CONTAINER || '',
+  mcpPort: Number(env.DSH_MCP_PORT || 8081),
+  mcpUrl: env.DSH_MCP_URL || `http://app:${Number(env.DSH_MCP_PORT || 8081)}/mcp`,
+}
+const DSH_KEY = 'keys.deepseek'       // settings row: {base_url, api_key} from the Keys panel
+const dshTurns = new Map()            // bearer token → the turn it serves
+
+function spawnDsh(rt) {
+  const proc = spawn(CLI, ['exec', '-i', DSH.container, 'node', '/opt/dsh/run.mjs'], { stdio: ['pipe', 'pipe', 'pipe'] })
+  const exited = new Promise(r => { proc.on('close', code => r(code)); proc.on('error', () => r(127)) })
+  return {
+    stdin: proc.stdin, stdout: proc.stdout, stderr: proc.stderr, exited,
+    // Killing the docker client closes the runtime's stdin, which ends it (verified, CLAUDE.md
+    // 2.29 — unlike 2.22.1's curl, stuck writing). Telling it to stop by its id is the backstop.
+    kill() {
+      try { proc.stdin.end() } catch {}
+      proc.kill('SIGKILL')
+      cliRun(['exec', DSH.container, 'node', '/opt/dsh/run.mjs', '--kill', rt], null, 15_000)
+    },
+  }
+}
+
+async function runDshTurn(p, messages, onDelta, onTool, ctx) {
+  if (!DSH.container) throw new Say('dsh.off', { name: ctx.bot.name })
+  const key = dsh.keyFor(await db.getSetting(DSH_KEY, null), p)
+  if (!key) throw new Say('dsh.noKey', { name: ctx.bot.name })
+  await checkCap(ctx.bot, p)
+  // Images a tool returns don't reach a model on dsh (accepted, see dsh.mjs): tools say so in words.
+  ctx.noImages = true
+  const fit = fitContext(messages, p.context_tokens)
+  if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
+  const { system, prompt } = dsh.renderTurn(fit.messages, { group: ctx.scope === 'group' })
+  const rt = randomBytes(8).toString('hex'), token = randomBytes(24).toString('hex')
+  const turn = { ctx, onTool, p, steps: 0, calls: 0, announced: 0, text: '', limit: false, error: null, usage: null,
+    maxSteps: ctx.maxSteps ?? DEFAULT_STEPS, stop: new AbortController(), tools: dsh.mcpTools(ctx.tools ?? []) }
+  const onAbort = () => turn.stop.abort()
+  ctx.signal?.addEventListener('abort', onAbort, { once: true })
+  dshTurns.set(token, turn)
+  try {
+    const r = await dsh.runTurn({
+      child: spawnDsh(rt),
+      config: { rt, key: key.key, base_url: key.base_url, mcp_url: DSH.mcpUrl, mcp_token: token,
+        system: system + (turn.tools.length ? dsh.TOOL_NOTE : '') },
+      init: { cwd: `/tmp/dsh/${rt}/ws`, provider: 'deepseek-official', model: p.model,
+        ...dsh.EFFORT[p.effort] ? { reasoningEffort: dsh.EFFORT[p.effort] } : {} },
+      prompt, signal: turn.stop.signal,
+      onEvent: e => {
+        if (e.type === 'step' && ++turn.steps > turn.maxSteps) { turn.limit = true; turn.stop.abort() }
+        if (e.type === 'message') {
+          // Every model call leaves a usage row, estimated when dsh reports none (2.25).
+          turn.usage = noteUsage(ctx, p, e.usage ? { prompt: e.usage.inputTokens ?? 0, completion: e.usage.outputTokens ?? 0 }
+            : { ...estimateUsage([{ role: 'system', content: system }, { role: 'user', content: prompt }], e.text), estimated: true })
+          if (e.text.trim()) { turn.text = e.text; onDelta(e.text) }
+          turn.announced += e.calls.length
+        }
+        // dsh offered the model a tool that isn't ours: run.mjs's disabled list has fallen behind dsh.
+        if (e.type === 'stray') { turn.error = new Say('dsh.stray', { tool: e.name }); turn.stop.abort() }
+      },
+    })
+    return r.text || turn.text
+  } catch (e) {
+    if (turn.error) throw turn.error
+    if (ctx.signal?.aborted) throw new Say('chat.aborted')
+    if (turn.limit) return turn.text || '(hit the tool-use limit; stopping here for now)'
+    console.error(`[dsh] ${ctx.bot.name}: ${e.message}`)
+    throw new Say(e.upstream ? 'dsh.upstream' : 'dsh.failed', { detail: String(e.message).slice(0, 300), status: e.upstreamStatus ?? '—' }, 502)
+  } finally {
+    dshTurns.delete(token)
+    ctx.signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+/** A tool call arriving over MCP: the cap first (a model call follows it), then the ordinary path. */
+async function dshToolCall(turn, name, args) {
+  if (turn.stop.signal.aborted) throw new Error('this turn is over')
+  // The assistant message asking for this call comes over stdout, the call over HTTP. Give the
+  // message a moment to land first: its words then show above the card, and its usage row is
+  // written before the cap is checked — otherwise the call that crossed the cap wouldn't count yet.
+  for (let i = 0; i < 20 && turn.announced <= turn.calls; i++) await new Promise(r => setTimeout(r, 25))
+  await turn.usage
+  try { await checkCap(turn.ctx.bot, turn.p) }
+  catch (e) { turn.error = e; turn.stop.abort(); throw new Error('the daily spending cap is reached') }
+  turn.calls++
+  return (await execTool(name, args, turn.ctx, turn.onTool)).out
+}
+
+function startMcp() {
+  if (!DSH.container) return
+  createServer(async (req, res) => {
+    const end = (code, body) => {
+      res.writeHead(code, body ? { 'content-type': 'application/json' } : {})
+      res.end(body ? JSON.stringify(body) : undefined)
+    }
+    // A throw here would be an unhandled rejection, and that ends the whole app.
+    try {
+      // POST only: no server-to-client stream, which streamable HTTP allows (GET → 405).
+      if (req.method !== 'POST' || new URL(req.url, 'http://x').pathname !== '/mcp') return end(405)
+      const turn = dshTurns.get(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))
+      if (!turn) return end(401)
+      let body = ''
+      for await (const c of req) { body += c; if (body.length > 4 << 20) return end(413) }
+      let msg
+      try { msg = JSON.parse(body) } catch { return end(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }) }
+      const r = await dsh.mcpHandle(msg, { tools: turn.tools, call: (name, args) => dshToolCall(turn, name, args) })
+      return r ? end(200, r) : end(202)
+    } catch (e) {
+      console.error('[dsh] MCP request failed:', e.message)
+      if (!res.headersSent) end(500)
+      else res.destroy()
+    }
+  }).listen(DSH.mcpPort, '0.0.0.0', () => console.log(`DeepSeek Harness: tools served on :${DSH.mcpPort} to ${DSH.container}`))
+}
+
+/** The panel's "Test" for the DeepSeek key: does the key open /models, and is the harness there. */
+async function testDeepseek(lang) {
+  const k = await db.getSetting(DSH_KEY, null)
+  const harness = !DSH.container ? { ok: false, message: tr(lang, 'dsh.off', { name: '—' }) }
+    : await cliRun(['exec', DSH.container, 'node', '/opt/dsh/run.mjs', '--version'], null, 20_000)
+      .then(r => r.code === 0 ? { ok: true, message: `DeepSeek Harness ${r.out.trim()}` }
+        : { ok: false, message: tr(lang, 'dsh.harnessDown', { container: DSH.container, detail: (r.err || r.out).trim().slice(-200) }) })
+  if (!k?.api_key) return { ok: false, message: tr(lang, 'dsh.testNoKey'), harness }
+  const base = k.base_url || dsh.DEEPSEEK_BASE
+  try {
+    const r = await fetch(`${base}/models`, { headers: { authorization: `Bearer ${k.api_key}` }, signal: AbortSignal.timeout(15_000) })
+    if (!r.ok) return { ok: false, message: tr(lang, 'dsh.testStatus', { status: r.status, detail: (await r.text()).slice(0, 200) }), harness }
+    const ids = ((await r.json().catch(() => ({}))).data ?? []).map(m => m.id).filter(dsh.isDsh)
+    return { ok: true, message: tr(lang, 'dsh.testOk', { models: ids.join(', ') || '—' }), harness, models: ids }
+  } catch (e) {
+    return { ok: false, message: tr(lang, 'dsh.testUnreachable', { detail: String(e?.cause?.code ?? e.message) }), harness }
+  }
 }
 
 /**
@@ -1672,6 +1822,19 @@ const server = createServer(async (req, res) => {
         .map(m => transcriptRow(m, { speaker: m.speaker, text: m.content })))
     if (gr && req.method === 'DELETE') { await db.clearMessages('group', gr[1]); return send(200, { ok: true }) }
 
+    // ---- Keys panel: the DeepSeek key (the studio's keys go through /api/studio/call, keys.*) ----
+    // The key itself never comes back, only its last four characters.
+    if (url.pathname === '/api/keys/deepseek' && req.method === 'GET')
+      return send(200, { ...dsh.keyView(await db.getSetting(DSH_KEY, null)), harness: !!DSH.container })
+    if (url.pathname === '/api/keys/deepseek' && req.method === 'PUT') {
+      let k
+      try { k = dsh.keyEdit(await db.getSetting(DSH_KEY, null), await readBody(req)) }
+      catch (e) { if (e instanceof Say) throw e; return send(400, { error: e.message }) }
+      await db.setSetting(DSH_KEY, k)
+      return send(200, { ...dsh.keyView(k), harness: !!DSH.container })
+    }
+    if (url.pathname === '/api/keys/deepseek/test' && req.method === 'POST') return send(200, await testDeepseek(lang))
+
     // ---- The Studio panel: a person setting up projects, the crew, and locking what is final ----
     if (url.pathname === '/api/studio/status' && req.method === 'GET') return send(200, { enabled: studio.enabled() })
     if (url.pathname === '/api/studio/call' && req.method === 'POST') {
@@ -1833,6 +1996,8 @@ server.on('upgrade', async (req, socket) => {
 // Scheduled tasks: runs missed while down are made up only once after startup (next_run_at in the past → due on this tick)
 setInterval(() => tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e)), 20_000)
 tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))
+
+startMcp()
 
 server.listen(CFG.port, CFG.host, () => {
   console.log(`Multi-Agent  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)

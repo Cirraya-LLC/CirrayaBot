@@ -262,6 +262,14 @@ create table if not exists audit (
   detail  text not null default ''
 );
 create index if not exists audit_at on audit (at);
+
+-- Model keys a person typed into the Keys panel (keys.mjs). One row per field; no row = .env.
+-- Here, in the studio's own schema — the platform's database never holds these.
+create table if not exists config (
+  key         text primary key,
+  value       text not null,
+  updated_at  timestamptz not null default now()
+);
 `
 
 /** Wait for the database. In compose the studio can come up before the app has created its role. */
@@ -332,6 +340,19 @@ export const currentProject = async actor =>
 export const useProject = (actor, projectId) => q(`
   insert into actor_project (actor, project_id) values ($1,$2)
   on conflict (actor) do update set project_id = excluded.project_id`, [actor, projectId])
+
+// ---------- panel config (keys.mjs) ----------
+export const getConfig = async () =>
+  Object.fromEntries((await q('select key, value from config')).rows.map(r => [r.key, r.value]))
+
+/** {key: value} — '' deletes the row, so the field falls back to .env. */
+export const setConfig = rows => tx(async t => {
+  for (const [k, v] of Object.entries(rows)) {
+    if (v === '') await t('delete from config where key = $1', [k])
+    else await t(`insert into config (key, value) values ($1,$2)
+                  on conflict (key) do update set value = excluded.value, updated_at = now()`, [k, v])
+  }
+})
 
 export const audit = (actor, action, target, ok, detail = '') =>
   q('insert into audit (actor, action, target, ok, detail) values ($1,$2,$3,$4,$5)',
