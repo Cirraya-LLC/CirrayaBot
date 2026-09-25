@@ -17,8 +17,10 @@
 //
 // Self-test: node studio/comfy.mjs (a fake server stands in for ComfyUI)
 import { randomUUID } from 'node:crypto'
+import { value } from './keys.mjs'
 
-export const config = () => ({ base: String(process.env.COMFY_URL || '').replace(/\/+$/, '') })
+// The Keys panel first, then .env (keys.mjs).
+export const config = () => ({ base: value('comfy', 'url').replace(/\/+$/, '') })
 
 const NUMERIC = new Set(['seed', 'width', 'height', 'lora_strength'])
 
@@ -67,7 +69,7 @@ export async function upload(cfg, buf, mime, name) {
  * so the same reference isn't uploaded twice under different names.
  */
 export async function run(cfg, workflow, vars, refs = [], { timeoutMs = 600_000, pollMs = 2000 } = {}) {
-  if (!cfg.base) throw new Error('ComfyUI is not configured (COMFY_URL in .env)')
+  if (!cfg.base) throw new Error('ComfyUI is not configured (the Keys panel, or COMFY_URL in .env)')
   const names = []
   for (const r of refs) names.push(await upload(cfg, r.buf, r.mime, `studio-${r.sha256.slice(0, 16)}.${r.mime === 'image/jpeg' ? 'jpg' : 'png'}`))
   const all = { ...vars }

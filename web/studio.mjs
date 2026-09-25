@@ -132,6 +132,8 @@ export const PANEL_ACTIONS = new Set([
   'crew.list', 'crew.set',
   'char.list', 'char.show', 'char.refs', 'char.lock', 'char.unlock',
   'loc.list', 'loc.show', 'loc.refs', 'loc.lock', 'loc.unlock',
+  // The Keys panel: the studio's model keys (studio/keys.mjs). The answer carries hints, never keys.
+  'keys.get', 'keys.set', 'keys.test',
 ])
 
 // ---------- self-test ----------

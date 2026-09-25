@@ -34,6 +34,8 @@ const WRITE = {
 export const HUMAN_ONLY = new Set([
   'char.lock', 'char.unlock', 'loc.lock', 'loc.unlock',
   'project.create', 'project.edit', 'scene.edit', 'crew.set', 'crew.list',
+  // Model keys. Not even a hint of one is readable by an agent.
+  'keys.get', 'keys.set', 'keys.test',
 ])
 
 export const ACTIONS = new Set([...READ, ...Object.values(WRITE).flat(), ...HUMAN_ONLY])
@@ -95,6 +97,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     for (const h of HUMAN_ONLY) a.notEqual(deny(agent('x'), r, h), null, `${r} must not ${h}`)
   }
   for (const act of ACTIONS) a.equal(deny({ kind: 'human' }, null, act), null)
+  // Model keys: not even the hint is an agent's to read.
+  for (const k of ['keys.get', 'keys.set', 'keys.test']) a.match(deny(agent('d'), 'director', k), /only be done by a person/)
 
   // Not on the crew = nothing at all, not even reading; a made-up action is refused for everyone.
   a.match(deny(agent('stranger'), null, 'shot.show'), /not on the studio crew/)

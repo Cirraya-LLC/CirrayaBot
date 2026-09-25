@@ -13,6 +13,7 @@ import * as gptimage from './gptimage.mjs'
 import * as comfy from './comfy.mjs'
 import { probe, contactSheet, MAX_ROWS } from './media.mjs'
 import { enqueue } from './notify.mjs'
+import * as keys from './keys.mjs'
 
 export class StudioError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
@@ -229,6 +230,20 @@ export function makeActions({ store, kick = () => {} }) {
     if (role && !ROLES.includes(role)) fail('bad_role', `role must be one of ${ROLES.join(' / ')}, or empty to remove`)
     await db.setRole(id, role)
     return { agent_id: id, role }
+  }
+
+  // ---- model keys (the Keys panel; keys.mjs). Human-only in roles.mjs ----
+  H['keys.get'] = async () => keys.view()
+  H['keys.set'] = async a => {
+    let rows
+    try { rows = keys.edit(text(a.name, 40), a.values ?? {}, a.clear ?? []) } catch (e) { fail('bad_arg', e.message) }
+    await db.setConfig(rows)
+    keys.setPanel(await db.getConfig())
+    return keys.view().find(k => k.name === a.name)
+  }
+  H['keys.test'] = async a => {
+    if (!keys.KEYS[a.name]) fail('bad_arg', `unknown key group "${a.name}"; one of ${Object.keys(keys.KEYS).join(', ')}`)
+    return keys.test(a.name)
   }
 
   // ---- characters and looks ----
@@ -592,7 +607,7 @@ export function makeActions({ store, kick = () => {} }) {
     if (!pr) fail('bad_state', `${s.code}: save a prompt first (shot.prompt)`, 409)
     if (pr.ref_asset_ids.length > seedance.MODELS[model].maxRefs) fail('too_many_refs', `${model} takes at most ${seedance.MODELS[model].maxRefs} references`)
     const cfg = seedance.config()
-    if (!cfg.base || !cfg.key) fail('not_configured', 'Seedance is not configured on this studio (SEEDANCE_BASE_URL / SEEDANCE_API_KEY); tell the user', 503)
+    if (!cfg.base || !cfg.key) fail('not_configured', 'Seedance is not configured on this studio (a person sets it in the Keys panel); tell the user', 503)
     const lim = seedance.limits(p.info)
     const round = db.newId('rd')
     const info = p.info?.seedance ?? {}

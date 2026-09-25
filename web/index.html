@@ -287,6 +287,7 @@
             border-radius:7px;padding:4px 8px;cursor:pointer}
   .wd input{accent-color:var(--accent)}
   .rhint{color:var(--dim2);font-size:11.5px;line-height:1.6;display:block;margin:-2px 0 8px}
+  .rhint[hidden]{display:none}
   .s2mem{border-top:1px solid var(--line);margin-top:auto;padding:14px 18px;display:flex;
          flex-direction:column;gap:8px}
   .s2mem small{color:var(--dim2);font-size:11.5px;line-height:1.6}
@@ -364,6 +365,7 @@
     <button class="fitem" id="prov" data-tip-key="side.providers"><b>⚙</b> <span data-i18n="side.providers"></span></button>
     <button class="fitem" id="skills" data-tip-key="side.skills"><b>✦</b> <span data-i18n="side.skills"></span></button>
     <button class="fitem" id="studiobtn" data-tip-key="side.studio" hidden><b>S</b> <span data-i18n="side.studio"></span></button>
+    <button class="fitem" id="keysbtn" data-tip-key="side.keys"><b>K</b> <span data-i18n="side.keys"></span></button>
     <label class="fitem" data-tip-key="common.theme"><b class="half"></b> <select id="theme" data-i18n-aria-label="common.theme"></select></label>
     <label class="fitem" data-tip-key="common.language"><b>🌐</b> <select id="lang" data-i18n-aria-label="common.language"></select></label>
     <div class="fitem" id="spendfoot" style="cursor:default"><b>$</b> <span></span></div>
@@ -486,6 +488,13 @@
   <div class="acts"><button class="btn" id="stclose" data-i18n="common.close"></button></div>
 </dialog>
 
+<dialog id="keydlg" style="width:640px">
+  <h4 data-i18n="key.title"></h4>
+  <small class="rhint" data-i18n="key.intro"></small>
+  <div id="keylist"></div>
+  <div class="acts"><button class="btn" id="keyclose" data-i18n="common.close"></button></div>
+</dialog>
+
 <dialog id="rdlg">
   <h4 id="rtitle" data-i18n="r.new"></h4>
   <input type="text" id="rname" data-i18n-placeholder="r.namePh" autocomplete="off">
@@ -538,6 +547,7 @@
     <select id="bapproval" data-i18n-title="b.approvalTitle"></select>
   </div>
   <small class="rhint" data-i18n="b.effortHint"></small>
+  <small class="rhint" id="bdshhint" data-i18n="b.dshHint" style="color:var(--warn)" hidden></small>
   <input type="number" id="bsteps" min="1" max="60" step="1" data-i18n-placeholder="b.stepsPh" autocomplete="off">
   <small class="rhint" data-i18n="b.stepsHint"></small>
   <input type="text" id="bcap" data-i18n-placeholder="sp.capPh" autocomplete="off">

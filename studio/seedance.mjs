@@ -13,6 +13,8 @@
 //
 // Self-test: node studio/seedance.mjs (a fake server stands in for the API)
 
+import { value } from './keys.mjs'
+
 const env = process.env
 
 export const MODELS = {
@@ -20,9 +22,10 @@ export const MODELS = {
   'seedance-2.5': { id: env.SEEDANCE_MODEL_25 || 'dreamina-seedance-2-5-260628', maxRefs: 30, minS: 4, maxS: 30 },
 }
 
+// The Keys panel first, then .env (keys.mjs).
 export const config = () => ({
-  base: String(env.SEEDANCE_BASE_URL || '').replace(/\/+$/, ''),
-  key: env.SEEDANCE_API_KEY || '',
+  base: value('seedance', 'base_url').replace(/\/+$/, ''),
+  key: value('seedance', 'api_key'),
 })
 
 // Per project, the defaults the boss agreed to: 40 videos an hour, 4 running at once.
@@ -66,7 +69,7 @@ export function buildTask({ model, prompt, refs = [], duration = 5, ratio = '16:
 }
 
 async function call(cfg, path, init = {}, signal) {
-  if (!cfg.base || !cfg.key) throw new Error('Seedance is not configured (SEEDANCE_BASE_URL / SEEDANCE_API_KEY in .env)')
+  if (!cfg.base || !cfg.key) throw new Error('Seedance is not configured (the Keys panel, or SEEDANCE_BASE_URL / SEEDANCE_API_KEY in .env)')
   const res = await fetch(`${cfg.base}/api/v3/contents/generations/tasks${path}`, {
     ...init, signal: signal ?? AbortSignal.timeout(60_000),
     headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}`, ...init.headers },

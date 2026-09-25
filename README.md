@@ -86,6 +86,20 @@ here, instead of half an hour later as "some Agent isn't talking".
 
 With several upstreams, click the small dot on the left to switch which one is in use.
 
+### DeepSeek models run on DeepSeek Harness
+
+An Agent whose model name starts with `deepseek` doesn't use the loop above: each of its turns runs
+in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (the `dsh` service), with the
+platform's tools handed to it over MCP. History, memory, the transcript, approvals, spending and
+the daily cap work exactly as for any other Agent.
+
+- The key: sidebar → **Keys** → DeepSeek. Without one there, the Agent's own upstream key is used,
+  if that upstream speaks Chat Completions.
+- Replies arrive a message at a time, not token by token. **Images a tool returns (contact sheets,
+  screenshots) are not shown to it**, so don't make a DeepSeek model the film crew's reviewer — the
+  Agent editor warns when you pick one.
+- Usage is priced with the prices of the Agent's upstream.
+
 ## What it costs, and holding it back
 
 Every model call is recorded: tokens, and money when the upstream has prices. The left column's
@@ -153,12 +167,15 @@ node web/model.mjs        # self-test for context budgeting and window inference
 node web/i18n.mjs         # self-test for the server message tables
 node web/memory.mjs       # self-test for an agent's self-notes (cap, duplicates)
 node web/approve.mjs      # self-test for which tool calls need a person first
+node web/dsh.mjs          # self-test for driving DeepSeek Harness (turns, MCP, keys)
+node studio/keys.mjs      # self-test for the Keys panel's studio side (panel over .env, hints only)
 node studio/crew/import.mjs --self-test   # the crew spec parses the way the importer needs
 python3 check-bots.py     # check the seed definitions in bots/
 ```
 
 The studio has its own self-tests (`node studio/<module>.mjs`) and two end-to-end checks against
-fakes: `studio/e2e.mjs` and `studio/e2e-platform.mjs` — see `CLAUDE.md` 2.28.
+fakes: `studio/e2e.mjs` and `studio/e2e-platform.mjs` — see `CLAUDE.md` 2.28. DeepSeek Harness
+and the Keys panel have one too, against a running deployment: `node deploy/dsh/e2e.mjs <dir>`.
 
 Without compose, pointing at an existing PostgreSQL:
 
@@ -173,10 +190,11 @@ reviewer (`studio/crew/`), working in a group against the **studio** service —
 Seedance video, GPT image / ComfyUI stills, contact sheets. The studio holds every model key; agents
 reach it only through the platform's `studio` tool, and each can do only its own job.
 
-1. Model keys in `.env` (they go to the studio container only), then `./start.sh`:
-   `SEEDANCE_BASE_URL` / `SEEDANCE_API_KEY` (ModelArk, or a relay with the same paths),
-   `GPT_IMAGE_BASE_URL` / `GPT_IMAGE_API_KEY` (OpenAI, or a relay; the base includes `/v1`),
-   `COMFY_URL` (a ComfyUI on this machine is `http://host.docker.internal:8188`).
+1. Model keys: sidebar → **Keys** (each card has a **Test** that costs nothing), or in `.env` before
+   `./start.sh`. What the panel holds wins over `.env`; either way the keys live in the studio
+   only — the panel's in the studio's own table, `.env`'s in the studio container's environment.
+   Seedance: ModelArk, or a relay with the same paths. GPT image: OpenAI, or a relay; the base
+   includes `/v1`. ComfyUI on this machine: `http://host.docker.internal:8188`.
 2. Import the crew — 4 Agents, 5 skills, a group, their studio roles:
    `docker compose exec app node studio/crew/import.mjs` (safe to rerun; `--dry-run` shows the plan).
 3. In **Edit Agent**, give each one an upstream and a model (the reviewer's must accept images).
@@ -206,6 +224,7 @@ work in the client, on the same data as the web UI. Details in `app/README.md`.
 ## Known limits
 
 - **Containers have no egress restrictions** — Agents can reach anything on the internet.
+- **DeepSeek Agents don't see images tools return**, and their replies aren't streamed token by token.
 - **No multi-user**: one token, one data set, no account system.
 - `run.sh` / `bots.patch.yml` / `headless.patch.yml` are an earlier experiment running DeepSeek
   Harness, **not part of the product**, kept only for the record (the story is in `CLAUDE.md`

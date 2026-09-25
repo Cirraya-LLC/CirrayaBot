@@ -61,6 +61,11 @@ services:
       # The other direction: the studio posts "candidates ready" into a group with this token. It opens
       # only /api/events/…, not the platform — the studio never holds ACCESS_TOKEN.
       STUDIO_EVENT_TOKEN: ${STUDIO_EVENT_TOKEN:?run ./start.sh first to generate .env}
+      # DeepSeek Harness (below): agents whose model is deepseek-* run their turns there. The app
+      # serves their tools on DSH_MCP_PORT, which nothing publishes — only the dsh container reaches it.
+      DSH_CONTAINER: ${AGENT_PREFIX:-ma}-dsh
+      DSH_MCP_PORT: 8081
+      DSH_MCP_URL: http://app:8081/mcp
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH}:/app/workspace
@@ -97,6 +102,16 @@ services:
       # Content-addressed files (studio/store.mjs). A named volume: nothing else mounts it,
       # so it needs no host path, and it works the same under podman.
       - studiodata:/data
+
+  # DeepSeek Harness (deploy/dsh): the model loop for agents whose model is deepseek-*. It idles;
+  # the app starts one runtime per turn with `docker exec -i` and hands it the DeepSeek key on
+  # stdin. No socket, no volumes, no secrets in its environment: a runtime that went wrong would
+  # find nothing here but its own key. The name is fixed so the app can find it — container names
+  # are global on the host, hence AGENT_PREFIX, like the agent containers.
+  dsh:
+    build: ./deploy/dsh
+    restart: unless-stopped
+    container_name: ${AGENT_PREFIX:-ma}-dsh
 
 volumes:
   pgdata:
