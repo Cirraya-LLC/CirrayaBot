@@ -31,6 +31,7 @@ const M = {
 
   // left column
   'side.search': ['Search', '搜索', '搜尋'],
+  'side.new': ['New…', '新建…', '新增…'],
   'side.newGroup': ['New group', '新建群聊', '新增群組'],
   'side.newAgent': ['New crew member', '新建剧组成员', '新增劇組成員'],
   'side.providers': ['Model providers', '模型上游', '模型上游'],

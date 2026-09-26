@@ -1,4 +1,4 @@
-# Multi-Agent
+# CirrayaBot
 
 ## 0. Unrelated to the parent directory (the first rule, and the most important one)
 
@@ -41,6 +41,10 @@ compose deployment. **Since 2.30 the product presents itself as a film studio** 
 relays, dialogue + TTS + subtitles, automatic cuts. Two optional modules: the studio, and
 `cli` (since 2.33: an agent can run on Claude Code / Codex / Grok Build with the person's own
 subscription).
+
+**This is branch `feat/studio`** (not merged into `main`, by the boss's decision). `main` is merged
+into it instead, so it carries everything `main` has — 2.34 is `main`'s isolation work, numbered
+after this branch's own 2.28–2.33.
 
 ```bash
 ./start.sh     # this is how you start it
@@ -511,7 +515,7 @@ in its own container, just like giving a new hire a clean machine to set up.
 
 ```
 cat: /work/../.env: No such file or directory     ← it could read this before
-ls /groups → gmtoblv8x                            ← only sees the groups it takes part in
+ls /groups → gmtoblv8x                            ← only because there was one group (wrong, see 2.34)
 hostname   → 64f88766b655                         ← a container, not the host
 echo ... >> group/roll.txt → appears in the host's workspace/groups/<gid>/roll.txt
 ```
@@ -525,9 +529,9 @@ echo ... >> group/roll.txt → appears in the host's workspace/groups/<gid>/roll
   "what's needed out of the box" (curl / git / jq / python3) and let the Agent install the rest.
   `AGENT_IMAGE` can be swapped.
 
-**Not done yet**: container egress isn't restricted (Agents can reach anything on the internet), and
-there's no custom seccomp/AppArmor profile. Tightening it for real means `--network` plus an allowlist
-proxy.
+**Internet access is intended** (the boss, 2026-09-26: "agent连接外网无所谓啊 本来就应该要连接" — agents
+connecting out is fine, they're supposed to). There's no custom seccomp/AppArmor profile.
+**The mount above was wrong: it gave every agent every group — fixed in 2.34.**
 
 ## 2.14 Verification criteria: looking at the conversation and not the artifact = false positive (2026-09-05, actually got burned once)
 
@@ -695,7 +699,7 @@ failed — and the failure only showed up in some Agent's tool output. `ensureCo
 
 ### 2.18.3 Upstreams: if `/models` can't tell you, say you don't know; don't guess quietly
 
-`providers` table + "⚙ Model upstreams" at the bottom left. Two sources for the context window:
+`providers` table + the ⚙ icon (Model upstreams) at the bottom left. Two sources for the context window:
 
 1. **Auto** — ask the upstream's `/models` (OpenRouter / vLLM / ollama / most relays answer)
 2. Can't ask → infer from the model name (the `KNOWN` table in `web/model.mjs`)
@@ -1482,14 +1486,34 @@ the avatar is *already* centred in a 72px rail, so collapsing moves nothing at a
 - **`.convs` scrolls, so a tooltip inside a row is clipped by it.** One `position:fixed` tip for
   the whole rail, positioned from `getBoundingClientRect()`. Not `title=`: that never shows on
   keyboard focus, and collapsed the name is the only thing left to identify a row by.
-- **A bare text node never fades** — the fade rule selects `.fitem > span`. "Cirraya" stayed
-  visible in the rail until it was wrapped.
 - **The theme icon has to render.** `◐` comes out as a smudge on a box without that glyph; it is
   two CSS shapes now (a bordered circle plus a half-fill gradient).
 - **Flutter: Material's hit targets are 48px and two do not fit a 72px rail.** `PopupMenuButton`
   with `child:` sizes to what you give it; with `icon:` it does not. The symptom was a full-height
   `RIGHT OVERFLOWED` stripe **with nothing in the app's stdout** — the Dart error goes to the VM
   service, so look at the pixels, not the log.
+
+### The footer is one row (2026-09-26)
+
+The boss: "左下角的菜单栏太多了 应该浓缩成一行就够了" (the bottom-left menu is too long; one row
+is enough), and "你把软件名字改为 CirrayaBot" (call the software CirrayaBot).
+
+- Eight labelled rows became one row of icons: collapse, model upstreams, skills, (client: server),
+  appearance, language, and today's spend on the right (today + month in its tooltip). **Names are
+  tooltips whether or not the sidebar is collapsed**; on the web they open *above* the icon.
+- The collapse toggle's centre is at 36px, half the rail, so collapsing moves it nowhere. **Collapsed,
+  the footer is only that toggle** — the rest fades out and leaves the tab order (`visibility` on the
+  web, `ExcludeFocus` in the client). Everything else is one click away.
+- Appearance and language are small menus (`openMenu` in app.js: Esc, arrows, focus on the checked
+  item). **"New Agent" moved to the top + button**, which is now a menu "New Agent / New group" on
+  both clients. The "Cirraya" brand row is gone.
+- The spend figure yields before the icons do (Flutter `Expanded` + ellipsis): under the test font
+  it overflowed the 308px row by 5.8px.
+- The product name is **CirrayaBot** where people see it: page title, window title, macOS
+  `CFBundleName` / `CFBundleDisplayName`, Windows version info, READMEs. **Not** renamed, on purpose:
+  the binary, bundle ids, the settings directory (`MultiAgent` / `multi-agent` — renaming loses
+  everyone's saved server), compose project, database and image names, the export format string.
+  macOS `PRODUCT_NAME` stays too: the Xcode test target's `TEST_HOST` points at `multi_agent.app`.
 
 ### The right panel
 
@@ -1600,9 +1624,9 @@ app (web/server.mjs) ──Bearer STUDIO_TOKEN + x-studio-actor──▶ studio 
                                                                  └─ volume studiodata:/data (content-addressed)
 ```
 
-- **The studio publishes no port and agents can't reach it.** Agent containers sit on the
-  default bridge, the studio on the compose network — verified: `studio` doesn't resolve and its
-  IP times out from a bridge container. Agents act through the platform, which says who they are
+- **The studio publishes no port and agents can't reach it.** Agent containers sit on their own
+  network (`<prefix>-agents` since 2.34; the default bridge before), the studio on the compose
+  network — verified (on the default bridge): `studio` doesn't resolve and its IP times out. Agents act through the platform, which says who they are
   (`x-studio-actor: agent:<id>` or `human`). **Identity is set by code, never by a model**, and no
   agent container ever holds the token or a model key.
 - **One RPC door**: `POST /v1/call {action, args}` → `{ok, result}` or `{ok:false, error:{code, message}}`.
@@ -2248,6 +2272,51 @@ module (Claude Code 231 MB, Codex 374 MB, Grok 159 MB).
 a given subscription allows it is between them and the provider; the README says so, and the
 platform never offers a provider's login as its own (Anthropic's Agent SDK terms forbid that).
 
+## 2.34 Isolation, audited (2026-09-26, from `main`)
+
+A friend of the boss said the isolation on `main` had problems; the boss: "那就都修复一下 就按照你说的做"
+(fix all of it, the way you proposed). Reproduced first with plain containers under the same
+`docker run` flags, then fixed; the rules now live in **`web/sandbox.mjs`** (pure, `node web/sandbox.mjs`).
+
+| Was | Now |
+| --- | --- |
+| `-v workspace/groups:/groups` — **every agent read, changed and deleted every group's drive**, groups it had left included, from a DM too. The `/work/group` symlink looked like the boundary and wasn't | one `-v groups/<gid>:/groups/<gid>` per group it is in. Label `ma.groups` records them; a change recreates the container. Leaving a group / disbanding it removes the member's container at once (`dropContainersOf`, after the turn in progress), so a background process can't keep the drive |
+| Docker's default bridge, `icc` on: agents could reach each other's ports | own network `<prefix>-agents` with `enable_icc=false` (podman: made without it, with a warning — **not verified on podman**) |
+| root with Docker's default caps (incl. NET_RAW), no `no-new-privileges` | `--cap-drop ALL` + CHOWN DAC_OVERRIDE FOWNER FSETID KILL SETUID SETGID NET_BIND_SERVICE, `no-new-privileges` |
+| a group-mate plants `report.md -> /work/notes.txt`; you `read_file`/`write_file` it and hit **your own** desk (every desk is called `/work`) | the file tools resolve the path in the container first and refuse a group-drive name that leaves `/groups` (`PATH_GUARD`). **bash is not guarded** |
+| cookie without HttpOnly; `cookie.includes('ma_token=TOKEN')` accepted `ma_token=TOKENx` | cookie parsed by name, sha256 + `timingSafeEqual`; `HttpOnly; SameSite=Lax` (+`Secure` behind a TLS proxy) |
+
+- **Lax, not the Strict I first proposed**: Strict drops the cookie when the page is opened from a link
+  in another app (a 401 page), and every write is a non-GET that Lax already keeps from other sites.
+- Existing containers upgrade by themselves: label `ma.sandbox` (bump `SANDBOX_VERSION` when the rules
+  change) is compared on each agent's first turn after a restart — verified: an old-style container was
+  recreated with the log line "made under sandbox rules v1, now v2".
+- `ensureContainer` caches "checked" per container as work|image|groups, so membership changes are
+  caught on the next turn without an inspect every turn. A container swapped from outside while the
+  server runs is not re-inspected until a restart.
+- The host is still reachable from agents (e.g. its SSH on the bridge gateway) and so is the internet.
+  The internet is meant to be reachable (boss, same day); the host's own ports are a host-firewall matter.
+
+⚠️ **Testing locally with `.env` present mounts the REAL workspace**: the server reads
+`WORKSPACE_HOST_PATH` from `.env` (`data/workspace`) unless the environment overrides it. The first
+test run wrote into it (cleaned up — only new files). Set `WORKSPACE_HOST_PATH` to a scratch dir,
+plus `AGENT_PREFIX`, `DATABASE_URL` and `BOT_LLM_*` for a fake upstream.
+
+Verified (real image `multi-agent-worker:2`, fake upstream scripting tool calls): an agent in g1 sees
+only g1 and can't read g2; writing via `group/` lands in the host's g1 dir; the planted link refused
+for read and write, the victim's file unchanged, in-drive reads still fine; CapEff `0x4fb`,
+NoNewPrivs 1; `apt-get install` works; the browser tool works; agent→agent HTTP times out while the
+agent reaches its own server and the internet; removing a member drops its container at once and its
+next turn has no `/groups`; a member of two groups sees both; cookie flags, `document.cookie` empty,
+the UI loads on the cookie alone; `ma_token=TOKENx` / `xma_token=` 401.
+
+**On this branch** (merged from `main` the same day): a shared group machine (2.31) goes through the
+same rules — `runArgs` with the group's drive as its desk (`desk: 'groups/<gid>'`), no other group
+mounted, same network and capabilities, self-tested in `sandbox.mjs`; disbanding a shared group or
+switching sharing off removes its machine (`dropGroupMachine`). The studio and the cli container are
+compose services, not on `<prefix>-agents`, so agents still can't reach them; the cli container
+reaches the app's `/mcp` over the compose network.
+
 ## 3. What runs now
 
 ```bash
@@ -2257,6 +2326,7 @@ node web/model.mjs         # self-test for context budgeting / window inference
 node web/schedule.mjs      # self-test for scheduled-task time computation
 node web/skill.mjs         # self-test for SKILL.md read/write
 node web/approve.mjs       # self-test for which tool calls need a person
+node web/sandbox.mjs       # self-test for what an agent's container sees (mounts, caps, the path guard)
 node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
@@ -2292,7 +2362,8 @@ built-in web UI, **not part of the product**, kept only for the record.
    (images, streaming). What's left of the short-drama roadmap is in 2.31's "not built".
 2. ~~**Per-Agent spending cap**~~ **done 2026-09-20, see 2.25** — usage rows, per-upstream
    prices, and a daily cap checked before every model call
-3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)
+3. ~~Container egress allowlist~~ **not wanted**: agents are meant to reach the internet (boss, 2026-09-26).
+   Only the host's own ports are worth a host firewall (2.34)
 4. Event triggers for scheduled tasks, browser via MCP, a skill marketplace (v1 of scheduled tasks 2.21,
    browser 2.22 and skill library 2.23 are done)
 
