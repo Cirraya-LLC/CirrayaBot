@@ -54,7 +54,7 @@ void main() {
 
     await open(reduceMotion: false);
     expect(tester.getSize(find.byKey(const ValueKey('sidebar'))).width, 308);
-    await tester.tap(find.text(tr('wb.collapseSidebar')));
+    await tester.tap(find.byTooltip(tr('wb.collapseSidebar')));
     await tester.pump();
     final midway = await widthAfter(const Duration(milliseconds: 100));
     expect(midway, greaterThan(72), reason: 'still on its way in');
@@ -64,7 +64,7 @@ void main() {
 
     // Reduced motion: the end state, with no travel through it.
     await open(reduceMotion: true);
-    await tester.tap(find.text(tr('wb.collapseSidebar')));
+    await tester.tap(find.byTooltip(tr('wb.collapseSidebar')));
     expect(await widthAfter(const Duration(milliseconds: 1)), 72);
 
     // Before the frame ends: the poll timer outlives a tearDown callback.

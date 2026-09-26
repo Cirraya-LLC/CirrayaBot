@@ -273,6 +273,35 @@ try {
   await api('DELETE', `/api/groups/${g.body.id}`)
   log('group: the @-ed Claude member ran uname in its own machine; the group log has it')
 
+  // 4c. a shared machine (2.31) under the sandbox rules (2.34): both members work on the group's
+  // machine, whose /work is the group drive; it is on the agents' network with capabilities dropped
+  // and no other mount; disbanding the group removes it.
+  const cxname = (await api('GET', '/api/bots')).body.find(b => b.id === cx).name
+  const sg = await api('POST', '/api/groups', { name: `Shared-${RUN}`, members: [cl, cx], shared_machine: true })
+  assert.equal(sg.status, 200, JSON.stringify(sg.body))
+  const say = text => fetch(`${APP}/api/chat?k=${K}`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ target: { type: 'group', id: sg.body.id }, text }) }).then(r => r.text())
+  await say(`@${gname} RUN:echo from-claude > /work/handoff-${RUN}.txt && hostname`)
+  const seen2 = await say(`@${cxname} RUN:cat /work/handoff-${RUN}.txt && hostname`)
+  assert.ok(!/event: error/.test(seen2), seen2.slice(0, 400))
+  const box = `${ENV.AGENT_PREFIX || 'ma'}-group-${sg.body.id}`
+  const boxHost = sh('exec', box, 'hostname').trim()
+  const smsgs = (await api('GET', `/api/groups/${sg.body.id}/messages`)).body
+  const tools = smsgs.filter(m => m.role === 'tool').map(m => m.output)
+  assert.equal(tools.length, 2)
+  assert.ok(tools.every(o => o.includes(boxHost)), `not both on ${boxHost}: ${tools}`)
+  assert.match(tools[1], /from-claude/)
+  assert.equal(execFileSync('ls', [join(DIR, 'data/workspace/groups', sg.body.id)], { encoding: 'utf8' }).trim(), `handoff-${RUN}.txt`)
+  const ins = JSON.parse(sh('inspect', box))[0]
+  assert.deepEqual(ins.Mounts.map(mt => mt.Destination), ['/work'])
+  assert.deepEqual(Object.keys(ins.NetworkSettings.Networks), [`${ENV.AGENT_PREFIX || 'ma'}-agents`])
+  assert.deepEqual(ins.HostConfig.CapDrop, ['ALL'])
+  assert.ok(ins.HostConfig.SecurityOpt.includes('no-new-privileges'))
+  await api('DELETE', `/api/groups/${sg.body.id}`)
+  await sleep(2000)
+  assert.equal(sh('ps', '-a', '--filter', `name=^${box}$`, '--format', '{{.Names}}').trim(), '', 'the shared machine outlived its group')
+  log(`shared machine: both members on ${boxHost} (only /work mounted, agents network, caps dropped); gone with the group`)
+
   // 5. hanging up kills the CLI inside the container, not just the docker exec client (2.22.1).
   // A fresh agent, so no earlier answer in its history lets the fake reply at once.
   const hk = await api('POST', '/api/bots', { name: `Hang-${RUN}`, persona: 'x', model: '', runtime: 'claude' })

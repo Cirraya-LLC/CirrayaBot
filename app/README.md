@@ -1,4 +1,4 @@
-# Multi-Agent desktop client
+# CirrayaBot desktop client
 
 A native window for Windows and macOS that connects to the server you deployed yourself.
 Same backend and same data as the web UI — open it on another computer and you get the same
@@ -9,7 +9,7 @@ token and you're done. Paste the whole `http://host:8080/?k=TOKEN` line the serv
 startup into the address box and the two fields split themselves.
 
 The UI is available in English (default), Simplified Chinese (简体中文) and Traditional Chinese
-(繁體中文); switch on the setup screen or in the sidebar footer.
+(繁體中文); switch on the setup screen or with the 🌐 icon in the sidebar footer.
 
 ## Building
 

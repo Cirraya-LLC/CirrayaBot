@@ -113,7 +113,7 @@ class _SetupPageState extends State<SetupPage> {
                   Row(
                     children: [
                       const Text(
-                        'Multi-Agent',
+                        'CirrayaBot',
                         style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
                       ),
                       const Spacer(),
