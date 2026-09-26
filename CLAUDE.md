@@ -2317,6 +2317,29 @@ switching sharing off removes its machine (`dropGroupMachine`). The studio and t
 compose services, not on `<prefix>-agents`, so agents still can't reach them; the cli container
 reaches the app's `/mcp` over the compose network.
 
+## 2.35 Ready for a Mac (2026-09-26)
+
+The boss: "马上我部署到mac电脑了，最后做一下优化" (about to deploy on a Mac; a last round of tuning).
+
+- **Apple Silicon is covered**: every base image (node:24-slim, postgres:17-alpine, docker:28-cli,
+  debian) is multi-arch, and Claude Code / Codex / Grok all ship linux-arm64 (npm optional deps,
+  Grok's installer maps `aarch64`). Checked by manifest, **not built on arm64 here**.
+- ⚠️ **start.sh sized the ceilings from the Mac's RAM, but containers run in a VM with a share of it**
+  (Docker Desktop: half by default). A 16 GB Mac was sized as 16 GB against an 8 GB VM. `mem_mb` now
+  asks the engine first (`docker info .MemTotal` / `podman info .Host.MemTotal`); on Linux that is
+  the host's RAM, so nothing changes there (the test deployment's .env stayed byte-identical).
+- **The engine not running** now stops start.sh at once with "start Docker Desktop" — before, the
+  compose client answered and the failure came later as a socket error.
+- **A repo outside Docker Desktop's shared folders** (`/Users /Volumes /private /tmp`) warns: agent
+  containers would mount an empty `/work` without an error (2.18.2's shape again).
+- **podman machine on a Mac**: the socket to mount is the one *inside* the VM (rootful
+  `/run/podman/podman.sock`, rootless `/run/user/<vm uid>/…`), not the host's; the old Linux search
+  exited with a `systemctl` hint. **Not run on a Mac.**
+
+Verified: a fake `uname` (Darwin) + a fake engine with 3.9 GB → small-box ceilings and the warning;
+the real deployment rerun unchanged; the "not running" message with the daemon down. **Not verified**:
+a real Mac, Docker Desktop, arm64 builds of the four images.
+
 ## 3. What runs now
 
 ```bash

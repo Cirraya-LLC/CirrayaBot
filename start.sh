@@ -25,6 +25,14 @@ elif command -v podman-compose >/dev/null; then
 else
   echo "Neither docker compose nor podman compose found; install one first" >&2; exit 1
 fi
+# The client answering doesn't mean the engine is up — on a Mac Docker Desktop (or the podman
+# machine) may simply not be started, and compose then fails with a socket error much later.
+if ! "$RUNTIME" info >/dev/null 2>&1; then
+  if [ "$RUNTIME" = docker ]; then echo "Docker isn't running. Start Docker Desktop (or OrbStack / colima) and rerun ./start.sh" >&2
+  else echo "podman isn't running. On a Mac: podman machine start; on Linux: systemctl --user start podman.socket" >&2; fi
+  exit 1
+fi
+OS=$(uname -s)
 
 rand() { head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
 
@@ -55,6 +63,12 @@ ensure STUDIO_EVENT_TOKEN "$(rand)"
 # ── Sizing ── Memory in MB (MEM_MB overrides the detection, e.g. to size for a smaller target).
 mem_mb() {
   if [ -n "${MEM_MB:-}" ]; then echo "$MEM_MB"; return; fi
+  # What the container engine has, not what the machine has: Docker Desktop, OrbStack, colima and
+  # the podman machine run containers in a VM that gets a share of the RAM (Docker Desktop: half by
+  # default). Sized by the Mac's 16 GB, the ceilings would add up to more than the VM holds.
+  local b
+  b=$("$RUNTIME" info --format '{{.MemTotal}}' 2>/dev/null || "$RUNTIME" info --format '{{.Host.MemTotal}}' 2>/dev/null || true)
+  if [ -n "$b" ] && [ "$b" -gt 0 ] 2>/dev/null; then echo $(( b / 1048576 )); return; fi
   if [ -r /proc/meminfo ]; then awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo; return; fi
   if command -v sysctl >/dev/null; then echo $(( $(sysctl -n hw.memsize 2>/dev/null || echo 4294967296) / 1048576 )); return; fi
   echo 4096
@@ -98,6 +112,15 @@ ensure AGENT_TOOLS off
 WS="$(pwd)/data/workspace"
 mkdir -p "$WS"
 setkv WORKSPACE_HOST_PATH "$WS"
+# On a Mac the engine's VM sees only the folders shared with it (Docker Desktop: /Users, /Volumes,
+# /private, /tmp by default). A repo elsewhere gives agent containers an empty /work with no error.
+if [ "$OS" = Darwin ]; then
+  case "$WS" in
+    /Users/*|/Volumes/*|/private/*|/tmp/*) ;;
+    *) echo "⚠️  $WS is outside the folders Docker Desktop shares by default (/Users, /Volumes, /private, /tmp)." >&2
+       echo "    Move the repo under your home folder, or add this path in Docker Desktop → Settings → Resources → File sharing." >&2 ;;
+  esac
+fi
 
 # Upgrading from the old layout: old data is in ./workspace, the new home is ./data/workspace.
 # Without moving it, the first start imports an empty directory and the UI looks like
@@ -107,14 +130,27 @@ if [ -d workspace ] && [ -z "$(ls -A "$WS" 2>/dev/null)" ]; then
   cp -a workspace/. "$WS"/
 fi
 
-# podman's socket isn't /var/run/docker.sock, and rootless differs from root
+# The socket the app mounts is a path the ENGINE resolves — inside its VM on a Mac. Docker Desktop,
+# OrbStack and colima all have /var/run/docker.sock there, the compose default. podman differs.
 if [ "$RUNTIME" = podman ] && ! grep -q '^DOCKER_SOCK=..*' .env; then
-  for sock in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" /run/podman/podman.sock; do
-    if [ ! -S "$sock" ]; then continue; fi
-    ensure DOCKER_SOCK "$sock"; echo "podman socket: $sock"; break
-  done
-  grep -q '^DOCKER_SOCK=..*' .env || {
-    echo "⚠️  podman socket not found. Run once: systemctl --user enable --now podman.socket" >&2; exit 1; }
+  if [ "$OS" = Darwin ]; then
+    # podman machine: rootful serves /run/podman/podman.sock inside the VM, rootless its user's socket.
+    # (Not run on a real Mac — if agent containers won't start, set DOCKER_SOCK by hand.)
+    if [ "$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null | head -n 1)" = true ]; then
+      ensure DOCKER_SOCK /run/podman/podman.sock
+    else
+      vmuid=$(podman machine ssh id -u 2>/dev/null | tr -d '\r' || true)
+      ensure DOCKER_SOCK "/run/user/${vmuid:-1000}/podman/podman.sock"
+    fi
+    echo "podman machine socket (inside the VM): $(grep '^DOCKER_SOCK=' .env | cut -d= -f2-)"
+  else
+    for sock in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" /run/podman/podman.sock; do
+      if [ ! -S "$sock" ]; then continue; fi
+      ensure DOCKER_SOCK "$sock"; echo "podman socket: $sock"; break
+    done
+    grep -q '^DOCKER_SOCK=..*' .env || {
+      echo "⚠️  podman socket not found. Run once: systemctl --user enable --now podman.socket" >&2; exit 1; }
+  fi
 fi
 
 # ── Modules → profiles, and what the app is told exists ──
