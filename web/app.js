@@ -10,9 +10,6 @@ const withLang = u => `${u}${u.includes('?') ? '&' : '?'}lang=${encodeURICompone
 
 applyDom()
 $('#bwimg').alt = t('bw.alt')
-$('#lang').innerHTML = Object.entries(LANG_NAMES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')
-$('#lang').value = lang
-$('#lang').onchange = e => setLang(e.target.value)
 const listJoin = xs => xs.join(t('common.sep'))
 const quote = s => t('common.quote', { s })
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
@@ -28,13 +25,59 @@ const paintTheme = () => {
   document.documentElement.dataset.theme = choice === 'system' ? (media.matches ? 'light' : 'dark') : choice
 }
 media.addEventListener('change', paintTheme)
-$('#theme').innerHTML = ['system', 'light', 'dark']
-  .map(v => `<option value="${v}">${esc(t('theme.' + v))}</option>`).join('')
-$('#theme').value = readTheme()
-$('#theme').onchange = e => {
-  try { localStorage.setItem('ma_theme', e.target.value) } catch {}
+const setTheme = v => {
+  try { localStorage.setItem('ma_theme', v) } catch {}
   paintTheme()
 }
+
+// ═══ One small menu: the + button, appearance, language ═══
+// Opens above an anchor in the sidebar's footer, below one at the top.
+// Closes on a pick, a click elsewhere, Esc, or a scroll/resize.
+const menu = $('#menu')
+let menuFrom = null
+function closeMenu() {
+  if (menu.hidden) return
+  menu.hidden = true
+  menuFrom?.setAttribute('aria-expanded', 'false')
+  menuFrom = null
+}
+function openMenu(anchor, items) {
+  if (menuFrom === anchor) return closeMenu()
+  closeMenu()
+  hideTip()
+  menu.innerHTML = ''
+  for (const it of items) {
+    const b = document.createElement('button')
+    b.setAttribute('role', it.checked === undefined ? 'menuitem' : 'menuitemradio')
+    if (it.checked !== undefined) b.setAttribute('aria-checked', String(it.checked))
+    b.innerHTML = `${it.checked !== undefined ? `<i>${it.checked ? '\u2713' : ''}</i>` : ''}<span>${esc(it.label)}</span>`
+    b.onclick = () => { closeMenu(); it.on() }
+    menu.append(b)
+  }
+  menu.hidden = false
+  const r = anchor.getBoundingClientRect(), up = !!anchor.closest('.foot')
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`
+  menu.style.top = up ? `${r.top - menu.offsetHeight - 6}px` : `${r.bottom + 6}px`
+  menuFrom = anchor
+  anchor.setAttribute('aria-expanded', 'true')
+  ;(menu.querySelector('[aria-checked="true"]') ?? menu.firstElementChild)?.focus()
+}
+document.addEventListener('mousedown', e => {
+  if (!menu.hidden && !menu.contains(e.target) && !menuFrom?.contains(e.target)) closeMenu()
+})
+menu.addEventListener('keydown', e => {
+  const items = [...menu.children], i = items.indexOf(document.activeElement)
+  if (e.key === 'Escape') { e.preventDefault(); const a = menuFrom; closeMenu(); a?.focus() }
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus()
+  } else if (e.key === 'Tab') closeMenu()
+})
+for (const ev of ['resize', 'blur']) window.addEventListener(ev, closeMenu)
+$('#themebtn').onclick = e => openMenu(e.currentTarget, ['system', 'light', 'dark']
+  .map(v => ({ label: t('theme.' + v), checked: readTheme() === v, on: () => setTheme(v) })))
+$('#langbtn').onclick = e => openMenu(e.currentTarget, Object.entries(LANG_NAMES)
+  .map(([k, v]) => ({ label: v, checked: lang === k, on: () => setLang(k) })))
 
 // ═══ Collapsing the sidebar ═══
 // Collapsed it is still the conversation list: same avatars, same recency
@@ -46,12 +89,12 @@ function setRail(on) {
   try { localStorage.setItem('ma_rail', on ? '1' : '0') } catch {}
   $('#collapseicon').textContent = on ? '\u00bb' : '\u00ab'
   const label = t(on ? 'side.expand' : 'side.collapse')
-  $('#collapse').querySelector('span').textContent = label
   $('#collapse').dataset.tip = label
+  $('#collapse').setAttribute('aria-label', label)
+  closeMenu()
   hideTip()
 }
 $('#collapse').onclick = () => setRail(!railOn())
-$('#railnew').onclick = () => $('#newconv').click()
 // A search box you cannot type in is a dead control, so the rail's magnifier
 // opens the sidebar and puts the cursor in the real one.
 $('#railsearch').onclick = () => { setRail(false); $('#q').focus() }
@@ -64,14 +107,24 @@ document.addEventListener('keydown', e => {
 
 const tip = $('#tip')
 const hideTip = () => { tip.hidden = true }
+// The footer is icons only, so its names show whether or not the sidebar is
+// collapsed — above the icon, since the row sits at the bottom of the window.
 function showTip(el) {
   const text = el.dataset.tip || (el.dataset.tipKey ? t(el.dataset.tipKey) : '')
-  if (!text || !railOn()) return
+  const foot = !!el.closest('.foot')
+  if (!text || !(foot || railOn()) || !menu.hidden) return
   const r = el.getBoundingClientRect()
   tip.textContent = text
-  tip.style.top = `${r.top + r.height / 2}px`
-  tip.style.left = `${r.right + 8}px`
   tip.hidden = false
+  if (foot) {
+    tip.style.transform = 'none'
+    tip.style.top = `${r.top - tip.offsetHeight - 6}px`
+    tip.style.left = `${Math.max(8, Math.min(r.left, innerWidth - tip.offsetWidth - 8))}px`
+  } else {
+    tip.style.transform = ''
+    tip.style.top = `${r.top + r.height / 2}px`
+    tip.style.left = `${r.right + 8}px`
+  }
 }
 for (const ev of ['mouseover', 'focusin']) $('aside').addEventListener(ev, e => {
   const el = e.target.closest?.('[data-tip],[data-tip-key]')
@@ -425,7 +478,12 @@ async function send() {
 
 // ═══ Groups ═══
 let gEditing = null
-$('#newconv').onclick = () => openGroupDlg(null)
+const newMenu = e => openMenu(e.currentTarget, [
+  { label: t('side.newAgent'), on: () => editBot(null) },
+  { label: t('side.newGroup'), on: () => openGroupDlg(null) },
+])
+$('#newconv').onclick = newMenu
+$('#railnew').onclick = newMenu
 function openGroupDlg(g) {
   gEditing = g
   $('#gtitle').textContent = g ? t('common.editNamed', { name: g.name }) : t('g.new')
@@ -544,7 +602,6 @@ async function loadModels(providerId, current) {
   sel.value = current || r.suggested || models[0]; sel.disabled = false
 }
 const chosenModel = () => ($('#bmodel').hidden ? $('#bmodelx').value : $('#bmodel').value).trim()
-$('#newbot').onclick = () => editBot(null)
 $('#bcancel').onclick = () => $('#bdlg').close()
 $('#bsave').onclick = async () => {
   const cap = toMicro($('#bcap').value)
@@ -729,9 +786,9 @@ const spendOf = id => USAGE.agents.find(a => a.id === id)
 
 async function loadUsage() {
   USAGE = await fetch(api('/api/usage')).then(r => r.json()).catch(() => USAGE)
-  const spent = t('sp.footer', { day: money(USAGE.day?.cost_micro ?? 0), month: money(USAGE.month?.cost_micro ?? 0) })
-  $('#spendfoot').firstElementChild.nextElementSibling.textContent = spent
-  $('#spendfoot').dataset.tip = spent   // collapsed, the figure only shows in the tip
+  // Today's figure in the row; today and the month in its tip.
+  $('#spendfoot').textContent = money(USAGE.day?.cost_micro ?? 0)
+  $('#spendfoot').dataset.tip = t('sp.footer', { day: money(USAGE.day?.cost_micro ?? 0), month: money(USAGE.month?.cost_micro ?? 0) })
   if (cur) renderSpend(cur)
 }
 

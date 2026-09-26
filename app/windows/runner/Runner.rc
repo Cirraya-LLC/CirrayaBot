@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.cirraya" "\0"
-            VALUE "FileDescription", "multi_agent" "\0"
+            VALUE "FileDescription", "CirrayaBot" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "multi_agent" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.cirraya. All rights reserved." "\0"
             VALUE "OriginalFilename", "multi_agent.exe" "\0"
-            VALUE "ProductName", "multi_agent" "\0"
+            VALUE "ProductName", "CirrayaBot" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
