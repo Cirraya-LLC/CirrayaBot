@@ -64,7 +64,7 @@ const SCRIPT = {
       { id: 'E01-S01-SH001', duration_s: 3, characters: [{ name: '蛮吉', look: '战斗装' }], location: '断崖', story_beat: '拔刀',
         continuity: { out_to: 'E01-S01-SH002' }, dialogue: [{ speaker: '蛮吉', text: '谁也别想过去！', kind: 'onscreen' }] },
       { id: 'E01-S01-SH002', duration_s: 4, characters: [{ name: '蛮吉', look: '战斗装' }], location: '断崖', story_beat: '风起',
-        continuity: { in_from: 'E01-S01-SH001' }, dialogue: [{ kind: 'narration', text: '那一年，他十二岁。' }] },
+        continuity: { in_from: 'E01-S01-SH001' }, dialogue: [{ kind: 'narration', text: '那一年，他十二岁。' }, { kind: 'narration', text: '风从断崖下面吹上来，他握着刀的手一直在抖，却没有退后半步。' }] },
     ] }],
     ['episode.submit', { episode: 'E01' }],
   ] : [],
@@ -182,6 +182,11 @@ try {
   sql(`insert into studio.actor_project values ${[D, A, C, R].map(id => `('agent:${id}', '${P}')`).join(',')} on conflict (actor) do update set project_id = excluded.project_id`)
   // Speech through the Keys panel, pointing at the fake.
   await panel('keys.set', { name: 'tts', values: { base_url: `http://${gw}:${PORT}/tts/v1`, api_key: 'tts-key', model: 'fake-tts' } })
+  // Background music, uploaded by a person in project settings.
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=3', '-y', join(tmp, 'bgm.mp3')])
+  const setBgm = await panel('project.bgm', { project: P, data_b64: readFileSync(join(tmp, 'bgm.mp3')).toString('base64'), name: 'theme.mp3', level: 'low' })
+  assert.equal(setBgm.bgm.level, 'low'); assert.equal(setBgm.bgm.name, 'theme.mp3')
+  assert.equal((await api('POST', '/api/studio/call', { action: 'project.bgm', args: { project: P, data_b64: PNG } })).status, 400, 'a picture is not music')
   assert.equal((await panel('keys.test', { name: 'tts' })).code, 'modelOk')
 
   // ---- a person writes E01 and starts it ----
@@ -239,14 +244,24 @@ try {
   assert.equal(v.codec_name, 'h264'); assert.equal(v.width, 720); assert.equal(v.height, 1280)
   assert.ok(pr.streams.some(s => s.codec_type === 'audio'), 'with sound')
   assert.ok(Math.abs(Number(pr.format.duration) - 7) < 0.3, `3 s + 4 s (got ${pr.format.duration})`)
+  // At the platforms' loudness, music and all.
+  const ebr = execFileSync('sh', ['-c', `ffmpeg -hide_banner -nostats -i '${join(tmp, 'cut.mp4')}' -af ebur128 -f null - 2>&1 | grep -A1 'Integrated loudness' | tail -1`]).toString()
+  const I = Number(ebr.match(/I:\s*(-?[\d.]+)/)?.[1])
+  assert.ok(Math.abs(I + 14) < 1.5, `the cut is at -14 LUFS (got ${I})`)
   // Subtitles beside it, every line; speech in the right voices, cached.
   const srt = await (await fetch(`${APP}/api/studio/file/${ep.cut.srt_asset_id}?k=${K}`)).text()
   assert.match(srt, /蛮吉：谁也别想过去！/); assert.match(srt, /那一年，他十二岁。/)
-  assert.deepEqual(ttsBodies.map(b => [b.input, b.voice, b.model]), [['那一年，他十二岁。', 'sage', 'fake-tts']], 'only the narration is spoken by TTS, in the narrator\'s voice')
-  assert.equal(sql(`select count(*) from studio.generations where project_id = '${P}' and engine = 'tts' and status = 'succeeded'`), '1')
+  // Every cue fits a 9:16 frame: ≤ 2 lines of ≤ 11 characters, never broken inside a word.
+  const cueTexts = srt.trim().split(/\n\n+/).map(c => c.split('\n').slice(2))
+  assert.ok(cueTexts.every(ls => ls.length <= 2 && ls.every(l => [...l].length <= 11)), `cues fit the frame: ${JSON.stringify(cueTexts)}`)
+  assert.equal(cueTexts.length, 4, 'the long line (29 characters, three lines) became two cues')
+  assert.ok(!cueTexts.flat().some(l => /^[，。！？]/.test(l)), 'no line starts with punctuation')
+  assert.equal(cueTexts.flat().join('').replace(/蛮吉：|\s/g, ''), '谁也别想过去！那一年，他十二岁。风从断崖下面吹上来，他握着刀的手一直在抖，却没有退后半步。', 'nothing lost or doubled in the layout')
+  assert.deepEqual(ttsBodies.map(b => [b.input, b.voice, b.model]), [['那一年，他十二岁。', 'sage', 'fake-tts'], ['风从断崖下面吹上来，他握着刀的手一直在抖，却没有退后半步。', 'sage', 'fake-tts']], 'only the narration is spoken by TTS, in the narrator\'s voice')
+  assert.equal(sql(`select count(*) from studio.generations where project_id = '${P}' and engine = 'tts' and status = 'succeeded'`), '2')
   await panel('episode.assemble', { project: P, episode: 'E01' })
   await until('recut', async () => sql(`select count(*) from studio.assemblies where episode_id = (select id from studio.episodes where project_id = '${P}') and status = 'done'`) === '2')
-  assert.equal(ttsBodies.length, 1, 'cutting again reuses the speech')
+  assert.equal(ttsBodies.length, 2, 'cutting again reuses the speech')
 
   await panel('episode.review', { project: P, episode: 'E01', decision: 'approve' })
   assert.equal(await stage(P), 'done')

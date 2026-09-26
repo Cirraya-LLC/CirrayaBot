@@ -11,7 +11,7 @@ import { normTags, matchRefs } from './refs.mjs'
 import * as seedance from './seedance.mjs'
 import * as gptimage from './gptimage.mjs'
 import * as comfy from './comfy.mjs'
-import { probe, contactSheet, MAX_ROWS } from './media.mjs'
+import { probe, contactSheet, MAX_ROWS, BGM_LEVELS } from './media.mjs'
 import { enqueue } from './notify.mjs'
 import * as keys from './keys.mjs'
 import { normDialogue, promptBlock, speaksOnCamera } from './dialogue.mjs'
@@ -792,6 +792,32 @@ export function makeActions({ store, kick = () => {}, kickWorker = () => {} }) {
       return { scene: sc.code, locked: true, shots: shots.length }
     })
   }
+  // ---- the project's background music (a person's choice, in project settings) ----
+  H['project.bgm'] = async (a, ctx) => {
+    const p = await projectOf(ctx.actorKey, a)
+    const info = { ...p.info }
+    if (a.clear) delete info.bgm
+    else {
+      const level = a.level === undefined ? info.bgm?.level ?? 'medium' : text(a.level, 10)
+      if (!Object.keys(BGM_LEVELS).includes(level)) fail('bad_arg', `level is ${Object.keys(BGM_LEVELS).join(', ')}`)
+      let asset = info.bgm?.asset, name = info.bgm?.name ?? ''
+      if (a.data_b64) {
+        const buf = Buffer.from(String(a.data_b64), 'base64')
+        if (buf.length > 30 * 1024 ** 2) fail('too_large', 'music up to 30 MB')
+        const file = await stash(buf, { maxBytes: 30 * 1024 ** 2 })
+        const pr = await probe(store.path(file.sha256))
+        if (!pr.audio || pr.width) fail('bad_file', 'that is not a music file (MP3, WAV or M4A)')
+        const row = await addAsset(p, { ...file, mime: file.mime.startsWith('audio/') ? file.mime : 'audio/mp4' },
+          { kind: 'bgm', tags: ['bgm'], created_by: ctx.actorKey })
+        asset = row.id; name = text(a.name, 120)
+      }
+      if (!asset) fail('bad_arg', 'no music yet — send the file (data_b64)')
+      info.bgm = { asset, level, name }
+    }
+    await db.updateProject(p.id, { info })
+    return { bgm: info.bgm ?? null }
+  }
+
   // ---- episodes: a series is episodes; each moves through the pipeline (pipeline.mjs) ----
   const episodeView = e => ({ code: e.code, title: e.title, logline: e.logline, stage: e.stage, rev: e.rev, note: e.note, ord: e.ord })
   H['episode.list'] = async (a, ctx) => {

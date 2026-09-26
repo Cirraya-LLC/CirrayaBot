@@ -2106,6 +2106,65 @@ Not built: a screenwriter and an editor (the boss left them out); background mus
 lines (off-screen by definition); per-episode cost; distribution / publishing; the candidate
 prefilter.
 
+## 2.32 The cut sounds and reads like a finished short (2026-09-26)
+
+The boss, after a look at short-video-factory (AGPL-3.0 — **ideas only, not one line copied**):
+"改3点和2点" — point 3 loudness + background music, point 2 subtitle layout.
+
+**Loudness** (`media.mjs`, `LOUDNESS`): every take is measured (ffmpeg `ebur128`) and given a fixed
+gain to −20 LUFS; the finished mix is measured again and brought to **−14 LUFS** with a peak limiter
+at −1.5 dBFS. Gains are clamped to ±30 dB and a take at or below −70 LUFS (silence) gets none.
+
+- ⚠️ **Not `loudnorm`.** On AAC-decoded digital silence (a Seedance take without sound, or our own
+  padding) its single pass prints `Input contains (near) NaN/+-Inf` and fails the cut. Measure,
+  then `volume=<n>dB` + `alimiter`, is two passes but can't do that.
+- Mutation-checked: forcing the final gain to 0 fails the self-test at −20.4 LUFS.
+
+**Background music**: `project.bgm` (human only, in `PANEL_ACTIONS`): a music file (≤ 30 MB,
+probed — audio with no video, else 400) stored as a `bgm` asset, `info.bgm = {asset, level, name}`,
+level low/medium/high = −34/−30/−26 dB. The cut loops it, trims it to the cut, fades 1 s in /
+1.5 s out, ducks it under dialogue and narration (`sidechaincompress`), and the loudness pass comes
+after the mix. A music asset that's gone is logged `bgm_missing` and the cut goes on without it.
+Project settings has the row (upload / level / remove), saved at once.
+
+**Subtitles** (`dialogue.mjs` `wrap` / `lineUnits` / `layout`): break between **words**
+(`Intl.Segmenter('zh', {granularity:'word'})`), closing punctuation stays on the word before it,
+CJK counts 1 and Latin 0.55 of a line; a line is `floor(W·0.86 / (12·H/288))` units (11 at
+720×1280, 36 at 1280×720 — libass sizes against 384×288, 2.31); **two lines at most**, a longer
+cue is split in time by length. `MarginV` 44 on a vertical frame (the bottom ~15% is covered by
+platform UI), 30 otherwise.
+
+Verified: the self-tests (a cut measures −14 ±1.5 LUFS; music under a silent take is audible and
+the cut keeps its length; wrap / layout cases), e2e-platform with music uploaded (a PNG refused),
+the cut at −14 LUFS, 4 cues, ≤ 2 lines of ≤ 11, no line starting with punctuation, text equal to
+the lines, TTS cached on a recut; frames of the cut looked at (two lines, breaks between words);
+the settings row in a browser, the level persisting. **Not verified**: how it sounds to a person
+on real music and real voices (only synthetic tones here); real Chrome playback (no H.264 here).
+
+### Research, not built: Claude Code and Codex as an agent's runtime
+
+The boss: "在本地部署环境下研究如何原生接入codex和claude code". Findings (2026-09-26, from the
+official docs; nothing has been run here yet):
+
+- **Claude Code**: `claude -p --bare --output-format stream-json --verbose --include-partial-messages`,
+  `--append-system-prompt`, `--mcp-config`, `--allowedTools`, `--permission-prompt-tool <mcp tool>`
+  (the route for our approval gate), `--resume <session>`. Or the Agent SDK (TS) with `canUseTool`
+  and in-process MCP servers. **`--bare` is mandatory here**: without it Claude Code walks up for
+  every CLAUDE.md — §0's credential file. Auth: an API key (or `ANTHROPIC_BASE_URL` +
+  token); Anthropic's terms forbid a third-party product offering claude.ai login. It may be
+  called "… Powered by Claude", never "Claude Code".
+- **Codex**: `codex exec --json` (JSONL `thread.started / turn.* / item.* / error`, `--sandbox`,
+  `CODEX_API_KEY`, `--output-schema`, `exec resume`) has **no way to ask a person** mid-turn, so it
+  would bypass our gate. `codex app-server` (JSON-RPC 2.0, server-initiated
+  `item/commandExecution/requestApproval` etc.) does, and is the one to use. It reads AGENTS.md up
+  to the project root — same hazard as §0.
+- The lesson from dsh (2.29) applies: **their built-in tools bypass anything we don't route**
+  (our approval gate, usage rows, the daily cap, `withAgent`), and a key in the agent's container
+  breaks "keys never enter agent containers". Both are answered by the same design: the CLI runs in
+  the agent's own container, its model base URL points at a **per-turn proxy in the app** (which
+  holds the key, records usage, enforces the cap), and our tools are an MCP server in the app.
+  Not built — waiting on the boss's choice.
+
 ## 3. What runs now
 
 ```bash

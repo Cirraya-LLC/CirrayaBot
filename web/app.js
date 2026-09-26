@@ -1674,7 +1674,7 @@ async function wsSettings(ticket) {
   if (ticket !== wsTicket) return
   wsHead(t('ws.settings'))
   const box = wsBody()
-  const { lang: plang = 'en', ratio: pratio = '16:9', narrator = null, ...rest } = info.info ?? {}
+  const { lang: plang = 'en', ratio: pratio = '16:9', narrator = null, bgm = null, ...rest } = info.info ?? {}
   const nv = typeof narrator === 'string' ? { voice: narrator } : narrator ?? {}
   const groups = CONVS.filter(c => c.kind === 'group')
   box.innerHTML = `<div style="max-width:720px">
@@ -1686,6 +1686,12 @@ async function wsSettings(ticket) {
       <div class="brow"><select class="fi" id="stratio" title="${esc(t('st.ratioTitle'))}">${['9:16', '16:9', '3:4', '1:1'].map(r => `<option value="${r}">${esc(t('st.ratio', { r }))}</option>`).join('')}</select>
         <input class="fi mono" id="stnarr" placeholder="${esc(t('st.narratorPh'))}"><input class="fi" id="stnarrhow" placeholder="${esc(t('ws.voiceHowPh'))}"></div>
       <small class="rhint">${esc(t('st.narratorHint'))}</small>
+      <div class="brow" id="stbgm"><span class="rhint" style="margin:0;white-space:nowrap">♪ ${esc(t('st.bgm'))}</span>
+        <span class="rhint" style="margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(bgm ? bgm.name || t('st.bgmSet') : t('st.bgmNone'))}</span>
+        <select class="fi" style="max-width:130px;margin:0"${bgm ? '' : ' disabled'}>${['low', 'medium', 'high'].map(l => `<option value="${l}">${esc(t(`st.bgm.${l}`))}</option>`).join('')}</select>
+        <label class="btn" style="white-space:nowrap">${esc(t(bgm ? 'st.bgmReplace' : 'st.bgmUpload'))}<input type="file" accept="audio/mpeg,audio/wav,audio/mp4,.mp3,.wav,.m4a" hidden></label>
+        ${bgm ? `<button class="btn" data-a="clear" style="color:var(--bad);white-space:nowrap">${esc(t('st.bgmRemove'))}</button>` : ''}</div>
+      <small class="rhint">${esc(t('st.bgmHint'))}</small>
       <textarea class="fi mono" id="stinfo" rows="6" spellcheck="false" placeholder="${esc(t('st.infoPh'))}"></textarea>
       <small class="rhint">${esc(t('st.infoHint'))}</small>
       <div class="rowb"><button class="btn pri" id="stsave">${esc(t('common.save'))}</button><button class="btn" id="stnew">${esc(t('ws.newProject'))}</button></div></div>
@@ -1696,6 +1702,21 @@ async function wsSettings(ticket) {
   $('#stinfo').value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''
   $('#stratio').value = ['9:16', '16:9', '3:4', '1:1'].includes(pratio) ? pratio : '16:9'
   $('#stnarr').value = nv.voice ?? ''; $('#stnarrhow').value = nv.instructions ?? ''
+  // Background music is saved at once, like the crew roles: a file isn't something to lose to a missed Save.
+  const bgmBox = $('#stbgm'), bgmLevel = bgmBox.querySelector('select')
+  bgmLevel.value = bgm?.level ?? 'medium'
+  const setBgm = async args => {
+    try { await stCall('project.bgm', { project: WS.project, ...args }); wsShow('settings') } catch (e) { alert(e.message) }
+  }
+  bgmLevel.onchange = () => setBgm({ level: bgmLevel.value })
+  bgmBox.querySelector('[data-a=clear]')?.addEventListener('click', () => { if (confirm(t('st.bgmConfirmRemove'))) setBgm({ clear: true }) })
+  bgmBox.querySelector('input[type=file]').onchange = async e => {
+    const f = e.target.files?.[0]; if (!f) return
+    if (f.size > 30 * 1024 * 1024) { alert(t('st.bgmTooBig')); return }
+    const b64 = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1]); r.onerror = no; r.readAsDataURL(f) })
+    bgmBox.querySelector('label').textContent = t('st.bgmUploading')
+    setBgm({ data_b64: b64, name: f.name, level: bgmLevel.value })
+  }
   $('#stnew').onclick = wsNewProject
   $('#stsave').onclick = async () => {
     let extra = {}
@@ -1706,7 +1727,7 @@ async function wsSettings(ticket) {
     try {
       const narr = $('#stnarr').value.trim() ? { voice: $('#stnarr').value.trim(), instructions: $('#stnarrhow').value.trim() } : undefined
       await stCall('project.edit', { project: WS.project, name: $('#stname').value.trim(), notify_group: $('#stgroup').value,
-        info: { ...extra, lang: $('#stlang').value, ratio: $('#stratio').value, ...narr ? { narrator: narr } : {} } })
+        info: { ...extra, lang: $('#stlang').value, ratio: $('#stratio').value, ...narr ? { narrator: narr } : {}, ...bgm ? { bgm } : {} } })
       await wsProjects(WS.project); wsShow('settings')
     } catch (e) { alert(e.message) }
   }

@@ -13,8 +13,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import * as db from './db.mjs'
 import * as tts from './tts.mjs'
-import { timeline, srt } from './dialogue.mjs'
-import { assemble } from './media.mjs'
+import { timeline, srt, layout, lineUnits } from './dialogue.mjs'
+import { assemble, FRAME } from './media.mjs'
 import { ratioOf } from './actions.mjs'
 
 export async function runAssembly(id, { store, stash, stashText, addAsset, newGeneration, finishGeneration }) {
@@ -78,7 +78,11 @@ export async function runAssembly(id, { store, stash, stashText, addAsset, newGe
     }
     if (skipped) log.push({ code: 'no_tts', lines: skipped })
 
-    const { cues, narration } = timeline(plan)
+    const ratio = ratioOf(p.info)
+    const [W, H] = FRAME[ratio] ?? FRAME['9:16']
+    const { cues: raw, narration } = timeline(plan)
+    // Every cue fits the frame: broken between words, two lines at most (dialogue.layout).
+    const cues = layout(raw, lineUnits(W, H))
     const subs = srt(cues)
     const srtFile = cues.length ? await stashText(subs, 'application/x-subrip') : null
     const srtAsset = srtFile ? await addAsset(p, srtFile, { kind: 'subtitles', tags: [`episode:${ep.code}`], created_by: 'studio' }) : null
@@ -86,8 +90,15 @@ export async function runAssembly(id, { store, stash, stashText, addAsset, newGe
     dir = await mkdtemp(join(tmpdir(), 'cut-'))
     let srtPath = null
     if (cues.length) { srtPath = join(dir, 'subs.srt'); await writeFile(srtPath, subs) }
+    // The project's background music, if a person chose one.
+    let bgm = null
+    if (p.info?.bgm?.asset) {
+      const m = (await db.q(`select sha256 from assets where id = $1 and project_id = $2`, [p.info.bgm.asset, p.id])).rows[0]
+      if (m && await store.has(m.sha256)) bgm = { path: store.path(m.sha256), level: p.info.bgm.level ?? 'medium' }
+      else log.push({ code: 'bgm_missing' })
+    }
     const out = await assemble({
-      dir, ratio: ratioOf(p.info), burn: job.params?.burn !== false, srtPath,
+      dir, ratio, bgm, burn: job.params?.burn !== false, srtPath,
       segments: plan.map(s => ({ path: store.path(s.sha256), seconds: s.duration })),
       narration: narration.filter(n => plan[n.shot].clips[n.line]).map(n => ({ path: plan[n.shot].clips[n.line], at: n.at })),
     })

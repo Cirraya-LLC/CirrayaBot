@@ -154,7 +154,7 @@ export const PANEL_ACTIONS = new Set([
   'shot.sheet', 'shot.approve', 'shot.reject', 'shot.reopen',
   // The pipeline's gates and the series itself are a person's (studio/roles.mjs).
   'episode.list', 'episode.show', 'episode.add', 'episode.edit', 'episode.start', 'episode.review', 'episode.assemble',
-  'order.list', 'char.voice',
+  'order.list', 'char.voice', 'project.bgm',
   // The Keys panel: the studio's model keys (studio/keys.mjs). The answer carries hints, never keys.
   'keys.get', 'keys.set', 'keys.test',
 ])
