@@ -60,6 +60,23 @@ the symptom is being stuck forever at "waiting for PostgreSQL…".
 **podman**: `./start.sh` detects it by itself and points the socket at podman's.
 The socket has to be running: `systemctl --user enable --now podman.socket`.
 
+**On a Mac** (Apple Silicon or Intel — every image is built for arm64 and x86):
+
+1. Install and **start** Docker Desktop (OrbStack or colima work the same way). `./start.sh` stops
+   with a clear message if the engine isn't running.
+2. Keep the repo under your home folder: Docker Desktop only shares `/Users`, `/Volumes`,
+   `/private` and `/tmp` with its VM by default. Elsewhere, agent containers would get an empty
+   `/work` (start.sh warns).
+3. Give Docker's VM room: **Settings → Resources → Memory, 8 GB or more** if you run the studio
+   and the `cli` module. `./start.sh` sizes the ceilings from what the VM has, not from the Mac.
+   Set this before the first run, or delete the `*_MEMORY` lines from `.env` and rerun.
+4. `git clone … && cd CirrayaBot && git checkout feat/studio`, add `cli` to `MODULES` in `.env`
+   if you want Claude Code / Codex / Grok, and run `./start.sh`. The first build downloads a few
+   GB (the agent image has Chromium) and takes a while.
+
+podman on a Mac (`podman machine`) should work but hasn't been run on one; if agent containers
+won't start, set `DOCKER_SOCK` in `.env` to the socket path *inside* the machine.
+
 ### Modules, and the smallest machine it runs on
 
 The studio and the coding CLIs are optional modules, set by `MODULES` in `.env` (comma-separated);
