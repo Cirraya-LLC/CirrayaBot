@@ -110,6 +110,25 @@ they then get `bash` / read file / write file, executed **inside their own conta
 > And any external text an Agent reads (web pages, logs, coworkers' messages) may be a prompt
 > injection. This is a switch a person deliberately flips, not a default.
 
+What each container can reach:
+
+- **Files**: its own desk (`/work`) and the shared drive of **each group it is in**
+  (`/groups/<id>`, and `group/` while it speaks in that group). A group it isn't in doesn't exist
+  in there; leaving a group takes the container down at once, and the next turn starts it without
+  that drive. The platform's code and `.env` are never mounted.
+- **Network**: the Agents share a bridge of their own with container-to-container traffic off, so
+  they can't reach one another. They **can** reach the internet, and any service on the host that
+  listens on all interfaces (the host's SSH, this app's own port if `BIND_ADDR=0.0.0.0`) — put a
+  firewall in front of those if that matters to you.
+- **Privileges**: root inside the container, but with a short capability list and
+  `no-new-privileges`, so `apt install` works and raw sockets don't.
+- The file tools refuse a name in a group drive that is a symlink out of it (a group-mate can't
+  plant `report.md -> /work/...` to make you read or overwrite your own files). Plain `bash` in the
+  container isn't policed that way.
+- The access token's cookie is `HttpOnly`, and marked `Secure` behind a TLS proxy that sends
+  `X-Forwarded-Proto: https`. Over plain HTTP the token travels in the clear — put HTTPS in front
+  of a public deployment.
+
 ### Asking before acting
 
 An Agent asks you first before running anything that matches a pattern list — `rm -rf`, `sudo`,

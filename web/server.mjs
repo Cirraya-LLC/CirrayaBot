@@ -12,13 +12,14 @@ import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
+import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT } from './sandbox.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 
 const WEB = join(ROOT, 'web')
 const WORKROOT = join(ROOT, 'workspace')
@@ -229,9 +230,9 @@ ${recall.trim()}`)
 // whoever holds ACCESS_TOKEN = holds a shell in a container, and any outside text an agent reads
 // (web pages, logs, colleagues' messages) may be a prompt injection.
 //
-// A container mounts only two directories:
-//   /work    ← workspace/agents/<id>   its own desk
-//   /groups  ← workspace/groups        every group's shared drive (in group chats /work/group is symlinked there)
+// What a container sees and may do is decided in sandbox.mjs: its own desk at /work, one mount per
+// group it belongs to at /groups/<gid> (in a group chat /work/group points at the current one), a
+// network of ours with container-to-container traffic off, and a short capability list.
 // The platform's code and .env aren't in there; it can't reach them.
 const CLI = env.CONTAINER_CLI || 'docker'
 const IMAGE = env.AGENT_IMAGE || 'multi-agent-worker:1'
@@ -241,6 +242,7 @@ const OUT_MAX = 12_000
 // fight over the same ma-agent-chief — the mount check makes each side delete and recreate the other's container.
 const PREFIX = env.AGENT_PREFIX || 'ma'
 const cname = id => `${PREFIX}-agent-${id}`
+const NETWORK = `${PREFIX}-agents`
 
 // ⚠️ When starting sibling containers, the left side of -v is a HOST path, not a path inside our own container.
 // When we run in a container WORKROOT is /app/workspace, while on the host it's somewhere else —
@@ -285,7 +287,31 @@ async function buildImage() {
   imageReady = true
 }
 
-const containerReady = new Set()
+let networkReady = null
+/**
+ * The agents' own bridge, with inter-container traffic off: on Docker's default bridge every agent
+ * could reach every other agent's ports. Made once; podman's bridge doesn't take the option, and
+ * there the network is made without it (with a warning) rather than not at all.
+ */
+function ensureNetwork() {
+  networkReady ??= (async () => {
+    if ((await cliRun(['network', 'inspect', NETWORK], null, 30_000)).code === 0) return
+    let r = await cliRun(['network', 'create', '--driver', 'bridge',
+      '-o', 'com.docker.network.bridge.enable_icc=false', NETWORK], null, 60_000)
+    if (r.code !== 0 && !/already exists/i.test(r.err)) {
+      console.warn(`[sandbox] could not make ${NETWORK} with container-to-container traffic off (${(r.err || r.out).trim()}); ` +
+        'making it without — agents on this engine can reach each other')
+      r = await cliRun(['network', 'create', NETWORK], null, 60_000)
+    }
+    if (r.code !== 0 && !/already exists/i.test(r.err))
+      throw new Say('container.startFailed', { id: NETWORK, detail: (r.err || r.out).slice(0, 300) }, 500)
+  })().catch(e => { networkReady = null; throw e })
+  return networkReady
+}
+
+// name -> the sandbox it was checked against (work|image|groups). A change in any of them — above all
+// the agent's group memberships — makes the next turn inspect it again, and recreate it if needed.
+const containerReady = new Map()
 
 /**
  * One agent does one thing at a time.
@@ -312,54 +338,53 @@ async function execIn(c, argv, input) {
   return r
 }
 
-/** Make sure this agent's container is running, and point /work/group at the current group. */
+/** Make sure this agent's container is running with the right mounts, and point /work/group at the current group. */
 async function ensureContainer(botId, groupId) {
   await ensureImage()
   const name = cname(botId)
-  if (!containerReady.has(name)) {
-    const work = join(HOSTWORK, 'agents', botId)
+  // Only the groups it is in right now. A group it isn't in has no mount, so it doesn't exist in there.
+  const groups = (await db.listGroups()).filter(g => g.members.includes(botId)).map(g => g.id)
+  if (groupId && !groups.includes(groupId)) throw new Say('err.noGroup', {}, 404)
+  const work = join(HOSTWORK, 'agents', botId)
+  const want = { work, image: IMAGE, groups: groupsLabel(groups) }
+  const sig = `${want.work}|${want.image}|${want.groups}`
+  if (containerReady.get(name) !== sig) {
+    // The host directories have to exist first, or docker makes them itself, owned by root.
     await mkdir(join(WORKROOT, 'agents', botId), { recursive: true })
-    await mkdir(join(WORKROOT, 'groups'), { recursive: true })
-    // Also ask where /work is mounted: containers are long-lived, and WORKSPACE_HOST_PATH changes
-    // (upgrades, moving the repo, editing compose). A wrongly mounted container looks perfectly fine —
-    // commands succeed, ls shows files — but the output lands in a directory nobody looks at.
-    // Same shape as 2.14's "symlink still pointing at the previous group", so it must be checked here.
-    const { out } = await cliRun(['inspect', '-f',
-      '{{.State.Running}} {{.Config.Image}} {{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}', name],
-      null, 30_000)
-    let [state, image, mounted] = out.trim().split(' ')
-    if (mounted && mounted !== work) {
-      console.log(`${botId}'s container is still mounted on the old path ${mounted}; recreating on ${work} (old files stay where they are)`)
+    for (const g of groups) await mkdir(join(WORKROOT, 'groups', g), { recursive: true })
+    // Containers are long-lived, and what they should see changes: WORKSPACE_HOST_PATH moves, the image is
+    // upgraded, the sandbox rules change, the agent joins or leaves a group. A container that is wrong in any
+    // of these looks perfectly fine from inside — so it is checked here, every time the answer could differ.
+    const { out } = await cliRun(['inspect', '-f', INSPECT_FORMAT, name], null, 30_000)
+    const d = decide(out, want)
+    if (d.action === 'recreate') {
+      console.log(`${botId}'s container is ${d.why}; recreating it (files in /work and the group drives are kept)`)
       await cliRun(['rm', '-f', name], null, 60_000)
-    } else if (mounted && image !== IMAGE) {
-      // The image was upgraded (e.g. a browser was added): old containers don't switch images by themselves.
-      // /work is on the host, so recreating only loses what he apt-installed himself
-      console.log(`${botId}'s container is still on the old image ${image}; recreating on ${IMAGE} (files in /work are kept)`)
-      await cliRun(['rm', '-f', name], null, 60_000)
-      mounted = ''
     }
-    else if (state === 'true') { /* already running */ }
-    else if (state === 'false') await cliRun(['start', name], null, 60_000)
-    if (!mounted || mounted !== work) {
-      const r = await cliRun(['run', '-d', '--name', name,
-        '--memory', env.AGENT_MEMORY || '2g', '--cpus', env.AGENT_CPUS || '2',
-        '--pids-limit', '512',
-        '-v', `${join(HOSTWORK, 'agents', botId)}:/work`,
-        '-v', `${join(HOSTWORK, 'groups')}:/groups`,
-        '-w', '/work', IMAGE, 'sleep', 'infinity'], null, 120_000)
+    if (d.action === 'start') await cliRun(['start', name], null, 60_000)
+    if (d.action === 'create' || d.action === 'recreate') {
+      await ensureNetwork()
+      const r = await cliRun(runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups, network: NETWORK,
+        memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2' }), null, 120_000)
       if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
     }
-    containerReady.add(name)
+    containerReady.set(name, sig)
   }
-  // The group directory has to really exist on the host first. Group info now lives in the DB, so nobody creates
-  // this directory anymore — without it the symlink points nowhere, `cp report.md group/` just fails,
-  // and the failure only shows up in some agent's tool output.
-  if (groupId) await mkdir(join(WORKROOT, 'groups', groupId), { recursive: true })
   // Reset the group symlink every time — otherwise it keeps pointing at the previous group (CLAUDE.md 2.14)
   await cliRun(['exec', name, 'bash', '-lc',
     groupId ? `rm -f /work/group && ln -s /groups/${groupId} /work/group` : 'rm -f /work/group'],
     null, 30_000)
   return name
+}
+
+/**
+ * Someone left a group (or it was disbanded): take their container down now rather than on their next
+ * turn, so nothing they left running in the background keeps a hand in that group's drive. After the
+ * turn in progress, if any — the next one recreates it with the mounts it should have.
+ */
+function dropContainersOf(botIds) {
+  for (const id of new Set(botIds)) withAgent(id, () => removeContainer(id)).catch(e =>
+    console.warn(`[sandbox] could not remove ${cname(id)}: ${e.message}`))
 }
 
 async function removeContainer(botId) {
@@ -513,13 +538,13 @@ async function runTool(name, args, ctx) {
       .filter(Boolean).join('\n')) || `(no output, exit ${code})`
   }
   if (name === 'read_file') {
-    const { code, out, err } = await execIn(c, ['-w', '/work', c, 'cat', '--', args.path])
+    const { code, out, err } = await execIn(c, ['-w', '/work', c, 'bash', '-c', READ_SCRIPT, '_', String(args.path ?? '')])
     return code === 0 ? clip(out) : `Could not read: ${(err || '').trim() || `exit ${code}`}`
   }
   if (name === 'write_file') {
     const body = args.content ?? ''
     const { code, err } = await execIn(c,
-      ['-i', '-w', '/work', c, 'bash', '-lc', `mkdir -p "$(dirname -- "$1")" && cat > "$1"`, '_', args.path],
+      ['-i', '-w', '/work', c, 'bash', '-c', WRITE_SCRIPT, '_', String(args.path ?? '')],
       body)
     return code === 0 ? `Wrote ${args.path} (${body.length} characters)` : `Could not write: ${(err || '').trim()}`
   }
@@ -1018,10 +1043,19 @@ async function providerFromBody(b) {
 // ---------- HTTP ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' }
 
+// Compared as hashes of equal length, so the time taken says nothing about how much of a guess was right.
+const digest = v => createHash('sha256').update(String(v)).digest()
+const sameToken = v => v != null && timingSafeEqual(digest(v), digest(CFG.token))
+const cookieToken = req => {
+  for (const part of (req.headers.cookie ?? '').split(';')) {
+    const i = part.indexOf('=')
+    if (i > 0 && part.slice(0, i).trim() === 'ma_token') return decodeURIComponent(part.slice(i + 1).trim())
+  }
+  return null
+}
 function authed(req, url) {
   if (!CFG.token) return true                       // no guard when only listening locally
-  if (url.searchParams.get('k') === CFG.token) return true
-  return (req.headers.cookie ?? '').includes(`ma_token=${CFG.token}`)
+  return sameToken(url.searchParams.get('k')) || sameToken(cookieToken(req))
 }
 
 const readBody = async req => {
@@ -1136,8 +1170,13 @@ const server = createServer(async (req, res) => {
     catch (e) { return send(503, { ok: false, error: String(e.message ?? e) }) }
   }
   if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
-  if (CFG.token && url.searchParams.get('k') === CFG.token)
-    res.setHeader('set-cookie', `ma_token=${CFG.token}; Path=/; Max-Age=2592000; SameSite=Lax`)
+  // HttpOnly: no script on the page can read it. Lax, not Strict: Strict would drop it when the page is
+  // opened from a link in another app, and every write here is a POST/PUT/PATCH/DELETE, which Lax
+  // already keeps from other sites. Secure when a TLS proxy in front says the request was https.
+  if (CFG.token && sameToken(url.searchParams.get('k'))) {
+    const https = req.headers['x-forwarded-proto'] === 'https' || req.socket.encrypted
+    res.setHeader('set-cookie', `ma_token=${encodeURIComponent(CFG.token)}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`)
+  }
 
   try {
     if (url.pathname === '/api/conversations') return send(200, await listConversations(lang))
@@ -1519,10 +1558,14 @@ const server = createServer(async (req, res) => {
       const g = (await db.listGroups()).find(x => x.id === gm[1])
       if (!g) return send(404, { error: t('err.noGroup') })
       const patch = await checkGroup(await readBody(req), g)
-      return send(200, await db.saveGroup({ ...g, ...patch }))
+      const saved = await db.saveGroup({ ...g, ...patch })
+      if (patch.members) dropContainersOf(g.members.filter(id => !patch.members.includes(id)))
+      return send(200, saved)
     }
     if (gm && req.method === 'DELETE') {         // disband; files in the shared drive are left alone
+      const g = (await db.listGroups()).find(x => x.id === gm[1])
       await db.deleteGroup(gm[1])
+      if (g) dropContainersOf(g.members)
       return send(200, { ok: true })
     }
     // Export / import a conversation's chat history. The format is defined here; an exported file imports back as-is.

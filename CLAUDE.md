@@ -511,7 +511,7 @@ in its own container, just like giving a new hire a clean machine to set up.
 
 ```
 cat: /work/../.env: No such file or directory     ← it could read this before
-ls /groups → gmtoblv8x                            ← only sees the groups it takes part in
+ls /groups → gmtoblv8x                            ← only because there was one group (wrong, see 2.28)
 hostname   → 64f88766b655                         ← a container, not the host
 echo ... >> group/roll.txt → appears in the host's workspace/groups/<gid>/roll.txt
 ```
@@ -527,7 +527,7 @@ echo ... >> group/roll.txt → appears in the host's workspace/groups/<gid>/roll
 
 **Not done yet**: container egress isn't restricted (Agents can reach anything on the internet), and
 there's no custom seccomp/AppArmor profile. Tightening it for real means `--network` plus an allowlist
-proxy.
+proxy. **The mount above was wrong: it gave every agent every group — fixed in 2.28.**
 
 ## 2.14 Verification criteria: looking at the conversation and not the artifact = false positive (2026-09-05, actually got burned once)
 
@@ -1592,6 +1592,44 @@ and the whole flow runs with zero console errors.
 of standing allowances nobody re-reads is how permission prompts stop meaning anything. The gate
 also doesn't cover the human-driven browser takeover (2.22.2), which is a person acting already.
 
+## 2.28 Isolation, audited (2026-09-26)
+
+A friend of the boss said the isolation on `main` had problems; the boss: "那就都修复一下 就按照你说的做"
+(fix all of it, the way you proposed). Reproduced first with plain containers under the same
+`docker run` flags, then fixed; the rules now live in **`web/sandbox.mjs`** (pure, `node web/sandbox.mjs`).
+
+| Was | Now |
+| --- | --- |
+| `-v workspace/groups:/groups` — **every agent read, changed and deleted every group's drive**, groups it had left included, from a DM too. The `/work/group` symlink looked like the boundary and wasn't | one `-v groups/<gid>:/groups/<gid>` per group it is in. Label `ma.groups` records them; a change recreates the container. Leaving a group / disbanding it removes the member's container at once (`dropContainersOf`, after the turn in progress), so a background process can't keep the drive |
+| Docker's default bridge, `icc` on: agents could reach each other's ports | own network `<prefix>-agents` with `enable_icc=false` (podman: made without it, with a warning — **not verified on podman**) |
+| root with Docker's default caps (incl. NET_RAW), no `no-new-privileges` | `--cap-drop ALL` + CHOWN DAC_OVERRIDE FOWNER FSETID KILL SETUID SETGID NET_BIND_SERVICE, `no-new-privileges` |
+| a group-mate plants `report.md -> /work/notes.txt`; you `read_file`/`write_file` it and hit **your own** desk (every desk is called `/work`) | the file tools resolve the path in the container first and refuse a group-drive name that leaves `/groups` (`PATH_GUARD`). **bash is not guarded** |
+| cookie without HttpOnly; `cookie.includes('ma_token=TOKEN')` accepted `ma_token=TOKENx` | cookie parsed by name, sha256 + `timingSafeEqual`; `HttpOnly; SameSite=Lax` (+`Secure` behind a TLS proxy) |
+
+- **Lax, not the Strict I first proposed**: Strict drops the cookie when the page is opened from a link
+  in another app (a 401 page), and every write is a non-GET that Lax already keeps from other sites.
+- Existing containers upgrade by themselves: label `ma.sandbox` (bump `SANDBOX_VERSION` when the rules
+  change) is compared on each agent's first turn after a restart — verified: an old-style container was
+  recreated with the log line "made under sandbox rules v1, now v2".
+- `ensureContainer` caches "checked" per container as work|image|groups, so membership changes are
+  caught on the next turn without an inspect every turn. A container swapped from outside while the
+  server runs is not re-inspected until a restart.
+- The host is still reachable from agents (e.g. its SSH on the bridge gateway) and so is the internet.
+  That needs a host firewall / egress proxy — 3.1 item 3.
+
+⚠️ **Testing locally with `.env` present mounts the REAL workspace**: the server reads
+`WORKSPACE_HOST_PATH` from `.env` (`data/workspace`) unless the environment overrides it. The first
+test run wrote into it (cleaned up — only new files). Set `WORKSPACE_HOST_PATH` to a scratch dir,
+plus `AGENT_PREFIX`, `DATABASE_URL` and `BOT_LLM_*` for a fake upstream.
+
+Verified (real image `multi-agent-worker:2`, fake upstream scripting tool calls): an agent in g1 sees
+only g1 and can't read g2; writing via `group/` lands in the host's g1 dir; the planted link refused
+for read and write, the victim's file unchanged, in-drive reads still fine; CapEff `0x4fb`,
+NoNewPrivs 1; `apt-get install` works; the browser tool works; agent→agent HTTP times out while the
+agent reaches its own server and the internet; removing a member drops its container at once and its
+next turn has no `/groups`; a member of two groups sees both; cookie flags, `document.cookie` empty,
+the UI loads on the cookie alone; `ma_token=TOKENx` / `xma_token=` 401.
+
 ## 3. What runs now
 
 ```bash
@@ -1601,6 +1639,7 @@ node web/model.mjs         # self-test for context budgeting / window inference
 node web/schedule.mjs      # self-test for scheduled-task time computation
 node web/skill.mjs         # self-test for SKILL.md read/write
 node web/approve.mjs       # self-test for which tool calls need a person
+node web/sandbox.mjs       # self-test for what an agent's container sees (mounts, caps, the path guard)
 node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
