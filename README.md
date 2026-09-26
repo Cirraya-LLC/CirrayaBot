@@ -235,6 +235,10 @@ its own job.
 5. When every shot is approved, the studio **cuts the episode by itself**: the takes in order,
    each trimmed to its shot's length, 9:16 at 720×1280, narration and off-screen lines spoken by
    TTS in each character's voice, subtitles burned in and as an `.srt`. H.264 — plays everywhere.
+   Every take is levelled to the same loudness and the finished cut to −14 LUFS (what short-video
+   platforms normalise to); subtitles break between words, two lines at most, above the bottom
+   15% of a vertical frame. Optional background music (Project settings → a music file and a
+   level) loops under the cut, fades in and out, and ducks under every line.
 6. You watch it on the episode page and approve it, or reject a shot — it goes back to production
    and is cut again once that shot passes.
 

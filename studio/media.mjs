@@ -116,20 +116,50 @@ const SUB_FONT = process.env.STUDIO_SUB_FONT || 'WenQuanYi Micro Hei'
  * srtPath:   subtitles file or null; burn: draw them into the picture (true) or leave them beside it
  * Returns the path of the finished file inside `dir` (the caller stores it, then removes dir).
  */
-export async function assemble({ dir, segments, narration = [], srtPath = null, burn = true, ratio = '9:16', fps = 30 }) {
+// Loudness. Every take is levelled first (Seedance's takes come out at different volumes, and cut
+// together they jump), and the finished mix is brought to -14 LUFS / -1.5 dBTP — what short-video
+// platforms play at, so an episode is neither drowned out nor turned down by the app. Background
+// music sits well under the voices and ducks further whenever anyone speaks.
+export const LOUDNESS = { take: -20, final: -14, peak: -1.5 }
+export const BGM_LEVELS = { low: -34, medium: -30, high: -26 }
+
+/** Integrated loudness (LUFS) of a file's sound, -Infinity for silence or no sound at all. */
+export async function loudness(path) {
+  const p = spawn('ffmpeg', ['-hide_banner', '-nostats', '-i', path, '-map', '0:a:0?', '-af', 'ebur128', '-f', 'null', '-'])
+  let err = ''
+  for await (const c of p.stderr) err += c
+  const m = err.match(/Integrated loudness:\s*I:\s*(-?[\d.]+|-inf)/)
+  return m && m[1] !== '-inf' ? Number(m[1]) : -Infinity
+}
+// ⚠️ Not ffmpeg's one-pass loudnorm: on digital silence decoded from AAC it outputs NaN and the
+// encoder dies ("Input contains (near) NaN/+-Inf") — a silent take is normal here. Measure, then a
+// fixed gain (bounded) and a peak limiter; silence gets no gain at all.
+const gainTo = (measured, target) => (measured > -70 ? Math.max(-30, Math.min(30, target - measured)) : 0)
+const PEAK = `alimiter=limit=${Math.pow(10, -1.5 / 20).toFixed(3)}:level=disabled`
+// Where the subtitle sits, in the 288-high script libass uses: 30 ≈ a tenth up from the bottom; on a
+// vertical frame the platforms' own buttons and captions cover the bottom ~15%, so 44 clears them.
+export const marginV = (W, H) => (H > W ? 44 : 30)
+
+/**
+ * bgm: {path, level: 'low'|'medium'|'high'} or null — looped to the length of the cut, faded in and out.
+ */
+export async function assemble({ dir, segments, narration = [], srtPath = null, burn = true, ratio = '9:16', fps = 30, bgm = null }) {
   if (!segments.length) throw new Error('nothing to assemble')
   const [W, H] = FRAME[ratio] ?? FRAME['9:16']
   const parts = []
   for (const [i, s] of segments.entries()) {
     const out = join(dir, `seg${String(i).padStart(3, '0')}.mp4`)
     const { audio } = await probe(s.path)
+    const g = audio ? gainTo(await loudness(s.path), LOUDNESS.take) : 0
     const secs = Math.max(0.5, Number(s.seconds) || 1).toFixed(3)
     // A take without sound gets silence of the same length, so every segment has one audio stream.
     const inputs = audio ? ['-i', s.path] : ['-i', s.path, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
+    // Level the take (a silent one stays silent).
+    const level = g ? `,volume=${g.toFixed(2)}dB` : ''
     await run('ffmpeg', ['-v', 'error', ...inputs, '-t', secs,
       '-map', '0:v:0', '-map', audio ? '0:a:0' : '1:a:0',
       '-vf', `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=${fps},format=yuv420p,setsar=1`,
-      '-af', 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo',
+      '-af', `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${level}`,
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000',
       '-shortest', '-y', out], 600_000)
     parts.push(out)
@@ -138,30 +168,57 @@ export async function assemble({ dir, segments, narration = [], srtPath = null, 
   await writeFile(list, parts.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'))
   const body = join(dir, 'body.mp4')
   await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', body], 300_000)
-  if (!narration.length && !srtPath) return body
-
-  const final = join(dir, 'episode.mp4')
-  const args = ['-v', 'error', '-i', body]
-  for (const n of narration) args.push('-i', n.path)
-  const graph = []
+  // The sound is mixed on its own first, measured, then brought to the target in the last pass:
+  // the loudness of the whole is only known once it is whole.
+  const total = segments.reduce((n, s) => n + Math.max(0.5, Number(s.seconds) || 1), 0)
+  const fmt = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo'
+  const margs = ['-v', 'error', '-i', body]
+  for (const n of narration) margs.push('-i', n.path)
+  const bgmIn = bgm ? narration.length + 1 : null
+  if (bgm) margs.push('-stream_loop', '-1', '-i', bgm.path)
+  const mg = []
+  let dia = '[0:a]'
   if (narration.length) {
     // Speech on top of the takes' own sound. The takes are ducked while anyone narrates, so the
     // voice stays clear without the scene going silent.
-    narration.forEach((n, k) => graph.push(`[${k + 1}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=${Math.round(n.at * 1000)}:all=1[n${k}]`))
-    graph.push(`${narration.map((_, k) => `[n${k}]`).join('')}amix=inputs=${narration.length}:normalize=0:duration=longest[voice]`)
-    graph.push('[voice]asplit=2[vmix][vkey]')
-    graph.push('[0:a][vkey]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[bed]')
-    graph.push('[bed][vmix]amix=inputs=2:normalize=0:duration=first[aout]')
+    for (const [k, n] of narration.entries()) {
+      const g = gainTo(await loudness(n.path), LOUDNESS.take)
+      mg.push(`[${k + 1}:a]${fmt},volume=${g.toFixed(2)}dB,adelay=${Math.round(n.at * 1000)}:all=1[n${k}]`)
+    }
+    mg.push(`${narration.map((_, k) => `[n${k}]`).join('')}amix=inputs=${narration.length}:normalize=0:duration=longest[voice]`)
+    mg.push('[voice]asplit=2[vmix][vkey]')
+    mg.push('[0:a][vkey]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[bed]')
+    mg.push('[bed][vmix]amix=inputs=2:normalize=0:duration=first[dia]')
+    dia = '[dia]'
   }
+  if (bgm) {
+    // Music under everything: levelled low, cut to the episode, faded, and ducked by the dialogue.
+    const g = gainTo(await loudness(bgm.path), BGM_LEVELS[bgm.level] ?? BGM_LEVELS.medium)
+    const out = Math.max(0, total - 1.5).toFixed(2)
+    mg.push(`[${bgmIn}:a]${fmt},volume=${g.toFixed(2)}dB,atrim=0:${total.toFixed(2)},asetpts=PTS-STARTPTS,afade=t=in:d=1,afade=t=out:st=${out}:d=1.5[bgm]`)
+    mg.push(`${dia}asplit=2[d1][dkey]`)
+    mg.push('[bgm][dkey]sidechaincompress=threshold=0.02:ratio=4:attack=30:release=600[bgmd]')
+    mg.push('[d1][bgmd]amix=inputs=2:normalize=0:duration=first[mix]')
+    dia = '[mix]'
+  }
+  mg.push(`${dia}${fmt}[m]`)
+  const mix = join(dir, 'mix.wav')
+  await run('ffmpeg', [...margs, '-filter_complex', mg.join(';'), '-map', '[m]', '-t', total.toFixed(3), '-c:a', 'pcm_s16le', '-y', mix], 600_000)
+  const gain = gainTo(await loudness(mix), LOUDNESS.final)
+
+  const final = join(dir, 'episode.mp4')
+  const args = ['-v', 'error', '-i', body, '-i', mix]
+  const graph = [`[1:a]volume=${gain.toFixed(2)}dB,${PEAK},${fmt}[aout]`]
   if (srtPath && burn) {
     // ⚠️ libass sizes an SRT against a 384×288 script, not the video: these numbers are in that
-    // space and scale with the frame (12 ≈ 1/24 of the height, MarginV 30 ≈ a tenth up from the bottom).
-    const style = `FontName=${SUB_FONT},FontSize=12,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=30,Alignment=2`
+    // space and scale with the frame (12 ≈ 1/24 of the height). Lines are already broken by
+    // dialogue.layout() to fit; WrapStyle can't be forced for an SRT, so they must not be too long.
+    const style = `FontName=${SUB_FONT},FontSize=12,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=${marginV(W, H)},Alignment=2`
     const esc = p => p.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")
     graph.push(`[0:v]subtitles=filename='${esc(srtPath)}':fontsdir='${esc(dirname(FONT))}':force_style='${style}'[vout]`)
   }
-  if (graph.length) args.push('-filter_complex', graph.join(';'))
-  args.push('-map', srtPath && burn ? '[vout]' : '0:v', '-map', narration.length ? '[aout]' : '0:a')
+  args.push('-filter_complex', graph.join(';'))
+  args.push('-map', srtPath && burn ? '[vout]' : '0:v', '-map', '[aout]', '-t', total.toFixed(3))
   args.push(...srtPath && burn ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20'] : ['-c:v', 'copy'])
   args.push('-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', '-y', final)
   await run('ffmpeg', args, 900_000)
@@ -227,14 +284,29 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     a.ok(Math.abs(pe.duration_ms - 7000) < 250, `3 s + 4 s (got ${pe.duration_ms})`)
     // The subtitle is really in the picture: the bottom band at 1 s differs from the same band in
     // the version without subtitles.
+    const lufs = loudness
     const band = async (file, t) => {
-      const p = spawn('ffmpeg', ['-v', 'error', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'crop=480:80:120:1080,scale=96:16', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'])
+      const p = spawn('ffmpeg', ['-v', 'error', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'crop=480:160:120:940,scale=96:32', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'])
       const c = []; for await (const x of p.stdout) c.push(x)
       return [...Buffer.concat(c)]
     }
+    // The whole is at the platforms' loudness (a 440 Hz tone at full scale went in).
+    a.ok(Math.abs(await lufs(ep) - LOUDNESS.final) < 1.5, `the cut is at ${LOUDNESS.final} LUFS (got ${await lufs(ep)})`)
     const plain = await band(join(edir, 'body.mp4'), 1), burned = await band(ep, 1)
     a.ok(Math.max(...plain.map((v, i) => Math.abs(v - burned[i]))) > 80, 'subtitles are drawn into the frame (white text where it was black)')
     await rm(edir, { recursive: true, force: true })
+
+    // Background music: a silent take plus music. The music is there, and the cut still ends on time.
+    const music = join(dir, 'music.mp3')
+    await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=2', '-y', music])
+    const bdir = await mkdtemp(join(tmpdir(), 'ep-'))
+    const withMusic = await assemble({ dir: bdir, segments: [{ path: v1, seconds: 4 }], bgm: { path: music, level: 'medium' }, ratio: '16:9' })
+    const pm = await probe(withMusic)
+    a.ok(Math.abs(pm.duration_ms - 4000) < 200, `the music loops but the cut stays 4 s (got ${pm.duration_ms})`)
+    a.ok(await lufs(withMusic) > -40, 'the music is audible on a take that had no sound')
+    const silent = await assemble({ dir: bdir, segments: [{ path: v1, seconds: 2 }], ratio: '16:9' })
+    a.ok(await lufs(silent) < -60, 'and without music a silent take stays silent (loudness never invents sound)')
+    await rm(bdir, { recursive: true, force: true })
 
     await a.rejects(contactSheet({ takes: [] }), /no candidates/)
     await a.rejects(contactSheet({ takes: Array(9).fill({ path: v1, n: 1 }) }), /at most 8/)
