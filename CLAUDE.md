@@ -525,8 +525,8 @@ echo ... >> group/roll.txt → appears in the host's workspace/groups/<gid>/roll
   "what's needed out of the box" (curl / git / jq / python3) and let the Agent install the rest.
   `AGENT_IMAGE` can be swapped.
 
-**Not done yet**: container egress isn't restricted (Agents can reach anything on the internet), and
-there's no custom seccomp/AppArmor profile. Tightening it for real means `--network` plus an allowlist
+**Internet access is intended** (the boss, 2026-09-26: "agent连接外网无所谓啊 本来就应该要连接" — agents
+connecting out is fine, they're supposed to). There's no custom seccomp/AppArmor profile. Tightening it for real means `--network` plus an allowlist
 proxy. **The mount above was wrong: it gave every agent every group — fixed in 2.28.**
 
 ## 2.14 Verification criteria: looking at the conversation and not the artifact = false positive (2026-09-05, actually got burned once)
@@ -1615,7 +1615,7 @@ A friend of the boss said the isolation on `main` had problems; the boss: "那�
   caught on the next turn without an inspect every turn. A container swapped from outside while the
   server runs is not re-inspected until a restart.
 - The host is still reachable from agents (e.g. its SSH on the bridge gateway) and so is the internet.
-  That needs a host firewall / egress proxy — 3.1 item 3.
+  The internet is meant to be reachable (boss, same day); the host's own ports are a host-firewall matter.
 
 ⚠️ **Testing locally with `.env` present mounts the REAL workspace**: the server reads
 `WORKSPACE_HOST_PATH` from `.env` (`data/workspace`) unless the environment overrides it. The first
@@ -1657,7 +1657,8 @@ built-in web UI, **not part of the product**, kept only for the record.
    persistence and approvals (see 2.9.x)
 2. ~~**Per-Agent spending cap**~~ **done 2026-09-20, see 2.25** — usage rows, per-upstream
    prices, and a daily cap checked before every model call
-3. **Container egress allowlist** — Agents can currently reach anything on the internet (end of 2.13)
+3. ~~Container egress allowlist~~ **not wanted**: agents are meant to reach the internet (boss, 2026-09-26).
+   Only the host's own ports are worth a host firewall (2.28)
 4. Event triggers for scheduled tasks, browser via MCP, a skill marketplace (v1 of scheduled tasks 2.21,
    browser 2.22 and skill library 2.23 are done)
 
