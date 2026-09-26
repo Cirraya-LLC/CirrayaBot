@@ -526,8 +526,8 @@ echo ... >> group/roll.txt → appears in the host's workspace/groups/<gid>/roll
   `AGENT_IMAGE` can be swapped.
 
 **Internet access is intended** (the boss, 2026-09-26: "agent连接外网无所谓啊 本来就应该要连接" — agents
-connecting out is fine, they're supposed to). There's no custom seccomp/AppArmor profile. Tightening it for real means `--network` plus an allowlist
-proxy. **The mount above was wrong: it gave every agent every group — fixed in 2.28.**
+connecting out is fine, they're supposed to). There's no custom seccomp/AppArmor profile.
+**The mount above was wrong: it gave every agent every group — fixed in 2.28.**
 
 ## 2.14 Verification criteria: looking at the conversation and not the artifact = false positive (2026-09-05, actually got burned once)
 
