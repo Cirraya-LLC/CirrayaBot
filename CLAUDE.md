@@ -38,6 +38,11 @@ we plug in the runtime.
 **For the current shape see 2.12 and 2.18**: PostgreSQL + one container per Agent + one-command
 compose deployment.
 
+**Branch `feat/studio` (2026-09-25, not merged by the boss's decision)** turns the product into an AI
+film studio: a `studio` service (shot board, Seedance / GPT image / ComfyUI, contact sheets), a
+4-agent crew, a Keys panel, `deepseek-*` models running on DeepSeek Harness, and sizing for a 2-core /
+4 GB box. Its own CLAUDE.md (2.28–2.30) has the details. Nothing on `main` depends on it.
+
 ```bash
 ./start.sh     # this is how you start it
 ```
