@@ -164,6 +164,10 @@ alter table agents add column if not exists approval text not null default '';
 -- batch of shots needs about five per shot.
 alter table agents add column if not exists max_steps int;
 
+-- Where this agent's turns run: '' = our own loop (an upstream + a model), or a coding CLI in the
+-- cli module — 'claude' / 'codex' / 'grok' — on the subscription it is signed in with (web/cli.mjs).
+alter table agents add column if not exists runtime text not null default '';
+
 -- A tool call is a message too, so reopening a conversation still shows which commands ran.
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
 -- A reply's own reasoning, for the upstreams that want it passed back (DeepSeek in thinking mode).
@@ -225,18 +229,18 @@ export async function getAgent(id) {
 
 export async function upsertAgent(a) {
   const { rows } = await q(`
-    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, max_steps)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, max_steps, runtime)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
-      approval = excluded.approval, max_steps = excluded.max_steps
+      approval = excluded.approval, max_steps = excluded.max_steps, runtime = excluded.runtime
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
-     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.max_steps ?? null])
+     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.max_steps ?? null, a.runtime ?? ''])
   return rows[0]
 }
 

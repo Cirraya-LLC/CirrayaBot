@@ -14,6 +14,9 @@ import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import * as studio from './studio.mjs'
+import * as mcp from './mcp.mjs'
+import { RUNTIMES, RUNTIME_IDS, GROK_ENV, turnArgs, grokMcpBlock, reader, needsLogin,
+  loginArgs, logoutArgs, statusArgs, statusOf, loginPrompt, plain } from './cli.mjs'
 import { createServer } from 'node:http'
 import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
@@ -51,6 +54,8 @@ const toBot = (r, lang = 'en') => ({
   // Tool steps in one turn. null = the default (MAX_STEPS). A reviewer going through a batch needs
   // about five per shot, which twelve can't hold.
   max_steps: r.max_steps ?? null,
+  // '' = our own loop; otherwise the coding CLI its turns run on (web/cli.mjs).
+  runtime: r.runtime ?? '',
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
   tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
@@ -664,6 +669,7 @@ const upstreamStatus = e => Number(e?.upstreamStatus) || 0
  * and trimming only at the entrance would overflow by step three or four.
  */
 async function runAgent(p, messages, onDelta, onTool, ctx) {
+  if (p.runtime) return runCli(p, messages, onDelta, onTool, ctx)
   const MAX_STEPS = ctx.maxSteps ?? DEFAULT_STEPS
   const lang = ctx.lang ?? 'en'
   let text = ''
@@ -728,6 +734,166 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     }
   }
   return text || '(hit the tool-use limit; stopping here for now)'
+}
+
+// ---------- Agents on a coding CLI (web/cli.mjs) ----------
+// Claude Code, Codex and Grok Build run in the cli module's container, one process per turn,
+// signed in once with a person's own account in that container's home — which every agent
+// shares. The CLI is the model loop; the tools are still ours: served over MCP at /mcp on this
+// port, they go through execTool like on our own loop (approval, transcript row, the agent's own
+// container). Every built-in tool of the CLI is switched off — see cli.mjs for why that matters.
+
+const CLIMOD = { container: env.CLI_CONTAINER || '', mcpUrl: env.CLI_MCP_URL || `http://app:${CFG.port}/mcp` }
+// How much of the conversation goes into a CLI turn. Each CLI compacts on its own, but it starts
+// every turn from what we give it; this keeps a year-long chat from arriving whole.
+const CLI_CONTEXT = 150_000
+// bearer token → the running turn's tools. A token exists only while its turn runs.
+const cliTurns = new Map()
+
+/**
+ * The conversation as one prompt. A CLI starts fresh every turn: the history — a DM's, or the
+ * group log with everyone's names — lives in our database, as it does for every other agent.
+ */
+function cliPrompt(messages) {
+  const rest = messages.slice(1).filter(m => (m.role === 'user' || m.role === 'assistant') && m.content)
+  const line = m => m.role === 'assistant' ? `[You] ${m.content}`
+    : /^\[[^\]\n]{1,60}\] /.test(m.content) ? m.content : `[User] ${m.content}`
+  const last = rest.pop()
+  const earlier = rest.map(line).join('\n\n')
+  return (earlier ? `The conversation so far, oldest first ([You] is you):\n\n${earlier}\n\n---\nThe newest message — answer this now:\n\n` : '')
+    + (last ? line(last) : '')
+}
+
+/**
+ * One turn on a CLI. The shell wrapper records the CLI's pid inside the container (killing the
+ * `docker exec` client does not kill what it started — 2.22.1), writes the system prompt to a
+ * file, keeps Grok's MCP entry current, and moves into this agent's own directory so each
+ * agent's CLI state stays apart.
+ */
+async function runCli(p, messages, onDelta, onTool, ctx) {
+  if (!CLIMOD.container) throw new Say('cli.off')
+  const rt = p.runtime
+  const spec = RUNTIMES[rt]
+  if (!spec) throw new Say('cli.unknown', { id: rt })
+  // Grok reads a tool's image as text: it would get a base64 blob. Tell our tools to say so instead.
+  if (!spec.images) ctx.noImages = true
+  const fit = fitContext(messages, p.context_tokens)
+  if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
+  const system = fit.messages[0]?.role === 'system' ? fit.messages[0].content : ''
+  const id = randomBytes(8).toString('hex')
+  const token = randomBytes(24).toString('base64url')
+  cliTurns.set(token, {
+    tools: ctx.tools ?? [],
+    call: (name, args) => {
+      if (ctx.signal?.aborted) throw new Say('chat.aborted')
+      return execTool(name, args, ctx, onTool)
+    },
+  })
+  const argv = turnArgs(rt, { model: p.model, effort: p.effort, maxTurns: ctx.maxSteps ?? DEFAULT_STEPS,
+    system, systemFile: `/tmp/ma-${id}.sys`, mcp: { url: CLIMOD.mcpUrl, token } })
+  const envs = { MA_TURN_TOKEN: token, MA_SYSTEM: system, MCP_TOOL_TIMEOUT: '86400000', ...rt === 'grok' ? GROK_ENV : {} }
+  const block = rt === 'grok' ? grokMcpBlock(CLIMOD.mcpUrl) : ''
+  const script = 'echo $$ > "/tmp/ma-$1.pid"; printf %s "$MA_SYSTEM" > "/tmp/ma-$1.sys"; unset MA_SYSTEM; ' +
+    'if [ -n "$3" ]; then f="$HOME/.grok/config.toml"; mkdir -p "$HOME/.grok"; ' +
+    '[ "$(sed -n "/^# >>> cirrayabot/,/^# <<< cirrayabot/p" "$f" 2>/dev/null)" = "$3" ] || ' +
+    '{ sed -i "/^# >>> cirrayabot/,/^# <<< cirrayabot/d" "$f" 2>/dev/null; printf "\\n%s\\n" "$3" >> "$f"; }; fi; ' +
+    'mkdir -p "$2" && cd "$2" && shift 3 && exec "$@"'
+  const args = ['exec', '-i', ...Object.entries(envs).flatMap(([k, v]) => ['-e', `${k}=${v}`]), CLIMOD.container,
+    'sh', '-c', script, '_', id, `/home/node/work/${ctx.bot.id}`, block ? `# >>> cirrayabot${block}# <<< cirrayabot` : '', ...argv]
+  const child = spawn(CLI, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+  const rd = reader(rt)
+  let err = '', buf = ''
+  // Kill inside the container first, and only then the client: the cleanup below removes the pid
+  // file, and started together the two execs raced — the kill found no pid, the CLI lived on.
+  let killing = null
+  const stop = () => {
+    killing = cliRun(['exec', CLIMOD.container, 'sh', '-c', `kill $(cat /tmp/ma-${id}.pid) 2>/dev/null; true`], null, 10_000)
+      .finally(() => child.kill())
+  }
+  ctx.signal?.addEventListener('abort', stop, { once: true })
+  child.stdout.on('data', d => {
+    buf += d
+    for (let i; (i = buf.indexOf('\n')) >= 0;) {
+      const line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+      for (const ev of rd.feed(line)) if (ev.delta) onDelta?.(ev.delta)
+    }
+  })
+  child.stderr.on('data', d => { err = (err + d).slice(-4000) })
+  child.stdin.on('error', () => {})
+  child.stdin.end(cliPrompt(fit.messages))
+  let code
+  try {
+    code = await new Promise(done => {
+      child.on('close', done)
+      child.on('error', e => { err += e.message; done(127) })
+    })
+  } finally {
+    cliTurns.delete(token)
+    ctx.signal?.removeEventListener('abort', stop)
+    await killing
+    cliRun(['exec', CLIMOD.container, 'rm', '-f', `/tmp/ma-${id}.pid`, `/tmp/ma-${id}.sys`], null, 10_000)
+  }
+  if (buf.trim()) for (const ev of rd.feed(buf)) if (ev.delta) onDelta?.(ev.delta)
+  if (ctx.signal?.aborted) throw new Say('chat.aborted')
+  // A subscription has no per-token price: the row keeps the tokens, and the cost stays unknown.
+  const u = rd.usage()
+  if (u) noteUsage(ctx, { id: p.id, model: p.model || rt }, u)
+  ctx.reasoning = ''
+  const answer = rd.answer()
+  if (answer) return answer
+  const why = plain(rd.error() || err.trim().split('\n').slice(-3).join(' ') || `exit ${code}`).slice(0, 300)
+  if (needsLogin(why)) throw new Say('cli.login', { name: spec.name })
+  throw new Say('cli.failed', { name: spec.name, detail: why })
+}
+
+// Signing a CLI in: its own flow, run in the cli container, finished by a person in a browser.
+// id → { rt, child, out, state }. One sign-in per CLI at a time; a new one replaces the old.
+const cliLogins = new Map()
+const LOGIN_TIMEOUT = 15 * 60_000
+
+function startLogin(rt) {
+  for (const [id, l] of cliLogins) if (l.rt === rt) { stopLogin(id) }
+  const id = randomUUID()
+  const child = spawn(CLI, ['exec', '-i', CLIMOD.container, 'sh', '-c', 'echo $$ > "/tmp/ma-login-$1.pid"; shift; exec "$@"', '_', rt,
+    ...loginArgs(rt)], { stdio: ['pipe', 'pipe', 'pipe'] })
+  const l = { rt, child, out: '', state: 'running' }
+  const add = d => { l.out = (l.out + d).slice(-20_000) }
+  child.stdout.on('data', add)
+  child.stderr.on('data', add)
+  child.stdin.on('error', () => {})
+  child.on('close', code => { if (l.state === 'running') l.state = code === 0 ? 'done' : 'failed' })
+  child.on('error', e => { add(e.message); l.state = 'failed' })
+  l.timer = setTimeout(() => { if (l.state === 'running') { add('\n(timed out)'); stopLogin(id, 'failed') } }, LOGIN_TIMEOUT)
+  cliLogins.set(id, l)
+  return id
+}
+
+function stopLogin(id, state = 'cancelled') {
+  const l = cliLogins.get(id)
+  if (!l) return
+  clearTimeout(l.timer)
+  if (l.state === 'running') {
+    l.state = state
+    cliRun(['exec', CLIMOD.container, 'sh', '-c', `kill $(cat /tmp/ma-login-${l.rt}.pid) 2>/dev/null; true`], null, 10_000)
+    l.child.kill()
+  }
+  // Keep a finished one around for a minute so the page can read how it ended.
+  setTimeout(() => { if (cliLogins.get(id) === l) cliLogins.delete(id) }, 60_000)
+}
+
+const loginView = l => ({ runtime: l.rt, state: l.state, ...loginPrompt(l.out),
+  output: plain(l.out).split('\n').filter(x => x.trim()).slice(-12).join('\n') })
+
+async function cliStatus() {
+  if (!CLIMOD.container) return { enabled: false, runtimes: [] }
+  const runtimes = await Promise.all(RUNTIME_IDS.map(async rt => {
+    const r = await cliRun(['exec', CLIMOD.container, ...statusArgs(rt)], null, 20_000)
+    const running = /No such container|is not running/i.test(r.err) ? false : true
+    return { id: rt, name: RUNTIMES[rt].name, running, ...statusOf(rt, r.code, r.out),
+      agents: (await db.listAgents()).filter(a => a.runtime === rt).map(a => a.name) }
+  }))
+  return { enabled: true, runtimes }
 }
 
 /** One tool call, from asking to recording. Returns what the model gets back, and an image if there is one. */
@@ -1062,6 +1228,13 @@ async function contextFor(base, model) {
 
 /** Which upstream and model this agent uses. Without its own upstream it follows the default; the model must be its own choice. */
 async function providerFor(bot) {
+  // On a coding CLI there is no upstream of ours: the CLI's own account (or config) is the upstream,
+  // and an empty model means that account's default.
+  if (bot.runtime) {
+    const effort = normEffort(bot.effort) || normEffort(await db.defaultEffort())
+    return { runtime: bot.runtime, id: `cli:${bot.runtime}`, name: RUNTIMES[bot.runtime]?.name ?? bot.runtime,
+      model: bot.model ?? '', effort, context_tokens: CLI_CONTEXT }
+  }
   const base = bot.provider_id ? await db.getProvider(bot.provider_id) : await requireProvider()
   if (!base) throw new Say('provider.gone', { name: bot.name })
   if (!bot.model) throw new Say('provider.noModel', { name: bot.name })
@@ -1278,9 +1451,20 @@ async function checkAgent(b, selfId = null) {
   // start in, and the crew importer uses it — which upstream and model each person runs on is the
   // person's choice, and the first chat says "no model chosen yet". Omitting the field on create,
   // or emptying it on an edit, is still an error.
+  // '' = our own loop. A CLI needs the cli module; an agent already on one keeps working as far as
+  // this check goes, and its turn says what is missing instead.
+  if (b.runtime !== undefined) {
+    const r = str(b.runtime).trim()
+    if (r && !RUNTIME_IDS.includes(r)) throw new Say('agent.runtime', { list: RUNTIME_IDS.join(' / ') })
+    if (r && !CLIMOD.container) throw new Say('cli.off')
+    out.runtime = r
+  }
+  // On a CLI the model is optional: empty = whatever that CLI (and the account it is signed in
+  // with) uses by default. On our own loop an upstream needs a model.
+  const onCli = !!(out.runtime ?? (selfId ? (await db.getAgent(selfId))?.runtime : ''))
   if (b.model !== undefined || !selfId) {
     const model = str(b.model).trim()
-    if (!model && (selfId || b.model !== '')) throw new Say('agent.modelRequired')
+    if (!model && !onCli && (selfId || b.model !== '')) throw new Say('agent.modelRequired')
     if (model.length > 200) throw new Say('agent.modelLong')
     out.model = model
   }
@@ -1334,6 +1518,21 @@ const server = createServer(async (req, res) => {
     try { return send(...await (evm[2] ? postOrder(req) : postEvent(req, evm[1]))) }
     catch (e) { return send(e.status ?? 500, { error: e instanceof Say ? e.text('en') : String(e.message ?? e) }) }
   }
+  // Our tools for a CLI turn (web/mcp.mjs). Not behind ACCESS_TOKEN: the CLI holds only its turn's
+  // bearer token, which opens that turn's tools and nothing else, and dies with the turn. Without a
+  // valid token the answers are empty, never a 401 — a 401 sends MCP clients off looking for OAuth.
+  if (url.pathname === '/mcp') {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); return res.end() }
+    let msg
+    let raw = ''
+    for await (const c of req) { raw += c; if (raw.length > 20_000_000) break }
+    try { msg = JSON.parse(raw) }
+    catch { return send(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }) }
+    const turn = cliTurns.get(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')) ?? null
+    const replies = (await Promise.all((Array.isArray(msg) ? msg : [msg]).map(m => mcp.handle(m, turn)))).filter(Boolean)
+    if (!replies.length) { res.writeHead(202); return res.end() }
+    return send(200, Array.isArray(msg) ? replies : replies[0])
+  }
   if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
   if (CFG.token && url.searchParams.get('k') === CFG.token)
     res.setHeader('set-cookie', `ma_token=${CFG.token}; Path=/; Max-Age=2592000; SameSite=Lax`)
@@ -1363,7 +1562,7 @@ const server = createServer(async (req, res) => {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) slug = 'agent-' + Math.random().toString(36).slice(2, 8)
       if (await db.getAgent(slug)) return send(409, { error: t('agent.idExists', { id: slug }) })
       const n = (await db.listAgents()).length
-      await db.upsertAgent({ description: '', provider_id: '', model: '', effort: '', approval: '', ...checked, id: slug, ord: n + 1, color: db.nextColor(n) })
+      await db.upsertAgent({ description: '', provider_id: '', model: '', effort: '', approval: '', runtime: '', ...checked, id: slug, ord: n + 1, color: db.nextColor(n) })
       return send(200, { id: slug })
     }
 
@@ -1371,7 +1570,12 @@ const server = createServer(async (req, res) => {
     if (bm && req.method === 'PATCH') {
       const cur = await db.getAgent(bm[1])
       if (!cur) return send(404, { error: t('err.noAgent') })
-      const patch = await checkAgent(await readBody(req), cur.id)
+      const body = await readBody(req)
+      // A client that doesn't know about runtimes (the desktop app, so far) always sends an upstream
+      // and a model picked from that upstream's list; applied to an agent on a CLI, that would quietly
+      // hand the CLI another provider's model name. Such a client can't change what it can't see.
+      if (cur.runtime && body.runtime === undefined) { delete body.provider_id; delete body.model }
+      const patch = await checkAgent(body, cur.id)
       await db.upsertAgent({ ...cur, ...patch })
       // Group logs identify people by name. Without syncing a rename, what he said in groups would become "someone else's"
       if (patch.name && patch.name !== cur.name) await db.renameSpeaker(cur.name, patch.name)
@@ -1763,6 +1967,40 @@ const server = createServer(async (req, res) => {
 
 
     // ---- The studio workbench (web UI): a person setting up projects and the crew, locking, reviewing ----
+    // Coding CLIs as agent runtimes: which are signed in, and signing them in (web/cli.mjs).
+    if (url.pathname.startsWith('/api/cli')) {
+      if (!CLIMOD.container) return send(url.pathname === '/api/cli' ? 200 : 400,
+        url.pathname === '/api/cli' ? { enabled: false, runtimes: [] } : { error: t('cli.off') })
+      if (url.pathname === '/api/cli' && req.method === 'GET') return send(200, await cliStatus())
+      if ((url.pathname === '/api/cli/login' || url.pathname === '/api/cli/logout') && req.method === 'POST') {
+        const rt = str((await readBody(req)).runtime)
+        if (!RUNTIME_IDS.includes(rt)) return send(400, { error: t('cli.unknown', { id: rt }) })
+        if (url.pathname === '/api/cli/logout') {
+          const r = await cliRun(['exec', CLIMOD.container, ...logoutArgs(rt)], null, 30_000)
+          return send(200, { ok: r.code === 0, output: plain(r.out + r.err).trim().slice(-500) })
+        }
+        const id = startLogin(rt)
+        // Give the flow a moment to print its link, so the first answer usually carries it.
+        for (let i = 0; i < 30 && cliLogins.get(id)?.state === 'running' && !loginPrompt(cliLogins.get(id).out).url; i++)
+          await new Promise(r => setTimeout(r, 200))
+        return send(200, { id, ...loginView(cliLogins.get(id)) })
+      }
+      const lm = url.pathname.match(/^\/api\/cli\/login\/([\w-]+)(\/input)?$/)
+      if (lm) {
+        const l = cliLogins.get(lm[1])
+        if (!l) return send(404, { error: t('cli.noLogin') })
+        if (!lm[2] && req.method === 'GET') return send(200, { id: lm[1], ...loginView(l) })
+        if (!lm[2] && req.method === 'DELETE') { stopLogin(lm[1]); return send(200, { ok: true }) }
+        if (lm[2] && req.method === 'POST') {
+          if (l.state !== 'running') return send(409, { error: t('cli.noLogin') })
+          const text = str((await readBody(req)).text).trim()
+          if (!text || text.length > 4000 || /[\r\n]/.test(text)) return send(400, { error: t('body.notObject') })
+          l.child.stdin.write(text + '\n')
+          return send(200, { ok: true })
+        }
+      }
+    }
+
     if (url.pathname === '/api/studio/status' && req.method === 'GET') return send(200, { enabled: studio.enabled() })
     if (url.pathname === '/api/studio/call' && req.method === 'POST') {
       const { action, args = {} } = await readBody(req)

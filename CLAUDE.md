@@ -38,7 +38,9 @@ agents on dsh; **2.31 removed that again** — DeepSeek is an ordinary upstream 
 **For the current shape see 2.12 and 2.18**: PostgreSQL + one container per Agent + one-command
 compose deployment. **Since 2.30 the product presents itself as a film studio** (the workbench, 2.28 +
 2.30), **since 2.31 an AI-native short-drama studio**: series → episodes, work orders instead of @
-relays, dialogue + TTS + subtitles, automatic cuts. The studio is the one optional module.
+relays, dialogue + TTS + subtitles, automatic cuts. Two optional modules: the studio, and
+`cli` (since 2.33: an agent can run on Claude Code / Codex / Grok Build with the person's own
+subscription).
 
 ```bash
 ./start.sh     # this is how you start it
@@ -2102,7 +2104,7 @@ and whether the model says exactly the lines); **playing the cut in a real brows
 has no H.264 — ffprobe checked the file); podman; the Flutter client (untouched: it doesn't know
 episodes, shows orders as a speaker "Studio", has no shared-machine switch).
 
-Not built: a screenwriter and an editor (the boss left them out); background music; lip-sync for TTS
+Not built: a screenwriter and an editor (the boss left them out); lip-sync for TTS
 lines (off-screen by definition); per-episode cost; distribution / publishing; the candidate
 prefilter.
 
@@ -2141,29 +2143,110 @@ the lines, TTS cached on a recut; frames of the cut looked at (two lines, breaks
 the settings row in a browser, the level persisting. **Not verified**: how it sounds to a person
 on real music and real voices (only synthetic tones here); real Chrome playback (no H.264 here).
 
-### Research, not built: Claude Code and Codex as an agent's runtime
+The boss also asked, in the same message: "在本地部署环境下研究如何原生接入codex和claude code". The research
+became a build — see 2.33.
 
-The boss: "在本地部署环境下研究如何原生接入codex和claude code". Findings (2026-09-26, from the
-official docs; nothing has been run here yet):
+## 2.33 Crew members on Claude Code, Codex and Grok Build — the person's own subscription (2026-09-26)
 
-- **Claude Code**: `claude -p --bare --output-format stream-json --verbose --include-partial-messages`,
-  `--append-system-prompt`, `--mcp-config`, `--allowedTools`, `--permission-prompt-tool <mcp tool>`
-  (the route for our approval gate), `--resume <session>`. Or the Agent SDK (TS) with `canUseTool`
-  and in-process MCP servers. **`--bare` is mandatory here**: without it Claude Code walks up for
-  every CLAUDE.md — §0's credential file. Auth: an API key (or `ANTHROPIC_BASE_URL` +
-  token); Anthropic's terms forbid a third-party product offering claude.ai login. It may be
-  called "… Powered by Claude", never "Claude Code".
-- **Codex**: `codex exec --json` (JSONL `thread.started / turn.* / item.* / error`, `--sandbox`,
-  `CODEX_API_KEY`, `--output-schema`, `exec resume`) has **no way to ask a person** mid-turn, so it
-  would bypass our gate. `codex app-server` (JSON-RPC 2.0, server-initiated
-  `item/commandExecution/requestApproval` etc.) does, and is the one to use. It reads AGENTS.md up
-  to the project root — same hazard as §0.
-- The lesson from dsh (2.29) applies: **their built-in tools bypass anything we don't route**
-  (our approval gate, usage rows, the daily cap, `withAgent`), and a key in the agent's container
-  breaks "keys never enter agent containers". Both are answered by the same design: the CLI runs in
-  the agent's own container, its model base URL points at a **per-turn proxy in the app** (which
-  holds the key, records usage, enforces the cap), and our tools are an MCP server in the app.
-  Not built — waiting on the boss's choice.
+After the research, the boss answered in four lines: "Claude Code、Codex grok 都接 / 运行方式开关，默认这个 /
+自己的订阅账号登录 / 让多agent共享账号信息" (all three; a per-agent runtime switch; sign in with your own
+subscription; the agents share the sign-in). A runtime per agent, `agents.runtime`: `''` (our loop,
+the default — an untouched deployment behaves as before) / `claude` / `codex` / `grok`.
+
+### Shape
+
+```
+app ──docker exec -i (one process per turn)──▶ cli container (compose profile `cli`, <prefix>-cli)
+ ▲                                               claude / codex / grok, home = volume clihome (the logins)
+ └──── POST /mcp, Bearer <per-turn token> ◀───── the CLI calling our tools
+         execTool → approval, transcript row, the agent's OWN container
+```
+
+- **Every built-in tool of the CLI is off; the model's only hands are our tools over MCP**
+  (`web/mcp.mjs`, a minimal streamable-HTTP server on the app's own port). This is 2.29's lesson
+  made the design: a built-in shell would bypass approvals and the transcript, run in the wrong
+  machine, and sit next to the login it could read. Checked in the e2e on what the fake upstream
+  received — Claude: only `mcp__cirrayabot__*`; Codex: our namespace plus four harmless
+  resource/ask-user functions; Grok: `search_tool` + `use_tool` only. **Mutation-checked**: take
+  `--tools ''` off Claude and the check lists Bash, Read, Write, WebFetch….
+- **The sign-in lives only in the cli container's home** and is shared by every agent on that CLI
+  — that's the boss's "共享账号信息". Signed in from the upstreams dialog ("Subscription accounts"):
+  Codex and Grok run their device flow and the UI shows the page + code; Claude's `auth login`
+  prints a page and waits for a code on stdin — the UI has a paste box that writes to it.
+- **Stateless per turn**: the CLI starts fresh; the prompt is the conversation from our database
+  (`cliPrompt`: "[name] …" lines, `[You]` for itself), the system prompt is ours
+  (`--system-prompt-file` / `model_instructions_file` / `--system-prompt-override`). Group chat,
+  memory, skills, work orders — everything that builds that prompt — works unchanged.
+- Usage rows `provider_id = cli:<rt>`, tokens from each CLI's final event, **cost null**: a
+  subscription has no per-token price, so 2.25's rule applies — shown as unknown, not capped.
+
+### What each CLI needed (all found by running it against a recording fake, 2026-09-26)
+
+- **Claude Code 2.1.283**: `-p --output-format stream-json --verbose --include-partial-messages`,
+  `--tools ''` (removes every built-in), `--strict-mcp-config --mcp-config <json with the bearer
+  header>`, `--allowedTools mcp__cirrayabot`, `--setting-sources ''`, `--no-session-persistence`.
+  Prompt on stdin. ⚠️ **`--bare` is out**: it skips OAuth, i.e. the subscription. §0 is kept by the
+  container instead: nothing in it but the CLIs and their home, no repo, no parent CLAUDE.md
+  (the e2e also greps every request for this file's text). MCP images reach the model (`tool_result`
+  image blocks).
+- **Codex 0.157.1**: `exec --json --ephemeral --skip-git-repo-check --ignore-rules`, `--disable` for
+  shell_tool, unified_exec, apps, browser_use, computer_use, image_generation, multi_agent… (the
+  list is `CODEX_OFF`), `web_search="disabled"`, `project_doc_max_bytes=0` (no AGENTS.md),
+  `model_instructions_file` for our system prompt — ⚠️ **`base_instructions` is silently ignored**
+  (it says so only as an "error" item in the stream). ⚠️ An MCP server needs
+  `default_tools_approval_mode="approve"`, or every call fails with "requires approval, but approval
+  policy is never". MCP images reach the model. **No token streaming in exec mode**: a message
+  arrives whole (app-server would stream; not worth it yet).
+- **Grok Build 1.0.41** (installed from x.ai's script): `--prompt-file /dev/stdin --output-format
+  streaming-json --tools search_tool,use_tool --always-approve`. ⚠️ Four things that don't work as
+  they look: **`--tools ''` and `--disallowed-tools` left `run_terminal_command` in**; only an
+  allowlist removed it. **MCP servers can't come from `GROK_CONFIG`** (the overlay's allowlist drops
+  them) **nor from a project `.grok/config.toml`** ("folder untrusted: skipping", only in its debug
+  log) — so the turn wrapper keeps a marked block in the shared `~/.grok/config.toml` with
+  `bearer_token_env_var = "MA_TURN_TOKEN"`. MCP tools are **not** functions: the model reaches them
+  through `search_tool` → `use_tool`, and they connect after the first request (a model that calls
+  `use_tool` blind gets "Tool not found"). **It reads CLAUDE.md, Cursor rules, `~/.claude.json`
+  MCPs…** unless each `GROK_CLAUDE_*` / `GROK_CURSOR_*` switch is 0 (`GROK_ENV`). And **it can't see
+  images** (its ACP init says `image: false`; a screenshot arrives as base64 text), so its turns set
+  `noImages` and our tools say so. `XAI_API_KEY` alone said "Not signed in" here; a `[model.x]`
+  block with `base_url` + `api_key` in its config works.
+
+### ⚠️ Pitfalls hit
+
+- **Killing a turn raced its own cleanup.** On hang-up, `kill $(cat pid)` in the container and the
+  finally's `rm -f pid` started together; when `rm` won, the kill found nothing and the CLI lived on.
+  Now the kill runs first and the cleanup waits for it. Found only because the test was made
+  non-vacuous — the first version of the hang-up check passed even with the kill removed: the
+  agent's earlier turns were in the prompt, the fake saw "tool said" and answered at once, so there
+  was nothing left to kill. It now uses a fresh agent and first asserts the process exists.
+- **`pkill -f` killed the calling shell a sixth time** (2.9.5), stopping a fake server. Match
+  `/proc/<pid>/cmdline` exactly.
+- The desktop client doesn't know runtimes and always sends an upstream + a model from that
+  upstream's list; applied to a CLI agent it would quietly give the CLI another provider's model
+  name. **A PATCH without `runtime` can't change a CLI agent's `provider_id`/`model`** (e2e-checked).
+- `/mcp` without a valid token answers an empty list and refuses calls — never 401: MCP clients
+  treat 401 as "go do OAuth discovery" (the MCP auth spec; reasoned, not observed here).
+
+### Verified / not verified
+
+Verified (`web/e2e-cli.mjs`, the real binaries in the real cli container, a fake upstream in three
+wire formats): for each CLI a DM ran `hostname` through our `bash` **in the agent's own container**
+(its hostname, not the cli container's), the answer streamed after the tool card, the transcript is
+user → tool → assistant; the model got our persona and our tools only; `rm -rf` asked first and a
+"deny" came back to the model as the result; a usage row `cli:<rt>` with tokens and no cost; in a
+group the @-ed Claude member ran `uname` in its own machine; hanging up leaves no CLI process; the
+Codex sign-in showed `https://auth.openai.com/codex/device` + a code and cancelling left no login
+process. In a browser (zh-Hans): the accounts section, Codex's code, Claude's page + paste box,
+the runtime picker (upstream hidden, model optional, the hint), zero page errors.
+
+**Not verified**: an actual sign-in with a real subscription and a real model answering through
+each CLI (no accounts here — everything upstream is a fake built from what the CLIs really sent);
+podman; the Flutter client (it can't set a runtime — the web UI can). Image size: +1.1 GB for the
+module (Claude Code 231 MB, Codex 374 MB, Grok 159 MB).
+
+**Terms**: this runs the official CLIs with a login the person made, for their own deployment. Whether
+a given subscription allows it is between them and the provider; the README says so, and the
+platform never offers a provider's login as its own (Anthropic's Agent SDK terms forbid that).
 
 ## 3. What runs now
 
@@ -2187,6 +2270,9 @@ node studio/dialogue.mjs   # self-test for dialogue, subtitle timing, .srt
 node studio/tts.mjs        # self-test for the speech adapter
 node studio/media.mjs      # needs ffmpeg + a CJK font: sheets, and an episode cut with burned-in subtitles
 node web/studio.mjs        # self-test for the platform's studio tool
+node web/cli.mjs           # self-test for agent turns on Claude Code / Codex / Grok (argv, streams, sign-in; see 2.33)
+node web/mcp.mjs           # self-test for the MCP server that gives a CLI turn our tools
+node web/e2e-cli.mjs <deploy dir>   # the real three CLIs in the cli container against a fake upstream (see 2.33)
 node studio/keys.mjs       # self-test for the Keys panel's studio side (see 2.29)
 node studio/e2e-workbench.mjs <deploy dir>  # the workbench: board, shot page, files by range, a person reviewing (see 2.30)
 MODULES=… ./start.sh / MEM_MB=4096 ./start.sh   # modules → profiles; size .env as if for a 4 GB box (see 2.30)

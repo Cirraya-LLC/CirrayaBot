@@ -10,7 +10,8 @@
 #   4. size the deployment to the machine (memory ceilings, and on a first run which optional
 #      modules to start) and turn MODULES into compose profiles
 #
-# Optional modules (MODULES in .env, comma-separated): studio (the film studio). Change it and
+# Optional modules (MODULES in .env, comma-separated): studio (the film studio), cli (Claude Code,
+# Codex and Grok Build as agent runtimes, signed in once with your own accounts). Change it and
 # rerun ./start.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -62,11 +63,11 @@ MEM=$(mem_mb)
 # Under 6 GB, the ceilings for a 2-core / 4 GB box (they add up to ~2.5 GB); above, room to breathe.
 # `ensure` only fills keys that are still empty: a value you set yourself is kept.
 if [ "$MEM" -lt 6000 ]; then
-  ensure DB_MEMORY 768m; ensure APP_MEMORY 768m; ensure STUDIO_MEMORY 1g
-  ensure PG_SHARED_BUFFERS 128MB; ensure APP_HEAP_MB 384; ensure STUDIO_HEAP_MB 512
+  ensure DB_MEMORY 768m; ensure APP_MEMORY 768m; ensure STUDIO_MEMORY 1g; ensure CLI_MEMORY 1g
+  ensure PG_SHARED_BUFFERS 128MB; ensure APP_HEAP_MB 384; ensure STUDIO_HEAP_MB 512; ensure CLI_HEAP_MB 512
 else
-  ensure DB_MEMORY 2g; ensure APP_MEMORY 1g; ensure STUDIO_MEMORY 2g
-  ensure PG_SHARED_BUFFERS 256MB; ensure APP_HEAP_MB 512; ensure STUDIO_HEAP_MB 1024
+  ensure DB_MEMORY 2g; ensure APP_MEMORY 1g; ensure STUDIO_MEMORY 2g; ensure CLI_MEMORY 2g
+  ensure PG_SHARED_BUFFERS 256MB; ensure APP_HEAP_MB 512; ensure STUDIO_HEAP_MB 1024; ensure CLI_HEAP_MB 768
 fi
 if [ "$FIRST" = 1 ]; then
   # An Agent's own container (AGENT_TOOLS=on): 2 GB each would overcommit a 4 GB box at once.
@@ -121,10 +122,14 @@ fi
 MODULES=$(grep '^MODULES=' .env | tail -n 1 | cut -d= -f2- | tr -d ' ' || true)
 has() { case ",$MODULES," in *",$1,"*) return 0 ;; esac; return 1; }
 for m in $(echo "$MODULES" | tr ',' ' '); do
-  case "$m" in studio) ;; *) echo "⚠️  MODULES: unknown module \"$m\" (known: studio)" >&2 ;; esac
+  case "$m" in studio|cli) ;; *) echo "⚠️  MODULES: unknown module \"$m\" (known: studio, cli)" >&2 ;; esac
 done
 PROFILES=()
 if has studio; then setkv STUDIO_URL http://studio:8090; PROFILES+=(--profile studio); else setkv STUDIO_URL ""; fi
+# The cli container's name is fixed by compose (container_name), prefixed like agent containers so
+# two deployments on one machine don't share one — and so don't share a login by accident.
+PREFIX=$(grep '^AGENT_PREFIX=' .env | tail -n 1 | cut -d= -f2- || true)
+if has cli; then setkv CLI_CONTAINER "${PREFIX:-ma}-cli"; PROFILES+=(--profile cli); else setkv CLI_CONTAINER ""; fi
 # For a plain `docker compose up` later (podman-compose may ignore it: rerun this script there).
 setkv COMPOSE_PROFILES "$MODULES"
 
@@ -140,7 +145,7 @@ fi
 # containers are started by the app, not compose, so it never touches them.
 "${COMPOSE[@]}" ${PROFILES[@]+"${PROFILES[@]}"} up -d --build --remove-orphans
 # A module switched off keeps running unless it is stopped: compose leaves other profiles alone.
-for m in studio; do
+for m in studio cli; do
   if ! has "$m"; then "${COMPOSE[@]}" --profile "$m" rm -s -f "$m" >/dev/null 2>&1 || true; fi
 done
 

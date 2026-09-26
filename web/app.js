@@ -508,6 +508,13 @@ function editBot(b) {
   $('#bname').value = b?.name ?? ''
   $('#bdesc').value = b?.description ?? ''
   $('#bpersona').value = b?.persona ?? ''
+  // Where its turns run. The CLIs are offered only when the cli module is on; an agent already on one
+  // keeps showing it either way, so opening the editor never quietly moves it back.
+  const rts = ['', ...CLIS.enabled ? CLIS.runtimes.map(r => r.id) : []]
+  if (b?.runtime && !rts.includes(b.runtime)) rts.push(b.runtime)
+  $('#bruntime').innerHTML = rts.map(r => `<option value="${esc(r)}">${esc(r ? t('rt.on', { name: CLI_NAMES[r] ?? r }) : t('rt.loop'))}</option>`).join('')
+  $('#bruntime').value = b?.runtime ?? ''
+  $('#bruntime').onchange = () => showRuntime(b)
   const def = PROVS.find(p => p.is_default)
   $('#bprov').innerHTML = `<option value="">${esc(def ? t('b.defaultProvNamed', { name: def.name }) : t('b.defaultProv'))}</option>` +
     PROVS.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
@@ -515,7 +522,7 @@ function editBot(b) {
   // A new provider likely doesn't have the old model; restore it when switching back
   $('#bprov').onchange = () => loadModels($('#bprov').value,
     $('#bprov').value === (b?.provider_id ?? '') ? (b?.model ?? '') : '')
-  loadModels($('#bprov').value, b?.model ?? '')
+  showRuntime(b, true)
   $('#beffort').innerHTML = ['', 'low', 'medium', 'high']
     .map(e => `<option value="${e}">${esc(t(e ? `b.effort${e[0].toUpperCase()}${e.slice(1)}` : 'b.effortNone'))}</option>`).join('')
   $('#beffort').value = ['low', 'medium', 'high'].includes(b?.effort) ? b.effort : ''
@@ -551,6 +558,108 @@ async function loadModels(providerId, current) {
   sel.value = current || r.suggested || models[0]; sel.disabled = false
 }
 const chosenModel = () => ($('#bmodel').hidden ? $('#bmodelx').value : $('#bmodel').value).trim()
+
+// ═══ Coding CLIs as a runtime (web/cli.mjs) ═══
+const CLI_NAMES = { claude: 'Claude Code', codex: 'Codex', grok: 'Grok Build' }
+let CLIS = { enabled: false, runtimes: [] }
+async function loadClis() {
+  CLIS = await fetch(api('/api/cli')).then(r => r.json()).catch(() => ({ enabled: false, runtimes: [] }))
+  return CLIS
+}
+/** On a CLI there is no upstream to pick and the model is free text, empty = the account's default. */
+function showRuntime(b, first = false) {
+  const rt = $('#bruntime').value
+  $('#bprov').hidden = !!rt
+  if (rt) {
+    ++modelsSeq
+    $('#bmodel').hidden = true; $('#bmodelx').hidden = false
+    $('#bmodelx').placeholder = t('rt.modelPh')
+    $('#bmodelx').value = first || rt === (b?.runtime ?? '') ? (b?.model ?? '') : ''
+    const st = CLIS.runtimes.find(r => r.id === rt)
+    $('#brthint').hidden = false
+    $('#brthint').textContent = !CLIS.enabled ? t('rt.off')
+      : st?.loggedIn ? t('rt.hint', { name: CLI_NAMES[rt] }) : t('rt.hintLogin', { name: CLI_NAMES[rt] })
+  } else {
+    $('#brthint').hidden = true
+    $('#bmodelx').placeholder = t('b.modelPh')
+    loadModels($('#bprov').value, first || !(b?.runtime) ? (b?.model ?? '') : '')
+  }
+}
+
+// The accounts section of the upstreams dialog: each CLI, signed in or not, and its sign-in flow.
+const clFlows = {}          // runtime → { id, timer } of a running sign-in
+function renderClis() {
+  const box = $('#clist')
+  if (!CLIS.enabled) { box.innerHTML = `<small class="rhint">${esc(t('rt.off'))}</small>`; return }
+  box.innerHTML = CLIS.runtimes.map(r => `<div class="clrow" data-rt="${esc(r.id)}">
+    <div class="clhead"><span class="clname">${esc(r.name)}</span>
+      <span class="clst ${r.loggedIn ? 'ok' : ''}">${esc(!r.running ? t('cl.down') : r.loggedIn ? t('cl.in') : t('cl.out'))}</span>
+      ${r.agents?.length ? `<small class="clst">${esc(t('cl.used', { names: r.agents.join(', ') }))}</small>` : ''}
+      <span class="clbtns">
+        <button class="btn" data-act="login">${esc(t(r.loggedIn ? 'cl.again' : 'cl.login'))}</button>
+        ${r.loggedIn ? `<button class="btn" data-act="logout">${esc(t('cl.logout'))}</button>` : ''}
+      </span></div>
+    <div class="clflow" hidden></div></div>`).join('')
+  box.querySelectorAll('.clrow').forEach(row => {
+    const rt = row.dataset.rt
+    row.querySelector('[data-act=login]').onclick = () => clLogin(rt, row)
+    const out = row.querySelector('[data-act=logout]')
+    if (out) out.onclick = async () => {
+      if (!confirm(t('cl.confirmLogout', { name: CLI_NAMES[rt] }))) return
+      await fetch(api('/api/cli/logout'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: rt }) })
+      await loadClis(); renderClis()
+    }
+  })
+}
+async function clLogin(rt, row) {
+  clearInterval(clFlows[rt]?.timer)
+  const flow = row.querySelector('.clflow')
+  flow.hidden = false; flow.textContent = t('cl.starting')
+  const r = await fetch(api('/api/cli/login'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: rt }) })
+  if (!r.ok) { flow.textContent = await errText(r); return }
+  const v = await r.json()
+  clFlows[rt] = { id: v.id }
+  let pasted = false
+  const draw = v => {
+    if (v.state !== 'running') {
+      clearInterval(clFlows[rt]?.timer)
+      flow.innerHTML = `<div>${esc(t(v.state === 'done' ? 'cl.done' : v.state === 'cancelled' ? 'cl.cancelled' : 'cl.failed'))}</div>` +
+        (v.state === 'failed' ? `<pre>${esc(v.output ?? '')}</pre>` : '')
+      if (v.state === 'done') loadClis().then(renderClis)
+      return
+    }
+    // Keep what the person is typing: redraw only the parts that change.
+    if (!flow.querySelector('.clwait')) {
+      flow.innerHTML = `<div class="clwait"></div><div class="clcodebox"></div>
+        <div class="clpaste" hidden><div class="prow"><input type="text" class="clin" placeholder="${esc(t('cl.pastePh'))}" autocomplete="off">
+          <button class="btn pri" data-act="send">${esc(t('cl.send'))}</button></div></div>
+        <div class="prow"><button class="btn" data-act="cancel">${esc(t('common.cancel'))}</button></div>`
+      flow.querySelector('[data-act=cancel]').onclick = async () => {
+        await fetch(api(`/api/cli/login/${clFlows[rt].id}`), { method: 'DELETE' }); poll()
+      }
+      flow.querySelector('[data-act=send]').onclick = async () => {
+        const text = flow.querySelector('.clin').value.trim()
+        if (!text) return
+        const s = await fetch(api(`/api/cli/login/${clFlows[rt].id}/input`), { method: 'POST',
+          headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
+        if (!s.ok) { alert(await errText(s)); return }
+        pasted = true; flow.querySelector('.clin').value = ''; poll()
+      }
+    }
+    flow.querySelector('.clwait').innerHTML = v.url
+      ? `${esc(t(v.needsPaste ? 'cl.openPaste' : 'cl.open'))}<br><a href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.url)}</a>`
+      : esc(t('cl.starting'))
+    flow.querySelector('.clcodebox').innerHTML = v.code ? `${esc(t('cl.code'))}<div class="clcode">${esc(v.code)}</div>` : ''
+    flow.querySelector('.clpaste').hidden = !v.needsPaste || pasted
+  }
+  const poll = async () => {
+    const x = await fetch(api(`/api/cli/login/${clFlows[rt].id}`)).then(r => r.ok ? r.json() : { state: 'failed', output: '' })
+    draw(x)
+  }
+  draw(v)
+  clFlows[rt].timer = setInterval(poll, 2000)
+}
+$('#pdlg').addEventListener('close', () => { for (const f of Object.values(clFlows)) clearInterval(f.timer) })
 $('#newbot').onclick = () => editBot(null)
 $('#bcancel').onclick = () => $('#bdlg').close()
 $('#bsave').onclick = async () => {
@@ -561,7 +670,9 @@ $('#bsave').onclick = async () => {
     max_steps: $('#bsteps').value.trim() === '' ? null : Number($('#bsteps').value),
     daily_cap_micro: cap === '' ? null : cap }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
-  if (!body.model) { alert(t('b.needModel')); return }
+  body.runtime = $('#bruntime').value
+  if (body.runtime) delete body.provider_id
+  if (!body.model && !body.runtime) { alert(t('b.needModel')); return }
   const r = bEditing
     ? await fetch(api(`/api/bots/${bEditing.id}`), { method:'PATCH', headers:{'content-type':'application/json'}, body:JSON.stringify(body) })
     : await fetch(api('/api/bots'), { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body) })
@@ -647,7 +758,8 @@ async function loadProvs() {
 }
 
 $('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
-  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); $('#pdlg').showModal() }
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort()
+  $('#clist').innerHTML = ''; loadClis().then(renderClis); $('#pdlg').showModal() }
 
 async function loadEffort() {
   const r = await (await fetch(api('/api/settings/effort'))).json().catch(() => null)
@@ -1946,6 +2058,7 @@ async function reload() {
 ;(async () => {
   try {
     await reload()
+    loadClis()
     // A film studio opens on its project; without the studio configured it is the chat as before.
     if (await wsInit()) wsShow('board')
     else if (CONVS.length) openConv(CONVS[0])
