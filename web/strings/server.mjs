@@ -126,4 +126,16 @@ export const serverStrings = {
   // Chat history import
   'import.badFile': ['This is not a chat history file exported by this app', '不是本产品导出的聊天记录文件', '不是本產品匯出的聊天紀錄檔案'],
   'import.badRow':  ['Message {n} is malformed (it needs role and content)', '第 {n} 条格式不对（要有 role 和 content）', '第 {n} 則格式不對（需要 role 和 content）'],
+
+  // Agents on a coding CLI (web/cli.mjs)
+  'agent.runtime': ['The runtime must be empty (our own loop) or one of {list}', '运行方式只能留空（自带循环），或者是 {list}', '執行方式只能留空（內建循環），或是 {list}'],
+  'cli.off': ['The cli module is off, so no crew member can run on Claude Code / Codex / Grok. Add cli to MODULES in .env and rerun ./start.sh.',
+    'cli 模块没开，剧组成员不能跑在 Claude Code / Codex / Grok 上。在 .env 的 MODULES 里加上 cli，再运行一次 ./start.sh。',
+    'cli 模組沒開，劇組成員不能跑在 Claude Code / Codex / Grok 上。在 .env 的 MODULES 裡加上 cli，再執行一次 ./start.sh。'],
+  'cli.login': ['{name} is not signed in (or the sign-in expired). Sign in under "Model upstreams" → Subscription accounts, then try again.',
+    '{name} 还没登录（或者登录过期了）。去「模型上游」→ 订阅账号 里登录，再试一次。',
+    '{name} 還沒登入（或登入已過期）。到「模型上游」→ 訂閱帳號 裡登入，再試一次。'],
+  'cli.failed': ['{name} stopped without an answer: {detail}', '{name} 没给出回答就停了：{detail}', '{name} 沒給出回答就停了：{detail}'],
+  'cli.unknown': ['Unknown CLI "{id}"', '没有叫「{id}」的 CLI', '沒有叫「{id}」的 CLI'],
+  'cli.noLogin': ['That sign-in is no longer running — start it again', '这次登录已经结束了，重新开始一次', '這次登入已經結束了，請重新開始'],
 }

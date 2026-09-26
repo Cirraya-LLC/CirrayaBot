@@ -63,13 +63,14 @@ The socket has to be running: `systemctl --user enable --now podman.socket`.
 
 ### Modules, and the smallest machine it runs on
 
-The studio is an optional module, set by `MODULES` in `.env`; change it and rerun `./start.sh`,
-which turns it into a compose profile and tells the app:
+The studio and the coding CLIs are optional modules, set by `MODULES` in `.env` (comma-separated);
+change it and rerun `./start.sh`, which turns them into compose profiles and tells the app:
 
 | Module | What it is | Disk (its image, on top of the shared base) |
 | --- | --- | --- |
 | *(always)* | PostgreSQL + the platform | ~0.7 GB |
 | `studio` | the film studio: workbench, episodes, shots, Seedance / GPT image / ComfyUI / speech, contact sheets and cuts (ffmpeg) | ~0.5 GB |
+| `cli` | Claude Code, Codex and Grok Build, for crew members that run on your own subscription (below) | ~1.1 GB |
 | `AGENT_TOOLS=on` | each crew member's own container with a shell and a browser | ~1.2 GB (one image) |
 
 The target minimum is **2 cores, 4 GB of memory, ~10 GB of disk** (studio on, tools off).
@@ -125,6 +126,39 @@ any other model.
 An earlier version ran DeepSeek models inside DeepSeek Harness; that is gone. On upgrade the
 DeepSeek key from the old Keys panel becomes an upstream called "DeepSeek" and the Agents that used
 it are pointed at it, and `./start.sh` removes the harness container.
+
+### Claude Code, Codex and Grok Build — on your own subscription
+
+A crew member doesn't have to run on an upstream and an API key: in **Edit crew member**, set where
+it runs to **Claude Code**, **Codex** or **Grok Build**. Its turns then run on that CLI, signed in
+with your own Claude / ChatGPT / SuperGrok account. Needs the `cli` module
+(`MODULES=studio,cli`, rerun `./start.sh`).
+
+Sign each one in once under **⚙ Model upstreams → Subscription accounts**. Codex and Grok show a
+page and a code to confirm in your browser. Claude shows a page, and you paste back the code it gives you.
+The sign-in is stored only in the `cli` container's home (the `clihome` volume) and **every crew
+member on that CLI shares it**. Sign in again, or out, from the same place. Or from a terminal:
+`docker compose exec cli codex login --device-auth` (and `claude auth login`, `grok login --device-auth`).
+
+What stays the same on a CLI:
+- **The tools are this platform's.** Every built-in tool of the CLI is switched off: its shell, file
+  editing, web search, subagents. What it can do goes through the platform's tools over MCP: the
+  shell and files in the crew member's **own** container, the browser, the studio. Approvals, the
+  transcript and the spend rows work exactly as on an upstream.
+- **The conversation is the platform's.** Each turn starts the CLI fresh with the conversation so far
+  (a DM, or the group log with everyone's names), so it knows what the group said and nothing
+  lives only inside the CLI.
+- **Model**: empty = the account's default; otherwise the CLI's own model name (e.g. `opus`,
+  `gpt-5.6-sol`, `grok-4.5`). Reasoning effort maps to each CLI's own flag.
+
+What's different:
+- A subscription has no per-token price, so tokens are counted and cost shows as unknown. A
+  daily cap can't hold it; the account's own limits do.
+- Codex prints a message only once it's whole, so its replies arrive in one piece rather than streaming.
+- **Grok Build can't see images** from tools (a screenshot or a contact sheet); it's told so and
+  doesn't pretend. Don't make it the reviewer.
+- Whether a subscription may be used this way is between you and each provider. The platform only
+  runs the official CLI with the login you gave it, for your own use.
 
 ## What it costs, and holding it back
 
@@ -194,6 +228,8 @@ node web/i18n.mjs         # self-test for the server message tables
 node web/memory.mjs       # self-test for an agent's self-notes (cap, duplicates)
 node web/approve.mjs      # self-test for which tool calls need a person first
 node web/protocols.mjs    # self-test for the three API shapes (and DeepSeek's reasoning)
+node web/cli.mjs          # self-test for running a turn on Claude Code / Codex / Grok (argv, their streams, sign-in)
+node web/mcp.mjs          # self-test for the MCP server that gives a CLI turn our tools
 node studio/keys.mjs      # self-test for the Keys panel's studio side (panel over .env, hints only)
 node studio/pipeline.mjs  # self-test for the pipeline: which work orders a state needs
 node studio/dialogue.mjs  # self-test for dialogue, subtitle timing and .srt
@@ -204,7 +240,8 @@ python3 check-bots.py     # check the seed definitions in bots/
 The studio has its own self-tests (`node studio/<module>.mjs`) and end-to-end checks against
 fakes: `studio/e2e.mjs` (the studio alone), `studio/e2e-platform.mjs <dir>` (one whole episode, from
 script to cut, through a running deployment) and `studio/e2e-workbench.mjs <dir>` (the workbench;
-it leaves a small demo film behind) — see `CLAUDE.md` 2.28–2.31.
+it leaves a small demo film behind) — see `CLAUDE.md` 2.28–2.31. `web/e2e-cli.mjs <dir>` runs the
+real Claude Code, Codex and Grok binaries of a deployment against a fake upstream (2.33).
 
 Without compose, pointing at an existing PostgreSQL:
 
@@ -293,6 +330,8 @@ work in the client, on the same data as the web UI. Details in `app/README.md`.
 - **1080p / 4K takes are 10-bit HEVC**, which many Chrome / Firefox setups can't play: the workbench
   shows the last frame and a download link instead (720p takes, the default, are H.264).
 - **No multi-user**: one token, one data set, no account system.
+- **One sign-in per CLI** for the whole deployment: every crew member on Claude Code uses the same
+  account (so the same rate limits).
 - `run.sh` / `bots.patch.yml` / `headless.patch.yml` are an earlier experiment running DeepSeek
   Harness, **not part of the product**, kept only for the record (the story is in `CLAUDE.md`
   2.6–2.11).
