@@ -436,54 +436,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   ),
           ),
           const Divider(height: 1),
-          _footItem(
-            _railed ? Icons.keyboard_double_arrow_right : Icons.keyboard_double_arrow_left,
-            tr(_railed ? 'wb.expandSidebar' : 'wb.collapseSidebar'),
-            () => _setRailed(!_railed),
-          ),
-          _footItem(Icons.tune, tr('wb.providers'), () async {
-            await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ProvidersPage(api: bench.api)));
-          }),
-          _footItem(Icons.auto_awesome_outlined, tr('wb.skillLibrary'), () => _openSkills()),
-          _footItem(Icons.dns_outlined, tr('wb.server'), widget.onEditServer),
-          _footRow(
-            Icons.savings_outlined,
-            tr('wb.spendFooter', {
-              'day': moneyText(bench.usage.day.costMicro ?? 0),
-              'month': moneyText(bench.usage.month.costMicro ?? 0),
-            }),
-          ),
-          // The app root persists the choice and rebuilds everything.
-          PopupMenuButton<Lang>(
-            tooltip: tr('common.language'),
-            initialValue: currentLang.value,
-            onSelected: (l) => currentLang.value = l,
-            itemBuilder: (_) => [
-              for (final l in Lang.values)
-                PopupMenuItem(
-                  value: l,
-                  child: Text(l.label, style: const TextStyle(fontSize: 13)),
-                ),
-            ],
-            child: _footRow(Icons.language, currentLang.value.label),
-          ),
-          PopupMenuButton<ThemeMode>(
-            tooltip: tr('common.theme'),
-            initialValue: currentTheme.value,
-            onSelected: (m) => currentTheme.value = m,
-            itemBuilder: (_) => [
-              for (final m in ThemeMode.values)
-                PopupMenuItem(
-                  value: m,
-                  child: Text(tr('theme.${m.name}'), style: const TextStyle(fontSize: 13)),
-                ),
-            ],
-            child: _footRow(
-              C.isLight ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
-              tr('theme.${currentTheme.value.name}'),
-            ),
-          ),
-          const SizedBox(height: 6),
+          _foot(),
         ],
       ),
         ),
@@ -513,40 +466,108 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     child: child,
   );
 
-  Widget _footItem(IconData icon, String label, VoidCallback onTap) {
-    final key = _tipKey('foot:$label');
-    return Tooltip(
-      key: key,
-      message: _railed ? label : '',
-      child: InkWell(
-        onTap: onTap,
-        onFocusChange: (has) {
-          if (has && _railed) key.currentState?.ensureTooltipVisible();
-        },
-        child: _footRow(icon, label),
+  /// The footer is one row of icons. The collapse toggle's centre sits at
+  /// half the rail's width, so collapsing moves it nowhere; everything after
+  /// it fades out with the labels. Names come from tooltips, collapsed or not.
+  Widget _foot() {
+    final motion = _motion(context);
+    final day = moneyText(bench.usage.day.costMicro ?? 0);
+    final month = moneyText(bench.usage.month.costMicro ?? 0);
+    return SizedBox(
+      height: 50,
+      child: Row(
+        children: [
+          const SizedBox(width: (_rail - 32) / 2),
+          _footIcon(
+            _railed ? Icons.keyboard_double_arrow_right : Icons.keyboard_double_arrow_left,
+            tr(_railed ? 'wb.expandSidebar' : 'wb.collapseSidebar'),
+            () => _setRailed(!_railed),
+          ),
+          Expanded(
+            child: _fade(!_railed, motion, IgnorePointer(
+              ignoring: _railed,
+              child: ExcludeFocus(
+                excluding: _railed,
+                child: Row(
+                  children: [
+                    _footIcon(Icons.tune, tr('wb.providers'), () async {
+                      await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ProvidersPage(api: bench.api)));
+                    }),
+                    _footIcon(Icons.auto_awesome_outlined, tr('wb.skillLibrary'), () => _openSkills()),
+                    _footIcon(Icons.dns_outlined, tr('wb.server'), widget.onEditServer),
+                    // The app root persists these choices and rebuilds everything.
+                    PopupMenuButton<ThemeMode>(
+                      tooltip: tr('common.theme'),
+                      initialValue: currentTheme.value,
+                      onSelected: (m) => currentTheme.value = m,
+                      itemBuilder: (_) => [
+                        for (final m in ThemeMode.values)
+                          PopupMenuItem(
+                            value: m,
+                            child: Text(tr('theme.${m.name}'), style: const TextStyle(fontSize: 13)),
+                          ),
+                      ],
+                      child: _iconBox(C.isLight ? Icons.light_mode_outlined : Icons.dark_mode_outlined),
+                    ),
+                    PopupMenuButton<Lang>(
+                      tooltip: tr('common.language'),
+                      initialValue: currentLang.value,
+                      onSelected: (l) => currentLang.value = l,
+                      itemBuilder: (_) => [
+                        for (final l in Lang.values)
+                          PopupMenuItem(
+                            value: l,
+                            child: Text(l.label, style: const TextStyle(fontSize: 13)),
+                          ),
+                      ],
+                      child: _iconBox(Icons.language),
+                    ),
+                    // Today's figure in the row; today and the month in its tooltip.
+                    // It gives way before the icons do.
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: Tooltip(
+                          message: tr('wb.spendFooter', {'day': day, 'month': month}),
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: 12, left: 4),
+                            child: Text(
+                              day,
+                              maxLines: 1,
+                              softWrap: false,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: C.dim,
+                                fontFeatures: const [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )),
+          ),
+        ],
       ),
     );
   }
 
-  /// The icon sits in a rail-wide box, so it is on the same vertical axis as
-  /// the avatars above it and stays centred once the labels are gone.
-  Widget _footRow(IconData icon, String label) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 9),
-    child: Row(
-      children: [
-        SizedBox(width: _rail, child: Center(child: Icon(icon, size: 15, color: C.dim))),
-        Expanded(
-          child: _fade(!_railed, _motion(context), Padding(
-            padding: const EdgeInsets.only(right: 14),
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 12.5, color: C.dim),
-            ),
-          )),
-        ),
-      ],
+  Widget _iconBox(IconData icon) => SizedBox(
+    width: 32,
+    height: 32,
+    child: Icon(icon, size: 17, color: C.dim),
+  );
+
+  Widget _footIcon(IconData icon, String label, VoidCallback onTap) => Tooltip(
+    message: label,
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Semantics(label: label, button: true, child: _iconBox(icon)),
     ),
   );
 

@@ -1,4 +1,4 @@
-// The Multi-Agent web server.
+// The CirrayaBot web server.
 //
 // All state lives in PostgreSQL (web/db.mjs); agents work in their own containers (one per agent);
 // model upstreams are configured in the UI — several of them, switchable at any time — not hard-coded in .env.
@@ -1703,7 +1703,7 @@ setInterval(() => tickRoutines().catch(e => console.error('Scheduled task dispat
 tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))
 
 server.listen(CFG.port, CFG.host, () => {
-  console.log(`Multi-Agent  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)
+  console.log(`CirrayaBot  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)
   if (!CFG.token) console.log('(ACCESS_TOKEN not set; only listening on 127.0.0.1)')
   if (!CFG.tools) console.log('(AGENT_TOOLS is off; agents can only talk, not act)')
 })

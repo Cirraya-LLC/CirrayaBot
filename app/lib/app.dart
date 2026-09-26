@@ -95,7 +95,7 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
     // context. One app, one theme at a time.
     C.use(brightness);
     return MaterialApp(
-      title: 'Multi-Agent',
+      title: 'CirrayaBot',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),

@@ -1,4 +1,4 @@
-# Multi-Agent
+# CirrayaBot
 
 An open-source "AI coworker": a column of Agents and group chats on the left. Each Agent has
 its own persona, its own container and its own memory; put them in a group and they
@@ -18,8 +18,7 @@ answering on their own.
   OpenAI Chat Completions, OpenAI Responses and Anthropic Messages.
 - **Three UI languages** — the web UI and the desktop client support English (default),
   Simplified Chinese (简体中文) and Traditional Chinese (繁體中文), switchable in the UI
-  (web: the language selector in the sidebar footer; desktop: on the setup screen and in
-  the sidebar footer).
+  (the 🌐 icon in the sidebar footer; the desktop client also on its setup screen).
 
 ## Running it
 
@@ -55,7 +54,7 @@ The socket has to be running: `systemctl --user enable --now podman.socket`.
 
 ## Configuring model upstreams
 
-Bottom left: **⚙ Model upstreams**. First choose which API the upstream speaks, then fill in
+Bottom left: the **⚙** icon (Model upstreams). First choose which API the upstream speaks, then fill in
 the fields:
 
 | Protocol | Endpoint called | Typical upstreams |

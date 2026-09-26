@@ -1,4 +1,4 @@
-# Multi-Agent
+# CirrayaBot
 
 ## 0. Unrelated to the parent directory (the first rule, and the most important one)
 
@@ -695,7 +695,7 @@ failed — and the failure only showed up in some Agent's tool output. `ensureCo
 
 ### 2.18.3 Upstreams: if `/models` can't tell you, say you don't know; don't guess quietly
 
-`providers` table + "⚙ Model upstreams" at the bottom left. Two sources for the context window:
+`providers` table + the ⚙ icon (Model upstreams) at the bottom left. Two sources for the context window:
 
 1. **Auto** — ask the upstream's `/models` (OpenRouter / vLLM / ollama / most relays answer)
 2. Can't ask → infer from the model name (the `KNOWN` table in `web/model.mjs`)
@@ -1482,14 +1482,34 @@ the avatar is *already* centred in a 72px rail, so collapsing moves nothing at a
 - **`.convs` scrolls, so a tooltip inside a row is clipped by it.** One `position:fixed` tip for
   the whole rail, positioned from `getBoundingClientRect()`. Not `title=`: that never shows on
   keyboard focus, and collapsed the name is the only thing left to identify a row by.
-- **A bare text node never fades** — the fade rule selects `.fitem > span`. "Cirraya" stayed
-  visible in the rail until it was wrapped.
 - **The theme icon has to render.** `◐` comes out as a smudge on a box without that glyph; it is
   two CSS shapes now (a bordered circle plus a half-fill gradient).
 - **Flutter: Material's hit targets are 48px and two do not fit a 72px rail.** `PopupMenuButton`
   with `child:` sizes to what you give it; with `icon:` it does not. The symptom was a full-height
   `RIGHT OVERFLOWED` stripe **with nothing in the app's stdout** — the Dart error goes to the VM
   service, so look at the pixels, not the log.
+
+### The footer is one row (2026-09-26)
+
+The boss: "左下角的菜单栏太多了 应该浓缩成一行就够了" (the bottom-left menu is too long; one row
+is enough), and "你把软件名字改为 CirrayaBot" (call the software CirrayaBot).
+
+- Eight labelled rows became one row of icons: collapse, model upstreams, skills, (client: server),
+  appearance, language, and today's spend on the right (today + month in its tooltip). **Names are
+  tooltips whether or not the sidebar is collapsed**; on the web they open *above* the icon.
+- The collapse toggle's centre is at 36px, half the rail, so collapsing moves it nowhere. **Collapsed,
+  the footer is only that toggle** — the rest fades out and leaves the tab order (`visibility` on the
+  web, `ExcludeFocus` in the client). Everything else is one click away.
+- Appearance and language are small menus (`openMenu` in app.js: Esc, arrows, focus on the checked
+  item). **"New Agent" moved to the top + button**, which is now a menu "New Agent / New group" on
+  both clients. The "Cirraya" brand row is gone.
+- The spend figure yields before the icons do (Flutter `Expanded` + ellipsis): under the test font
+  it overflowed the 308px row by 5.8px.
+- The product name is **CirrayaBot** where people see it: page title, window title, macOS
+  `CFBundleName` / `CFBundleDisplayName`, Windows version info, READMEs. **Not** renamed, on purpose:
+  the binary, bundle ids, the settings directory (`MultiAgent` / `multi-agent` — renaming loses
+  everyone's saved server), compose project, database and image names, the export format string.
+  macOS `PRODUCT_NAME` stays too: the Xcode test target's `TEST_HOST` points at `multi_agent.app`.
 
 ### The right panel
 
