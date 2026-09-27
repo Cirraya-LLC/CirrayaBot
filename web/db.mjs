@@ -251,6 +251,11 @@ export async function upsertAgent(a) {
   return rows[0]
 }
 
+/** Fill an agent's model only while it is still empty (an automatic pick must never overwrite a person's). → true if set */
+export async function fillModel(id, model) {
+  return (await q(`update agents set model = $2 where id = $1 and model = '' and runtime = ''`, [id, model])).rowCount > 0
+}
+
 /** Group logs identify people by name; a rename must follow, or their past words become "someone else's". */
 export async function renameSpeaker(from, to) {
   await q('update messages set speaker = $2 where speaker = $1', [from, to])

@@ -13,6 +13,8 @@
 //
 // Self-test: node studio/keys.mjs
 
+import { localSpeech } from './tts-protocol.mjs'
+
 export const KEYS = {
   seedance: {
     base_url: { env: 'SEEDANCE_BASE_URL', url: true },
@@ -26,13 +28,13 @@ export const KEYS = {
   comfy: {
     url: { env: 'COMFY_URL', url: true },
   },
-  // Narration and off-screen voices (tts.mjs): any service that speaks OpenAI's /audio/speech.
-  // No base URL by default on purpose — the boss sets it up later; until then narration is left
-  // to the subtitles and the assembly says so.
+  // Narration and off-screen voices (tts.mjs): MiniMax T2A v2. Mainland by default; an
+  // international key needs https://api.minimax.io. Without a key narration stays in the subtitles
+  // and the assembly says so.
   tts: {
-    base_url: { env: 'TTS_BASE_URL', url: true },
+    base_url: { env: 'TTS_BASE_URL', url: true, fallback: 'https://api.minimax.cn' },
     api_key: { env: 'TTS_API_KEY', secret: true },
-    model: { env: 'TTS_MODEL', fallback: 'gpt-4o-mini-tts' },
+    model: { env: 'TTS_MODEL', fallback: 'speech-2.8-hd' },
   },
 }
 
@@ -138,14 +140,26 @@ export async function test(name, { env = process.env, timeoutMs = 15_000 } = {})
         : say(true, 'modelUnlisted', { model: v('model'), n: ids.length })
     }
     if (name === 'tts') {
-      if (!v('base_url')) return say(false, 'need', { fields: 'base_url' })
-      // Listing models is free; saying a word is not.
-      const r = await get(`${v('base_url')}/models`, v('api_key') ? { authorization: `Bearer ${v('api_key')}` } : {})
-      if (r.status === 401 || r.status === 403) return say(false, 'rejected', { status: r.status, detail: await reason(r) })
+      if (!v('api_key')) return say(false, 'need', { fields: 'api_key' })
+      if (localSpeech({ base: v('base_url'), model: v('model') })) {
+        const base = v('base_url').replace(/\/+$/, '').replace(/\/v1$/, '')
+        const r = await get(`${base}/v1/models`, { authorization: `Bearer ${v('api_key')}` })
+        if (!r.ok) return say(false, 'status', { status: r.status, detail: await reason(r) })
+        const ids = ((await r.json()).data ?? []).map(m => m.id)
+        return ids.includes(v('model')) ? say(true, 'modelOk', { model: v('model') })
+          : say(false, 'modelUnlisted', { model: v('model'), n: ids.length })
+      }
+      // Listing voices is free; saying a word is not. MiniMax reports errors inside a 200.
+      // (Not tts.voices(): tts.mjs imports this file, and under the self-test's top-level await the
+      // cycle never finishes loading.)
+      const r = await fetch(`${v('base_url').replace(/\/v1$/, '')}/v1/get_voice`, { method: 'POST', signal: AbortSignal.timeout(timeoutMs),
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${v('api_key')}` }, body: '{"voice_type":"all"}' })
       if (!r.ok) return say(false, 'status', { status: r.status, detail: await reason(r) })
-      const ids = ((await r.json().catch(() => ({}))).data ?? []).map(m => m.id)
-      return ids.includes(v('model')) ? say(true, 'modelOk', { model: v('model') })
-        : say(true, 'modelUnlisted', { model: v('model'), n: ids.length })
+      const j = await r.json().catch(() => ({}))
+      const code = j.base_resp?.status_code
+      if (code === 1004) return say(false, 'rejected', { status: 1004, detail: `${j.base_resp.status_msg ?? ''} — a key only works on the site that issued it (api.minimax.cn / api.minimax.io)` })
+      if (code !== 0) return say(false, 'status', { status: code ?? '?', detail: String(j.base_resp?.status_msg ?? JSON.stringify(j).slice(0, 200)) })
+      return say(true, 'voicesOk', { n: ['system_voice', 'voice_cloning', 'voice_generation'].reduce((n, k) => n + (j[k]?.length ?? 0), 0) })
     }
     if (name === 'comfy') {
       if (!v('url')) return say(false, 'need', { fields: 'url' })
@@ -168,6 +182,7 @@ const TEST_TEXT = {
   status: x => `It answered ${x.status}: ${x.detail}`,
   modelOk: x => `Key accepted; ${x.model} is available.`,
   modelUnlisted: x => `Key accepted, but ${x.model} is not among its ${x.n} models — a relay may still serve it.`,
+  voicesOk: x => `Key accepted; the account has ${x.n} voices.`,
   comfyOk: x => `ComfyUI ${x.version} is up (${x.device}).`,
   unknown: x => `unknown key group "${x.name}"`,
   unreachable: x => `Could not reach it: ${x.detail}`,
@@ -185,8 +200,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.equal(value('gpt_image', 'base_url', env), 'https://api.openai.com/v1', 'the fallback')
   a.equal(sourceOf('gpt_image', 'base_url', env), 'default')
   a.equal(sourceOf('comfy', 'url', env), 'none')
-  a.equal(value('tts', 'base_url', env), '', 'no speech service until someone sets one')
-  a.equal(value('tts', 'model', env), 'gpt-4o-mini-tts')
+  a.equal(value('tts', 'base_url', env), 'https://api.minimax.cn', 'MiniMax, mainland, by default')
+  a.equal(value('tts', 'model', env), 'speech-2.8-hd')
+  a.equal(view(env).find(x => x.name === 'tts').ready, false, 'no speech until a key is set')
 
   // The panel wins, field by field; an empty row is no row.
   setPanel({ 'seedance.api_key': 'panel-key-9876', 'seedance.base_url': '' })
@@ -213,6 +229,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Tests against fakes: accepted, rejected, and down.
   const srv = createServer((req, res) => {
     const auth = req.headers.authorization
+    if (req.url === '/local/v1/models') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{"data":[{"id":"kokoro-local"}]}') }
+    if (req.url === '/mm/v1/get_voice') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(auth === 'Bearer mm' ? '{"system_voice":[{"voice_id":"a"},{"voice_id":"b"}],"base_resp":{"status_code":0}}' : '{"base_resp":{"status_code":1004,"status_msg":"login fail"}}') }
     if (req.url.startsWith('/sd/api/v3/contents/generations/tasks?')) { res.writeHead(auth === 'Bearer good' ? 200 : 401, { 'content-type': 'application/json' }); return res.end(auth === 'Bearer good' ? '{"items":[]}' : '{"error":{"message":"bad key"}}') }
     if (req.url === '/v1/models') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{"data":[{"id":"gpt-image-1"}]}') }
     if (req.url === '/comfy/system_stats') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{"system":{"comfyui_version":"0.3.60"},"devices":[{"name":"cuda:0 RTX"}]}') }
@@ -223,6 +241,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   setPanel({ 'seedance.base_url': `${base}/sd`, 'seedance.api_key': 'good', 'gpt_image.base_url': `${base}/v1`, 'gpt_image.api_key': 'k', 'comfy.url': `${base}/comfy` })
   a.equal((await test('seedance', { env: {} })).ok, true)
   a.deepEqual((await test('gpt_image', { env: {} })).vars, { model: 'gpt-image-1' })
+  setPanel({ 'tts.base_url': `${base}/mm/v1`, 'tts.api_key': 'mm' })
+  const tt = await test('tts', { env: {} })
+  a.equal(tt.code, 'voicesOk', tt.message); a.deepEqual(tt.vars, { n: 2 })
+  setPanel({ 'tts.base_url': `${base}/mm`, 'tts.api_key': 'wrong' })
+  const tb = await test('tts', { env: {} })
+  a.equal(tb.code, 'rejected'); a.match(tb.message, /api\.minimax\.io/, 'says a key belongs to one site')
+  setPanel({ 'tts.base_url': `${base}/local/v1`, 'tts.api_key': 'local-test-token', 'tts.model': 'kokoro-local' })
+  a.equal((await test('tts', { env: {} })).code, 'modelOk', 'local speech tests its own model endpoint')
+  setPanel({ 'seedance.base_url': `${base}/sd`, 'seedance.api_key': 'good', 'gpt_image.base_url': `${base}/v1`, 'gpt_image.api_key': 'k', 'comfy.url': `${base}/comfy` })
   const cf = await test('comfy', { env: {} })
   a.equal(cf.code, 'comfyOk'); a.match(cf.message, /0\.3\.60.*RTX/)
   setPanel({ 'seedance.base_url': `${base}/sd`, 'seedance.api_key': 'bad' })

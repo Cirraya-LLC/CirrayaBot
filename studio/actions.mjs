@@ -15,7 +15,7 @@ import { probe, contactSheet, MAX_ROWS, BGM_LEVELS } from './media.mjs'
 import { enqueue } from './notify.mjs'
 import * as keys from './keys.mjs'
 import { normDialogue, promptBlock, speaksOnCamera } from './dialogue.mjs'
-import { ready as ttsReady } from './tts.mjs'
+import { ready as ttsReady, config as ttsConfig, voices as ttsVoices, localSpeech, EMOTIONS } from './tts.mjs'
 import { CLOSED_BY_AGENT } from './pipeline.mjs'
 
 export class StudioError extends Error {
@@ -315,11 +315,27 @@ export function makeActions({ store, kick = () => {}, kickWorker = () => {} }) {
   H['char.voice'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)
     const c = await charOf(p, a.name)
-    const voice = text(a.voice, 80)
-    if (!voice) fail('bad_arg', 'which voice? (the speech service\'s name for it, e.g. alloy, nova, onyx)')
-    const v = { voice, instructions: text(a.instructions, 1000) }
+    const voice = text(a.voice, 120)
+    if (!voice) fail('bad_arg', 'which voice? A MiniMax voice_id — `voice list` shows the ones this account has (e.g. male-qn-qingse)')
+    const emotion = text(a.emotion, 20)
+    if (emotion && !EMOTIONS.includes(emotion)) fail('bad_arg', `emotion must be one of ${EMOTIONS.join(', ')}, or empty to let the voice decide`)
+    const v = { voice, ...emotion ? { emotion } : {} }
     await db.q(`update characters set card = card || jsonb_build_object('voice', $2::jsonb), updated_at = now() where id = $1`, [c.id, JSON.stringify(v)])
     return { name: c.name, voice: v }
+  }
+  // The voices the speech account has, cached for 10 minutes (the list is long and rarely changes).
+  let voiceCache = null
+  H['voice.list'] = async a => {
+    const cfg = ttsConfig()
+    if (!ttsReady(cfg)) fail('tts_off', 'speech is not set up yet (a person sets the MiniMax key in the Keys panel)')
+    const key = `${cfg.base}|${cfg.key}`
+    if (!voiceCache || voiceCache.key !== key || voiceCache.until < Date.now()) {
+      try { voiceCache = { key, until: Date.now() + 600_000, list: await ttsVoices(cfg) } }
+      catch (e) { fail('tts_failed', `could not list voices: ${e.message}`, 502) }
+    }
+    const q = text(a.query, 60).toLowerCase()
+    const list = q ? voiceCache.list.filter(v => `${v.id} ${v.name} ${v.description}`.toLowerCase().includes(q)) : voiceCache.list
+    return { voices: list.slice(0, a.all ? 1000 : 60), total: list.length, emotions: localSpeech(cfg) ? [] : EMOTIONS }
   }
   H['look.add'] = async (a, ctx) => {
     const p = await projectOf(ctx.actorKey, a)

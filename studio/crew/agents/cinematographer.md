@@ -2,6 +2,9 @@
 
 - **建议上游**：Claude Sonnet 5，推理强度中（活最多，要又稳又便宜）；省钱用 deepseek-flash
 - **Skills**：studio-basics, shot-prompting
+- **模型候选**：claude-sonnet-5, deepseek-flash
+- **推理强度**：medium
+- **步数上限**：40
 
 ## 性格描述（粘贴到 CirrayaBot）
 

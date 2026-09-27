@@ -1,10 +1,11 @@
 // Read-only production browser check. The signed session stays in memory, never stdout.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || '/root/lumen-video-first/node_modules/playwright/index.mjs')
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const session = execFileSync('docker', ['compose','exec','-T','app','node','--input-type=module','-e',
   'import {makePasswordSession} from "./web/password.mjs"; process.stdout.write(makePasswordSession(process.env.LOGIN_PASSWORD_HASH))'], { encoding:'utf8' }).trim()
-const browser = await chromium.launch({ headless:true, executablePath:'/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome', args:['--no-sandbox'] })
+const browser = await chromium.launch({ headless:true,
+  ...process.env.PLAYWRIGHT_EXECUTABLE_PATH ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH } : {}, args:['--no-sandbox'] })
 try {
   const context = await browser.newContext({ viewport:{width:1440,height:1000} })
   await context.addCookies([{ name:'__Host-ma_session',value:session,domain:'bot.myddls.com',path:'/',httpOnly:true,secure:true,sameSite:'Lax' }])

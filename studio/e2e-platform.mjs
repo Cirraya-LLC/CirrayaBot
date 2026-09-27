@@ -74,7 +74,8 @@ const SCRIPT = {
     ['asset.save', { character: '蛮吉', look: '战斗装', kind: 'turnaround', tags: ['正'], data_b64: PNG }],
     ['loc.add', { name: '断崖' }],
     ['asset.save', { location: '断崖', kind: 'location', data_b64: PNG }],
-    ['char.voice', { name: '蛮吉', voice: 'onyx', instructions: 'young, fierce' }],
+    ['voice.list', { query: '少年' }],
+    ['char.voice', { name: '蛮吉', voice: 'male-qn-qingse', emotion: 'angry' }],
   ] : [],
   cinematographer: said => shotsIn(said).flatMap(s => [
     ['shot.prompt', { shot: s, text: `${s}: boy draws a blade on a cliff, black hair, ${Date.now()}` }],
@@ -134,8 +135,16 @@ const server = createServer(async (req, res) => {
     }
     return model(body, res)
   }
-  if (req.url === '/tts/v1/models') return json(200, { data: [{ id: 'fake-tts' }] })
-  if (req.url === '/tts/v1/audio/speech') { ttsBodies.push(JSON.parse(b)); res.writeHead(200, { 'content-type': 'audio/mpeg' }); return res.end(MP3) }
+  // MiniMax: errors come inside a 200 (base_resp), audio as hex.
+  const mm = { status_code: 0, status_msg: 'success' }
+  if (req.url.startsWith('/mm/')) {
+    if (req.headers.authorization !== 'Bearer tts-key') return json(200, { base_resp: { status_code: 1004, status_msg: 'login fail' } })
+    if (req.url === '/mm/v1/get_voice') return json(200, { system_voice: [{ voice_id: 'male-qn-qingse', voice_name: '青涩青年', description: ['少年感的男声'] },
+      { voice_id: 'narr-voice', voice_name: '旁白', description: ['沉稳'] }], base_resp: mm })
+    if (req.url === '/mm/v1/t2a_v2') { ttsBodies.push(JSON.parse(b)); return json(200, { data: { audio: MP3.toString('hex'), status: 2 }, base_resp: mm }) }
+  }
+  // The upstream's model list, for picking a crew member's model.
+  if (req.url === '/v1/models') return json(200, { data: ['fake-model', 'deepseek-flash', 'anthropic/claude-sonnet-5', 'anthropic/claude-sonnet-5-thinking'].map(id => ({ id })) })
   if (req.url === '/v.mp4') { res.writeHead(200, { 'content-type': 'video/mp4' }); return res.end(TAKE) }
   if (req.url.startsWith('/sd/api/v3/contents/generations/tasks')) {
     if (req.headers.authorization !== 'Bearer sd-key') return json(401, { error: { message: 'key' } })
@@ -156,6 +165,12 @@ const api = async (method, path, body) => {
 }
 const ok = async (...a) => { const r = await api(...a); assert.ok(r.status < 300, `${a[0]} ${a[1]} → ${r.status} ${JSON.stringify(r.body)}`); return r.body }
 const panel = (action, args) => ok('POST', '/api/studio/call', { action, args })
+const studioAsHuman = (action, args) => {
+  const j = JSON.parse(execFileSync('docker', ['compose', 'exec', '-T', '-e', `A=${JSON.stringify({ action, args })}`, 'app', 'node', '-e',
+    `fetch(process.env.STUDIO_URL+'/v1/call',{method:'POST',headers:{authorization:'Bearer '+process.env.STUDIO_TOKEN,'x-studio-actor':'human'},body:process.env.A}).then(r=>r.json()).then(j=>process.stdout.write(JSON.stringify(j)))`], { cwd: DIR }).toString())
+  assert.equal(j.ok, true, `${action}: ${JSON.stringify(j.error)}`)
+  return j.result
+}
 const sql = q => execFileSync('docker', ['compose', 'exec', '-T', 'db', 'psql', '-U', 'multiagent', '-d', 'multiagent', '-tAc', q], { cwd: DIR }).toString().trim()
 const gw = execFileSync('docker', ['network', 'inspect', `${ENV.COMPOSE_PROJECT_NAME || 'multi-agent'}_default`, '-f', '{{(index .IPAM.Config 0).Gateway}}']).toString().trim()
 async function until(what, fn, secs = 180) {
@@ -176,18 +191,45 @@ try {
   assert.equal(g.shared_machine, true, 'the crew group shares one machine')
 
   const P = `ser-${RUN}`
-  await panel('project.create', { id: P, name: 'Series E2E', info: { lang: 'zh-Hans', narrator: { voice: 'sage', instructions: 'calm' } }, notify_group: g.id })
+  await panel('project.create', { id: P, name: 'Series E2E', info: { lang: 'zh-Hans', narrator: { voice: 'narr-voice', emotion: 'calm' } }, notify_group: g.id })
   assert.equal((await panel('project.info', { project: P })).info.ratio, '9:16', 'a new project is vertical')
-  for (const [id, role] of [[D, 'director'], [A, 'art'], [C, 'cinematographer'], [R, 'reviewer']]) await panel('crew.set', { agent_id: id, role })
+
+  // ---- the built-in crew (web/crew.mjs): there from the start, roles fixed, can't be deleted ----
+  const bots = await ok('GET', '/api/bots')
+  const builtIn = ['director', 'art', 'cinematographer', 'reviewer'].map(r => bots.find(b => b.id === `crew-${r}`))
+  assert.ok(builtIn.every(b => b?.fixed), 'the four crew members exist and are marked fixed')
+  assert.deepEqual(builtIn.map(b => b.candidates[0]), ['claude-opus-5-5', 'gpt-5.6-sol', 'claude-sonnet-5', 'claude-opus-5-5'])
+  const roles = new Map((await panel('crew.list', {})).map(c => [c.agent_id, c.role]))
+  assert.deepEqual(builtIn.map(b => roles.get(b.id)), ['director', 'art', 'cinematographer', 'reviewer'], 'their roles were set on start')
+  const cg = (await ok('GET', '/api/studio/status')).crew_group
+  assert.ok(cg && (await ok('GET', '/api/groups')).find(x => x.id === cg)?.members.includes('crew-director'), 'the status names the crew\'s group')
+  assert.equal((await api('DELETE', '/api/bots/crew-reviewer')).status, 400, 'a built-in member can\'t be deleted')
+  assert.equal((await api('POST', '/api/studio/call', { action: 'crew.set', args: { agent_id: O, role: 'reviewer' } })).status, 400, 'the panel can\'t move a role')
+  // A member with no model gets the first candidate its upstream lists — the plain variant, saved; a chosen one is never touched.
+  const cine = builtIn[2]
+  sql(`update agents set provider_id = '${prov.id}', model = '', runtime = '' where id = 'crew-cinematographer'`)
+  await ok('PATCH', `/api/providers/${prov.id}`, {})
+  const picked = await until('a model picked', async () => (await ok('GET', '/api/bots')).find(b => b.id === 'crew-cinematographer').model, 20)
+  assert.equal(picked, 'anthropic/claude-sonnet-5')
+  sql(`update agents set model = 'mine' where id = 'crew-cinematographer'`)
+  await ok('PATCH', `/api/providers/${prov.id}`, {})
+  await sleep(1500)
+  assert.equal((await ok('GET', '/api/bots')).find(b => b.id === 'crew-cinematographer').model, 'mine', 'a person\'s choice stays')
+  sql(`update agents set provider_id = ${cine.provider_id ? `'${cine.provider_id}'` : 'null'}, model = '${cine.model.replace(/'/g, "''")}', runtime = '${cine.runtime}' where id = 'crew-cinematographer'`)
+
+  // This run's own crew, in its own group: the pipeline gives each order to the role-holder in the project's group.
+  // Roles are set straight at the studio — the page can't — as test setup.
+  for (const [id, role] of [[D, 'director'], [A, 'art'], [C, 'cinematographer'], [R, 'reviewer']]) studioAsHuman('crew.set', { agent_id: id, role })
   sql(`insert into studio.actor_project values ${[D, A, C, R].map(id => `('agent:${id}', '${P}')`).join(',')} on conflict (actor) do update set project_id = excluded.project_id`)
   // Speech through the Keys panel, pointing at the fake.
-  await panel('keys.set', { name: 'tts', values: { base_url: `http://${gw}:${PORT}/tts/v1`, api_key: 'tts-key', model: 'fake-tts' } })
+  await panel('keys.set', { name: 'tts', values: { base_url: `http://${gw}:${PORT}/mm`, api_key: 'tts-key', model: 'fake-tts' } })
   // Background music, uploaded by a person in project settings.
   execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=3', '-y', join(tmp, 'bgm.mp3')])
   const setBgm = await panel('project.bgm', { project: P, data_b64: readFileSync(join(tmp, 'bgm.mp3')).toString('base64'), name: 'theme.mp3', level: 'low' })
   assert.equal(setBgm.bgm.level, 'low'); assert.equal(setBgm.bgm.name, 'theme.mp3')
   assert.equal((await api('POST', '/api/studio/call', { action: 'project.bgm', args: { project: P, data_b64: PNG } })).status, 400, 'a picture is not music')
-  assert.equal((await panel('keys.test', { name: 'tts' })).code, 'modelOk')
+  assert.equal((await panel('keys.test', { name: 'tts' })).code, 'voicesOk')
+  assert.deepEqual((await panel('voice.list', { query: '沉稳' })).voices.map(v => v.id), ['narr-voice'], 'the account\'s voices, searchable')
 
   // ---- a person writes E01 and starts it ----
   await panel('episode.add', { project: P, code: 'E01', title: '初见', script: '蛮吉在断崖上拔刀。风起。' })
@@ -257,7 +299,9 @@ try {
   assert.equal(cueTexts.length, 4, 'the long line (29 characters, three lines) became two cues')
   assert.ok(!cueTexts.flat().some(l => /^[，。！？]/.test(l)), 'no line starts with punctuation')
   assert.equal(cueTexts.flat().join('').replace(/蛮吉：|\s/g, ''), '谁也别想过去！那一年，他十二岁。风从断崖下面吹上来，他握着刀的手一直在抖，却没有退后半步。', 'nothing lost or doubled in the layout')
-  assert.deepEqual(ttsBodies.map(b => [b.input, b.voice, b.model]), [['那一年，他十二岁。', 'sage', 'fake-tts'], ['风从断崖下面吹上来，他握着刀的手一直在抖，却没有退后半步。', 'sage', 'fake-tts']], 'only the narration is spoken by TTS, in the narrator\'s voice')
+  assert.deepEqual(ttsBodies.map(b => [b.text, b.voice_setting.voice_id, b.voice_setting.emotion, b.model]),
+    [['那一年，他十二岁。', 'narr-voice', 'calm', 'fake-tts'], ['风从断崖下面吹上来，他握着刀的手一直在抖，却没有退后半步。', 'narr-voice', 'calm', 'fake-tts']], 'only the narration is spoken by MiniMax, in the narrator\'s voice and emotion')
+  assert.deepEqual(sql(`select card->'voice' from studio.characters where project_id = '${P}' and name = '蛮吉'`), '{"voice": "male-qn-qingse", "emotion": "angry"}', 'the art director set the character\'s voice from the account\'s list')
   assert.equal(sql(`select count(*) from studio.generations where project_id = '${P}' and engine = 'tts' and status = 'succeeded'`), '2')
   await panel('episode.assemble', { project: P, episode: 'E01' })
   await until('recut', async () => sql(`select count(*) from studio.assemblies where episode_id = (select id from studio.episodes where project_id = '${P}') and status = 'done'`) === '2')

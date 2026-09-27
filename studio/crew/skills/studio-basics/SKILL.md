@@ -45,7 +45,8 @@ studio project info             # 世界观、画风、基调、禁忌
 | `studio char show <角色> [--look <造型>]` | 身份卡、禁止改动项、可用 look |
 | `studio char refs <角色> --look <造型> [--angle 正/3-4/侧/背] [--expr <表情>] [--light <光照>] [--shot <景别>]` | 按条件匹配参考图 |
 | `studio char add / look add` | 新建角色 / 造型（草稿态） |
-| `studio char voice <角色> --voice <声音名> [--instructions ...]` | 角色的配音声音（画外音 / 旁白用 TTS），定稿后也能改 |
+| `studio voice list [--query <关键词>]` | 配音账号（MiniMax）里可用的声音：voice_id、名字、描述 |
+| `studio char voice <角色> --voice <voice_id> [--emotion happy/sad/angry/fearful/disgusted/surprised/calm/fluent/whisper]` | 角色的配音声音（画外音 / 旁白用 MiniMax 配），定稿后也能改 |
 | `studio loc list / show / refs / add` | 场景，参数同角色 |
 | `studio asset gen --engine gpt-image\|comfy --prompt ... [--ref <asset_id>...]` | 生成图像素材 |
 | `studio asset edit <asset_id> --instruction ... [--mask ...]` | 改图 |
