@@ -11,26 +11,35 @@ CirrayaBot 上的 AI 剧组：4 个 agent + 5 个 skill，配合 `studio` 片场
    agent 不逐张操作文件。
 3. **studio 是唯一真源。** 角色包、镜头状态、审片记录只存在 studio 里。
    agent 的 `remember` 只记工作心得，不记设定。
-4. **密钥不进 agent 容器。** Seedance / GPT 图像 / ComfyUI 的 key 只在 studio 服务里，
+4. **密钥不进 agent 容器。** Seedance / GPT 图像 / ComfyUI / MiniMax 语音的 key 只在 studio 服务里，
    agent 通过平台的 `studio` 工具访问，平台替它标明身份，studio 按岗位限权。
 
 ## 成员
 
-| 名字 | 职位 | 建议模型 | 省钱替代 | Skills |
-| --- | --- | --- | --- | --- |
-| 顾衡 | 导演（组长） | Claude Opus 5.5，推理强度高 | deepseek-flash，高 | studio-basics, shot-breakdown |
-| 苏棠 | 美术指导 | GPT-5.6 Sol，中 | deepseek-flash，中 | studio-basics, character-bible |
-| 林野 | 摄影指导 | Claude Sonnet 5，中 | deepseek-flash，低 | studio-basics, shot-prompting |
-| 严青 | 审片 / 场记 | Claude Opus 5.5，高（**必须能看图**） | GPT-5.6 Sol，高 | studio-basics, footage-review |
+四个岗位是固定的：启用片场后第一次启动就自动建好这四个人、装好技能、建好「剧组」群、分好岗位，
+不用跑任何命令。他们可以改名、换模型、改性格描述，但不能删，岗位也不能转给别人。
+
+| 名字 | 职位 | 模型候选（按顺序，取上游里第一个有的） | 推理强度 | 步数上限 | Skills |
+| --- | --- | --- | --- | --- | --- |
+| 顾衡 | 导演（组长） | claude-opus-5-5 → deepseek-flash | 高 | 30 | studio-basics, shot-breakdown |
+| 苏棠 | 美术指导 | gpt-5.6-sol → deepseek-flash | 中 | 30 | studio-basics, character-bible |
+| 林野 | 摄影指导 | claude-sonnet-5 → deepseek-flash | 中 | 40 | studio-basics, shot-prompting |
+| 严青 | 审片 / 场记 | claude-opus-5-5 → gpt-5.6-sol（**必须能看图**） | 高 | 40 | studio-basics, footage-review |
+
+这些默认值写在 `agents/<岗位>.md` 的头部（`模型候选` / `推理强度` / `步数上限`）。
+成员没选模型时，平台从它的上游的模型列表里挑第一个候选（转发站的写法如 `anthropic/claude-opus-5.5` 也认），
+并存到成员身上，「编辑剧组成员」里看得到、随时能换；**人选过的模型永远不会被自动覆盖**。
+上游里一个候选都没有时，第一次对话会提示去选模型。
 
 为什么这样配：
 - **导演**读整集剧本、拆结构、写带对白的镜头 JSON，最吃推理和中文表达；工单少，单价高无所谓。
   deepseek-flash 有 1M 上下文、中文原生，是很好的省钱选择。
 - **美术**的产出是给 GPT 图像的提示词，并要自己看生成的参考图（`asset.show` 看图），用 GPT 系列最顺。
+  角色的配音声音也是美术定：`voice list` 看 MiniMax 账号里的声音，`char voice` 设定。
 - **摄影**的工单最多（每个镜头、每次打回都有一张），要稳、要便宜，中等推理足够。
 - **审片**是唯一必须看图的岗位，判断错一次就是一轮白生成，所以给最强的看图模型。
   deepseek-flash 现在原生支持图片、走我们自己的循环也能把对比图发给它，
-  **但没有用真 key 验证过它看对比图的水平**，先别让它独自审片。
+  **但没有用真 key 验证过它看对比图的水平**，所以不在审片的候选里（手动选可以）。
 
 DeepSeek 在「模型上游」里加一个 Chat Completions 上游即可（`https://api.deepseek.com`，模型 `deepseek-flash`），
 不再需要单独的 DeepSeek Harness。
@@ -52,7 +61,7 @@ DeepSeek 在「模型上游」里加一个 Chat Completions 上游即可（`http
   → 严青（工单：审片）
        通过；或打回 → 按 route 给林野 / 苏棠（修完再给林野）/ 顾衡派单
        同一镜头第 3 次打回 → 交给人（人可以直接选一条通过，或写意见交回剧组）
-  全部镜头通过 → 片场自动合成成片：竖屏 9:16、按镜头时长剪、旁白和画外音用 TTS 配、字幕烧进画面 + .srt
+  全部镜头通过 → 片场自动合成成片：竖屏 9:16、按镜头时长剪、旁白和画外音用 MiniMax 配音、字幕烧进画面 + .srt
 人：看成片 → 通过（或把某个镜头打回，这一集回到制作中，修好后自动重新合成）
 ```
 
@@ -73,16 +82,14 @@ DeepSeek 在「模型上游」里加一个 Chat Completions 上游即可（`http
 把打回 3 次的镜头交回剧组（`shot reopen`）。都在 Web UI 的片场工作台里：「分集」「设定库」「项目设置」，
 镜头页也能直接通过 / 打回。
 
-## 导入方式
+## 更新到最新的配置
 
-`bots/` 只在首次启动时作为种子，之后改它无效。已部署的实例用导入脚本，一条命令：
+平台启动时只补**缺的**（缺哪个成员补哪个），不会覆盖人改过的名字、性格和模型。
+这里的文字（性格描述、skill）更新之后，想让已有的剧组用上新版，运行导入脚本：
 
 ```bash
-docker compose exec app node studio/crew/import.mjs            # 建 4 个 agent、装 5 个 skill、建群、分配岗位
+docker compose exec app node studio/crew/import.mjs            # 更新 4 个成员的名字、职位、性格描述和 5 个 skill
 docker compose exec app node studio/crew/import.mjs --dry-run  # 只看会做什么
 ```
 
-可以重复运行：已有的 agent 只更新名字、职位和性格描述，**不动你选的上游和模型**；skill 按名字更新。
-新建的剧组群默认「整组共用一台机器」（开启工具时，大家在同一个 /work 里交接文件）；已有的群保持你的设置。
-导入的 agent 没有模型——按上表的「建议模型」，在「编辑剧组成员」里给每个人选好上游和模型，
-审片（严青）的模型必须支持图片输入。然后在片场工作台里建项目，在「项目设置」里把通知群选成这个群。
+它**不动你选的上游和模型**；skill 按名字更新。

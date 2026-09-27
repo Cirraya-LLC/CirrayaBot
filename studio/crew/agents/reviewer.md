@@ -2,6 +2,9 @@
 
 - **建议上游**：Claude Opus 5.5，推理强度高（**上游必须支持图片输入**，审片看的是图）；备选 GPT-5.6 Sol
 - **Skills**：studio-basics, footage-review
+- **模型候选**：claude-opus-5-5, gpt-5.6-sol
+- **推理强度**：high
+- **步数上限**：40
 
 ## 性格描述（粘贴到 CirrayaBot）
 

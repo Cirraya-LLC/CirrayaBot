@@ -16,6 +16,7 @@ import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import * as studio from './studio.mjs'
 import * as mcp from './mcp.mjs'
+import { ensureCrew, crewGroup, isCrew, candidatesFor, candidatesSync } from './crew.mjs'
 import { RUNTIMES, RUNTIME_IDS, GROK_ENV, turnArgs, grokMcpBlock, reader, needsLogin,
   loginArgs, logoutArgs, statusArgs, statusOf, loginPrompt, plain } from './cli.mjs'
 import { createServer } from 'node:http'
@@ -57,6 +58,10 @@ const toBot = (r, lang = 'en') => ({
   max_steps: r.max_steps ?? null,
   // '' = our own loop; otherwise the coding CLI its turns run on (web/cli.mjs).
   runtime: r.runtime ?? '',
+  // One of the four built-in crew members (web/crew.mjs): can't be deleted, its role can't move.
+  fixed: studio.enabled() && isCrew(r.id),
+  // What an empty model becomes (the first of these its upstream lists); the editor preselects the same.
+  candidates: studio.enabled() ? candidatesSync(r.id) : [],
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
   tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
@@ -1273,11 +1278,35 @@ async function providerFor(bot) {
   }
   const base = bot.provider_id ? await db.getProvider(bot.provider_id) : await requireProvider()
   if (!base) throw new Say('provider.gone', { name: bot.name })
+  if (!bot.model) bot.model = await autoModel(bot, base) ?? ''
   if (!bot.model) throw new Say('provider.noModel', { name: bot.name })
   // An agent's own effort wins; empty means "whatever the platform says", and the
   // platform's own empty means send nothing — what every model got before this existed.
   const effort = normEffort(bot.effort) || normEffort(await db.defaultEffort())
   return { ...base, model: bot.model, effort, context_tokens: await contextFor(base, bot.model) }
+}
+
+/**
+ * A crew member with no model gets the first of its spec's candidates that its upstream lists,
+ * saved on the agent (so the editor shows it and a person can change it). Anyone else: null.
+ */
+async function autoModel(bot, base) {
+  const want = await candidatesFor(bot.id)
+  if (!want.length || bot.runtime) return null
+  const pick = pickModel(want, await listModels(base).catch(() => null))
+  if (!pick) return null
+  // Only if still empty: a person may have chosen one while the list was being fetched.
+  if (await db.fillModel(bot.id, pick)) console.log(`[crew] ${bot.name} had no model; picked ${pick} from ${base.name} (candidates: ${want.join(', ')})`)
+  return (await db.getAgent(bot.id))?.model || null
+}
+/** Every crew member still without a model, after an upstream was added or changed. Best effort, in the background. */
+async function fillCrewModels() {
+  if (!studio.enabled()) return
+  for (const a of await db.listAgents()) {
+    if (!isCrew(a.id) || a.model || a.runtime) continue
+    const base = a.provider_id ? await db.getProvider(a.provider_id) : await db.activeProvider()
+    if (base) await autoModel(a, base).catch(e => console.error(`[crew] picking a model for ${a.name} failed: ${e.message}`))
+  }
 }
 
 /**
@@ -1633,6 +1662,7 @@ const server = createServer(async (req, res) => {
     }
     if (bm && req.method === 'DELETE') {
       if (!await db.getAgent(bm[1])) return send(404, { error: t('err.noAgent') })
+      if (studio.enabled() && isCrew(bm[1])) return send(400, { error: t('crew.fixed') })
       await db.deleteAgent(bm[1])
       // Delete the container too — an ownerless container only wastes memory,
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
@@ -1851,6 +1881,7 @@ const server = createServer(async (req, res) => {
         protocol: normProtocol(b.protocol),
         price_in_micro: priceField(b.price_in_micro), price_out_micro: priceField(b.price_out_micro),
       }, { auto: b.auto_context !== false, tokens: b.context_tokens })
+      fillCrewModels().catch(() => {})
       return send(200, safeProvider(row, lang))
     }
 
@@ -1871,6 +1902,7 @@ const server = createServer(async (req, res) => {
         price_in_micro: priceField(b.price_in_micro, cur.price_in_micro),
         price_out_micro: priceField(b.price_out_micro, cur.price_out_micro),
       }, { auto: b.auto_context ?? cur.auto_context, tokens: b.context_tokens ?? cur.context_tokens })
+      fillCrewModels().catch(() => {})
       return send(200, safeProvider(row, lang))
     }
     if (pm && req.method === 'DELETE') {
@@ -1887,6 +1919,7 @@ const server = createServer(async (req, res) => {
     if (pd && req.method === 'POST') {
       if (!await db.getProvider(pd[1])) return send(404, { error: t('err.noProvider') })
       await db.makeDefault(pd[1])
+      fillCrewModels().catch(() => {})
       return send(200, { ok: true })
     }
     // Which models an upstream has: the model dropdown in the agent editor and "Test connection" in the upstream form both rely on it.
@@ -2057,12 +2090,12 @@ const server = createServer(async (req, res) => {
       }
     }
 
-    if (url.pathname === '/api/studio/status' && req.method === 'GET') return send(200, { enabled: studio.enabled() })
+    if (url.pathname === '/api/studio/status' && req.method === 'GET')
+      return send(200, { enabled: studio.enabled(), crew_group: studio.enabled() ? await crewGroup(db) : null })
     if (url.pathname === '/api/studio/call' && req.method === 'POST') {
       const { action, args = {} } = await readBody(req)
       if (!studio.PANEL_ACTIONS.has(action)) return send(400, { error: t('studio.notPanel', { action: String(action) }) })
       const r = await studio.call('human', action, args)
-      if (action === 'crew.set') studio.forgetCrew()      // a new role takes effect on the next turn, not in 30 s
       return r.ok ? send(200, r.result) : send(r.status || 502, { error: r.error?.message ?? 'studio error', code: r.error?.code })
     }
     const sf = url.pathname.match(/^\/api\/studio\/file\/([\w-]{1,60})$/)
@@ -2127,6 +2160,12 @@ await db.migrate()
 // DATABASE_URL whose user can't create roles is the likely case). Say it loudly and carry on.
 try { if (await db.provisionStudio(env.STUDIO_DB_PASSWORD)) console.log('Studio database role is ready') }
 catch (e) { console.error(`Could not create the studio's database role, so the studio won't start: ${e.message}`) }
+// With the studio on, the four crew members are the product's people (web/crew.mjs). Seeded before
+// bots/, so a new studio deployment starts with the crew instead of the generic three.
+if (studio.enabled()) {
+  const c = await ensureCrew(db).catch(e => { console.error(`Could not seed the film crew: ${e.message}`); return null })
+  if (c?.created.length) console.log(`Film crew: added ${c.created.join(', ')}${c.skills ? `, ${c.skills} skill(s)` : ''}`)
+}
 const s = await db.seed(ROOT)
 if (s.seeded) console.log(`First start, imported from files: ${s.agents} agents, ${s.groups} groups, ${s.messages} messages`)
 if (await db.seedProviderFromEnv(env)) console.log('Created the default upstream from .env (change it later in the UI ⚙)')
@@ -2234,6 +2273,21 @@ server.on('upgrade', async (req, socket) => {
 setInterval(() => tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e)), 20_000)
 tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))
 
+
+// The crew's roles live in the studio, which starts after us (it needs the role we just made), so
+// they are set from here once it answers. Every start, so a role removed by hand comes back.
+async function ensureRoles() {
+  if (!studio.enabled()) return
+  for (let i = 0; i < 90; i++) {
+    const r = await Promise.all(['director', 'art', 'cinematographer', 'reviewer'].map(role =>
+      db.getAgent(`crew-${role}`).then(a => a && studio.call('human', 'crew.set', { agent_id: a.id, role }, { timeoutMs: 5000 }))))
+    if (r.every(x => !x || x.ok)) { studio.forgetCrew(); return }
+    await new Promise(ok => setTimeout(ok, 10_000))
+  }
+  console.error('[crew] the studio never answered; crew roles not set (they are set on the next start)')
+}
+ensureRoles().catch(e => console.error(`[crew] setting roles failed: ${e.message}`))
+fillCrewModels().catch(() => {})
 
 server.listen(CFG.port, CFG.host, () => {
   console.log(`CirrayaBot  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)

@@ -2,6 +2,9 @@
 
 - **建议上游**：Claude Opus 5.5，推理强度高；省钱用 deepseek-flash（1M 上下文，中文好，推理强度高）
 - **Skills**：studio-basics, shot-breakdown
+- **模型候选**：claude-opus-5-5, deepseek-flash
+- **推理强度**：high
+- **步数上限**：30
 - **群角色**：组长
 
 ## 性格描述（粘贴到 CirrayaBot）

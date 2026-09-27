@@ -8,8 +8,10 @@
 // It goes through the platform's HTTP API — the same validation as the UI, nothing written behind
 // its back. Safe to run again: agents are matched by id (crew-<role>) and only their name, job and
 // persona are updated — **never the upstream or model a person chose**; skills are matched by name.
-// Agents are created WITHOUT a model: which upstream each one runs on is the person's call
-// (README "建议上游"), and the first chat says so until one is picked.
+// The platform already seeds this crew on its first start with the studio on (web/crew.mjs); this
+// script is for bringing an existing crew up to the spec's latest text. Agents are created without a
+// model: the platform picks the first of the spec's candidates the upstream lists, until a person
+// picks one.
 //
 // Self-test: node studio/crew/import.mjs --self-test (parses the spec files next to it)
 import { readFile, readdir } from 'node:fs/promises'
@@ -31,10 +33,17 @@ export function parseAgent(md, role) {
   const end = rest.search(/^##\s/m)
   const persona = (end < 0 ? rest : rest.slice(0, end)).trim()
   if (!persona) throw new Error(`${role}.md: the persona section is empty`)
+  const list = s => s.split(/[,，、]/).map(x => x.trim()).filter(Boolean)
+  const effort = field('推理强度')
+  if (effort && !['low', 'medium', 'high'].includes(effort)) throw new Error(`${role}.md: 推理强度 must be low / medium / high`)
+  const steps = field('步数上限')
+  if (steps && !(Number(steps) >= 1 && Number(steps) <= 60)) throw new Error(`${role}.md: 步数上限 must be 1–60`)
   return {
     role, id: `crew-${role}`, name: head[1].trim(), job: head[2].trim(), persona,
-    skills: field('Skills').split(/[,，、]/).map(s => s.trim()).filter(Boolean),
+    skills: list(field('Skills')),
     lead: field('群角色') === '组长', upstream: field('建议上游'),
+    // Defaults a new member starts with; a person's later choice always wins.
+    models: list(field('模型候选')), effort, max_steps: steps ? Number(steps) : null,
   }
 }
 
@@ -87,8 +96,8 @@ async function main(o) {
     const cur = bots.find(b => b.id === a.id)
     if (cur) await act(`update agent ${a.name} (${a.id}): name, job, persona — upstream and model kept`, () =>
       call('PATCH', `/api/bots/${a.id}`, { name: a.name, description: a.job, persona: a.persona }))
-    else await act(`create agent ${a.name} (${a.id}) — no model yet`, () =>
-      call('POST', '/api/bots', { id: a.id, name: a.name, description: a.job, persona: a.persona, model: '' }))
+    else await act(`create agent ${a.name} (${a.id}) — effort ${a.effort || '—'}, ${a.max_steps ?? 12} steps, model picked from: ${a.models.join(', ')}`, () =>
+      call('POST', '/api/bots', { id: a.id, name: a.name, description: a.job, persona: a.persona, model: '', effort: a.effort, max_steps: a.max_steps }))
   }
 
   // ---- skills, installed on whoever lists them ----
@@ -123,9 +132,8 @@ async function main(o) {
 
   console.log(`${o.dryRun ? 'Would do' : 'Done'}:\n${plan.map(p => `  - ${p}`).join('\n')}`)
   console.log(`\nGroup: ${o.group} (${groupId})`)
-  console.log('\nNext, by hand (these are yours to choose):')
-  for (const a of agents) console.log(`  - Edit Agent ${a.name}: pick an upstream and a model — suggested: ${a.upstream || '—'}`)
-  console.log(`  - Workbench → Project settings: create the project, set its notice group to "${o.group}" and its notice language`)
+  console.log('\nA member without a model gets the first of its candidates that its upstream lists; pick another in Edit Agent any time:')
+  for (const a of agents) console.log(`  - ${a.name}: ${a.models.join(' → ') || '—'} (${a.upstream || '—'})`)
 }
 
 // ---------- self-test ----------
@@ -156,11 +164,18 @@ async function selfTest() {
   for (const k of skills) a.doesNotMatch(k.body, /@(苏棠|林野|顾衡|严青)/, `${k.name}: no @-relay handoffs left in the skill`)
   const breakdown = skills.find(k => k.name === 'shot-breakdown').body
   a.match(breakdown, /"dialogue"/); a.match(breakdown, /onscreen[\s\S]*offscreen[\s\S]*narration/)
+  a.deepEqual(agents.map(x => [x.effort, x.max_steps]), [['high', 30], ['medium', 30], ['medium', 40], ['high', 40]])
+  a.deepEqual(agents.map(x => x.models[0]), ['claude-opus-5-5', 'gpt-5.6-sol', 'claude-sonnet-5', 'claude-opus-5-5'])
+  a.ok(!agents[3].models.includes('deepseek-flash'), 'the reviewer is never given a model nobody has seen judge a sheet')
+  a.throws(() => parseAgent('# A — B\n- **推理强度**：max\n## 性格描述\nx', 'x'), /low \/ medium \/ high/)
   a.throws(() => parseAgent('no heading', 'x'), /first heading/)
   a.throws(() => parseAgent('# A — B\n- **Skills**：x\n', 'x'), /性格描述/)
   console.log('import.mjs: all checks passed')
 }
 
-const o = args(process.argv.slice(2))
-if (o.selfTest) await selfTest()
-else await main(o).catch(e => { console.error(`Import failed: ${e.message}`); process.exit(1) })
+// The platform imports loadSpec() from here to seed the crew on start (web/crew.mjs); only run as a script.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const o = args(process.argv.slice(2))
+  if (o.selfTest) await selfTest()
+  else await main(o).catch(e => { console.error(`Import failed: ${e.message}`); process.exit(1) })
+}

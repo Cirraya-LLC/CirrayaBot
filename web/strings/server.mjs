@@ -128,6 +128,7 @@ export const serverStrings = {
   'import.badRow':  ['Message {n} is malformed (it needs role and content)', '第 {n} 条格式不对（要有 role 和 content）', '第 {n} 則格式不對（需要 role 和 content）'],
 
   // Agents on a coding CLI (web/cli.mjs)
+  'crew.fixed': ['This is one of the four built-in crew members; the studio needs every role filled, so they can\u2019t be deleted. You can rename them or change their model.', '这是片场内置的四位剧组成员之一，每个岗位都必须有人，所以不能删除。可以改名、换模型。', '這是片場內建的四位劇組成員之一，每個崗位都必須有人，所以不能刪除。可以改名、換模型。'],
   'agent.runtime': ['The runtime must be empty (our own loop) or one of {list}', '运行方式只能留空（自带循环），或者是 {list}', '執行方式只能留空（內建循環），或是 {list}'],
   'cli.off': ['The cli module is off, so no crew member can run on Claude Code / Codex / Grok. Add cli to MODULES in .env and rerun ./start.sh.',
     'cli 模块没开，剧组成员不能跑在 Claude Code / Codex / Grok 上。在 .env 的 MODULES 里加上 cli，再运行一次 ./start.sh。',
