@@ -84,7 +84,8 @@ try {
   // ---- the project, set up the way the page does it ----
   const P = `wb-${RUN}`
   await panel('project.create', { id: P, name: `断崖 ${RUN}`, info: { lang: 'zh-Hans' }, notify_group: g.id })
-  for (const [id, role] of [[D, 'director'], [A, 'art'], [C, 'cinematographer'], [R, 'reviewer']]) await panel('crew.set', { agent_id: id, role })
+  // Roles are fixed on the page (web/crew.mjs); this run's crew gets them straight from the studio, as setup.
+  for (const [id, role] of [[D, 'director'], [A, 'art'], [C, 'cinematographer'], [R, 'reviewer']]) crew('human', 'crew.set', { agent_id: id, role })
   await panel('scene.add', { project: P, code: 'S01', title: '断崖', script: '黄昏。蛮吉被逼到断崖边，咬牙拔刀。\n风从谷底卷上来。' })
   await panel('scene.add', { project: P, code: 'S02', title: '回村', script: '夜。蛮吉一瘸一拐走回村口，灯火一盏盏亮起。', ord: 1 })
   assert.equal((await api('POST', '/api/studio/call', { action: 'scene.add', args: { project: P, code: 'S01', script: 'x' } })).status, 409, 'a scene code is taken once')

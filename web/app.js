@@ -608,7 +608,7 @@ function editBot(b) {
   $('#bprov').value = PROVS.some(p => p.id === b?.provider_id) ? b.provider_id : ''
   // A new provider likely doesn't have the old model; restore it when switching back
   $('#bprov').onchange = () => loadModels($('#bprov').value,
-    $('#bprov').value === (b?.provider_id ?? '') ? (b?.model ?? '') : '')
+    $('#bprov').value === (b?.provider_id ?? '') ? (b?.model ?? '') : '', b?.candidates)
   showRuntime(b, true)
   $('#beffort').innerHTML = ['', 'low', 'medium', 'high']
     .map(e => `<option value="${e}">${esc(t(e ? `b.effort${e[0].toUpperCase()}${e.slice(1)}` : 'b.effortNone'))}</option>`).join('')
@@ -622,13 +622,24 @@ function editBot(b) {
   const u = b && spendOf(b.id)
   $('#bcaphint').textContent = u && !u.priced ? t('sp.unpricedWhy')
     : USAGE.default_cap_micro != null ? t('sp.capDefault', { cap: money(USAGE.default_cap_micro) }) : ''
-  $('#bdel').style.display = b ? '' : 'none'
+  // The four crew members are the studio's roles: they can be renamed and re-modelled, not deleted.
+  $('#bdel').style.display = b && !b.fixed ? '' : 'none'
   $('#bdlg').showModal()
 }
 // Models come from the provider's /models; fall back to a text box when it gives no list,
 // otherwise Agents on that provider couldn't pick a model at all.
 let modelsSeq = 0
-async function loadModels(providerId, current) {
+/** web/crew.mjs pickModel, the same rule: the first candidate listed, exact or ignoring punctuation (shortest). */
+function pickCandidate(candidates = [], models = []) {
+  const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '')
+  for (const c of candidates) {
+    if (models.includes(c)) return c
+    const hits = models.filter(m => norm(m).includes(norm(c))).sort((a, b) => a.length - b.length || a.localeCompare(b))
+    if (hits.length) return hits[0]
+  }
+  return ''
+}
+async function loadModels(providerId, current, candidates = []) {
   const seq = ++modelsSeq
   const sel = $('#bmodel'), box = $('#bmodelx')
   sel.hidden = false; box.hidden = true
@@ -642,7 +653,8 @@ async function loadModels(providerId, current) {
   const list = current && !models.includes(current) ? [current, ...models] : models
   sel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}${models.includes(m) ? '' : esc(t('b.unlisted'))}</option>`).join('')
   // New Agents default to the model others already use on this provider, not the alphabetically first
-  sel.value = current || r.suggested || models[0]; sel.disabled = false
+  // A crew member takes the first of its recommended models (the server would pick the same on its first turn).
+  sel.value = current || pickCandidate(candidates, models) || r.suggested || models[0]; sel.disabled = false
 }
 const chosenModel = () => ($('#bmodel').hidden ? $('#bmodelx').value : $('#bmodel').value).trim()
 
@@ -669,7 +681,7 @@ function showRuntime(b, first = false) {
   } else {
     $('#brthint').hidden = true
     $('#bmodelx').placeholder = t('b.modelPh')
-    loadModels($('#bprov').value, first || !(b?.runtime) ? (b?.model ?? '') : '')
+    loadModels($('#bprov').value, first || !(b?.runtime) ? (b?.model ?? '') : '', b?.candidates)
   }
 }
 
@@ -1279,6 +1291,7 @@ const openImage = id => window.open(fileUrl(id), '_blank', 'noopener')
 async function wsInit() {
   const st = await fetch(api('/api/studio/status')).then(r => r.json()).catch(() => ({ enabled: false }))
   WS.on = !!st.enabled
+  WS.isolated = !!st.isolated_crews
   $('#proj').hidden = !WS.on
   $('#convhead').hidden = !WS.on
   if (!WS.on) return false
@@ -1306,8 +1319,18 @@ $('#wsproj').onchange = e => {
 }
 async function wsNewProject() {
   if (busy) return alert('请等待当前回复结束后再新建剧组。')
-  const name = prompt('新作品叫什么？将自动配置四个岗位，使用全新上下文。')?.trim(); if (!name) return
+  const name = prompt(WS.isolated ? '新作品叫什么？将自动配置四个岗位，使用全新上下文。' : t('st.newNamePrompt'))?.trim(); if (!name) return
   try {
+    if (!WS.isolated) {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30)
+      const pid = `${slug || 'film'}-${crypto.randomUUID().slice(0, 8)}`
+      const st = await fetch(api('/api/studio/status')).then(r => r.json())
+      await stCall('project.create', { id: pid, name, info: { lang: lang === 'en' ? 'en' : lang },
+        ...st.crew_group ? { notify_group: st.crew_group } : {} })
+      await wsProjects(pid)
+      try { localStorage.setItem('ma_project', pid) } catch {}
+      return wsShow('settings')
+    }
     const r = await fetch(api('/api/crews'), { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name, request_id: crypto.randomUUID() }) })
     if (!r.ok) throw new Error(await errText(r))
@@ -1852,15 +1875,14 @@ async function wsBible(ticket) {
     for (const c of chars) {
       item(grid, c.name, c.status, lock => stCall(lock ? 'char.lock' : 'char.unlock', { project: WS.project, name: c.name }), ['char.refs', { name: c.name }])
       // Their voice, for the lines spoken off camera: settable on a locked character too.
-      const v = typeof c.voice === 'string' ? { voice: c.voice } : c.voice ?? {}
       const vb = document.createElement('div'); vb.className = 'voice rowb'
-      vb.innerHTML = `<span class="rhint" style="margin:0">🎙 ${esc(t('ws.voiceOf', { name: c.name }))}</span>
-        <input class="fi mono" style="max-width:130px;margin:0" placeholder="${esc(t('ws.voicePh'))}"><input class="fi" style="margin:0" placeholder="${esc(t('ws.voiceHowPh'))}">
+      vb.innerHTML = `<span class="rhint" style="margin:0">🎙 ${esc(t('ws.voiceOf', { name: c.name }))}</span>${voiceInputs('max-width:220px')}
         <button class="btn">${esc(t('common.save'))}</button>`
-      const [vi, vh] = vb.querySelectorAll('input'); vi.value = v.voice ?? ''; vh.value = v.instructions ?? ''
+      const vp = voiceFill(vb, c.voice)
       vb.querySelector('button').onclick = async () => {
-        if (!vi.value.trim()) { vi.focus(); return }
-        try { await stCall('char.voice', { project: WS.project, name: c.name, voice: vi.value.trim(), instructions: vh.value.trim() }); vb.querySelector('button').textContent = t('key.saved') }
+        const v = vp()
+        if (!v) { vb.querySelector('input').focus(); return }
+        try { await stCall('char.voice', { project: WS.project, name: c.name, ...v }); vb.querySelector('button').textContent = t('key.saved') }
         catch (e) { alert(e.message) }
       }
       grid.appendChild(vb)
@@ -1871,6 +1893,31 @@ async function wsBible(ticket) {
   if (locs.length) section(t('ws.locations'), grid => {
     for (const l of locs) item(grid, l.name, l.status, lock => stCall(lock ? 'loc.lock' : 'loc.unlock', { project: WS.project, name: l.name }), ['loc.refs', { name: l.name }])
   })
+}
+
+// ─── Voices (MiniMax, studio/tts.mjs): a voice_id box with the account's voices as suggestions, and an emotion ───
+const EMOTIONS = ['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'calm', 'fluent', 'whisper']
+let voicesLoad = null
+function voiceInputs(style = '', ph = t('ws.voicePh')) {
+  // One shared <datalist>, filled once per page from the account (voice.list); without a key it stays empty.
+  if (!document.getElementById('mmvoices')) {
+    document.body.insertAdjacentHTML('beforeend', '<datalist id="mmvoices"></datalist>')
+    voicesLoad = stCall('voice.list', { all: true }).then(r => {
+      $('#mmvoices').innerHTML = r.voices.map(v => `<option value="${esc(v.id)}">${esc(v.name === v.id ? v.description : `${v.name} · ${v.description}`)}</option>`).join('')
+      return r
+    }).catch(() => {})
+  }
+  // Flex items of their own (the row's `>*` rule doesn't reach inside a display:contents wrapper), so they share the row.
+  return `<input class="fi mono" list="mmvoices" style="margin:0;flex:2 1 0;min-width:0;width:auto;${style}" placeholder="${esc(ph)}" autocomplete="off">
+    <select class="fi" style="margin:0;flex:0 0 auto;width:auto;max-width:130px" title="${esc(t('ws.emotion'))}"><option value="">${esc(t('ws.emotionAuto'))}</option>${EMOTIONS.map(e => `<option value="${e}">${esc(t(`ws.emo.${e}`))}</option>`).join('')}</select>`
+}
+/** Fill the inputs voiceInputs() made inside `box` from a stored voice; returns a reader → {voice, emotion} | null. */
+function voiceFill(box, stored) {
+  const v = typeof stored === 'string' ? { voice: stored } : stored ?? {}
+  const i = box.querySelector('input[list=mmvoices]'), e = box.querySelector('select')
+  i.value = v.voice ?? ''; e.value = EMOTIONS.includes(v.emotion) ? v.emotion : ''
+  voicesLoad?.then(r => { if (r?.emotions?.length === 0) { e.value = ''; e.hidden = true; e.disabled = true } })
+  return () => (i.value.trim() ? { voice: i.value.trim(), emotion: e.value } : null)
 }
 
 // ─── Settings: the project itself and who is on the crew ───
@@ -1890,7 +1937,7 @@ async function wsSettings(ticket) {
         <select class="fi" id="stgroup" title="${esc(t('st.groupTitle'))}"><option value="">${esc(t('st.noGroup'))}</option>${groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('')}</select></div>
       <small class="rhint">${esc(t('st.groupHint'))}</small>
       <div class="brow"><select class="fi" id="stratio" title="${esc(t('st.ratioTitle'))}">${['9:16', '16:9', '3:4', '1:1'].map(r => `<option value="${r}">${esc(t('st.ratio', { r }))}</option>`).join('')}</select>
-        <input class="fi mono" id="stnarr" placeholder="${esc(t('st.narratorPh'))}"><input class="fi" id="stnarrhow" placeholder="${esc(t('ws.voiceHowPh'))}"></div>
+        <span id="stnarr" style="display:contents">${voiceInputs('', t('st.narratorPh'))}</span></div>
       <small class="rhint">${esc(t('st.narratorHint'))}</small>
       <div class="brow" id="stbgm"><span class="rhint" style="margin:0;white-space:nowrap">♪ ${esc(t('st.bgm'))}</span>
         <span class="rhint" style="margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(bgm ? bgm.name || t('st.bgmSet') : t('st.bgmNone'))}</span>
@@ -1908,7 +1955,7 @@ async function wsSettings(ticket) {
   $('#stgroup').disabled = groups.some(g => g.project_id === WS.project)
   $('#stinfo').value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''
   $('#stratio').value = ['9:16', '16:9', '3:4', '1:1'].includes(pratio) ? pratio : '16:9'
-  $('#stnarr').value = nv.voice ?? ''; $('#stnarrhow').value = nv.instructions ?? ''
+  const narrOf = voiceFill($('#stnarr'), nv)
   // Background music is saved at once, like the crew roles: a file isn't something to lose to a missed Save.
   const bgmBox = $('#stbgm'), bgmLevel = bgmBox.querySelector('select')
   bgmLevel.value = bgm?.level ?? 'medium'
@@ -1932,25 +1979,23 @@ async function wsSettings(ticket) {
       if (!extra || typeof extra !== 'object' || Array.isArray(extra)) { alert(t('st.infoBad')); return }
     }
     try {
-      const narr = $('#stnarr').value.trim() ? { voice: $('#stnarr').value.trim(), instructions: $('#stnarrhow').value.trim() } : undefined
+      const narr = narrOf() ?? undefined
       await stCall('project.edit', { project: WS.project, name: $('#stname').value.trim(), notify_group: $('#stgroup').value,
         info: { ...extra, lang: $('#stlang').value, ratio: $('#stratio').value, ...narr ? { narrator: narr } : {}, ...bgm ? { bgm } : {} } })
       await wsProjects(WS.project); wsShow('settings')
     } catch (e) { alert(e.message) }
   }
-  // One role per crew member, saved as soon as it is picked.
-  const roleOf = new Map(crew.map(c => [c.agent_id, c.role]))
+  // One fixed crew per project; generic deployments keep the upstream built-in crew.
   const fixedCrew = groups.find(g => g.project_id === WS.project)
-  for (const b of BOTS.filter(b => !fixedCrew || fixedCrew.members.includes(b.id))) {
+  for (const role of ROLES) {
+    const b = fixedCrew
+      ? BOTS.find(x => fixedCrew.members.includes(x.id) && crew.some(c => c.agent_id === x.id && c.role === role))
+      : BOTS.find(x => crew.some(c => c.agent_id === x.id && c.role === role) && x.fixed) ?? BOTS.find(x => x.id === `crew-${role}`)
     const row = document.createElement('div'); row.className = 'mem'; row.style.padding = '6px 0'
-    row.innerHTML = `<div class="av" style="background:${col(b.color)}">${esc(b.name.slice(0, 1))}</div><span style="flex:1;min-width:0">${esc(b.name)}</span>
-      <select class="fi" style="width:200px;margin:0">${['', ...ROLES].map(r => `<option value="${r}">${esc(t(r ? `st.role.${r}` : 'st.role.none'))}</option>`).join('')}</select>`
-    const s = row.querySelector('select'); s.value = roleOf.get(b.id) ?? ''
-    s.disabled = !!fixedCrew
-    s.onchange = async () => {
-      try { await stCall('crew.set', { agent_id: b.id, role: s.value || null }) }
-      catch (e) { alert(e.message); s.value = roleOf.get(b.id) ?? '' }
-    }
+    row.innerHTML = b ? `<div class="av" style="background:${col(b.color)}">${esc(b.name.slice(0, 1))}</div><span style="flex:1;min-width:0">${esc(b.name)}
+        <small class="rhint" style="margin:0">${esc(b.model || t('st.crewAutoModel'))}</small></span><span class="tag">${esc(t(`st.role.${role}`))}</span>`
+      : `<span style="flex:1" class="rhint">${esc(t(`st.role.${role}`))} — ${esc(t('st.crewMissing'))}</span>`
+    if (b) row.style.cursor = 'pointer', row.onclick = () => editBot(b)
     $('#stcrew').appendChild(row)
   }
 }

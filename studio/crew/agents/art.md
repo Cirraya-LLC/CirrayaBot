@@ -2,6 +2,9 @@
 
 - **建议上游**：GPT-5.6 Sol（和 GPT 图像同一家，写图像提示词顺手），推理强度中；省钱用 deepseek-flash（能看图）
 - **Skills**：studio-basics, character-bible
+- **模型候选**：gpt-5.6-sol, deepseek-flash
+- **推理强度**：medium
+- **步数上限**：30
 
 ## 性格描述（粘贴到 CirrayaBot）
 

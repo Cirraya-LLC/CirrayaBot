@@ -146,7 +146,8 @@ export async function runTool(args, ctx, { readFile } = {}) {
 // not generate: prompts and takes stay the crew's work.
 export const PANEL_ACTIONS = new Set([
   'project.list', 'project.info', 'project.create', 'project.edit', 'project.board',
-  'crew.list', 'crew.set',
+  // Roles are fixed (web/crew.mjs): the panel shows them and can't move them.
+  'crew.list',
   'char.list', 'char.show', 'char.refs', 'char.lock', 'char.unlock',
   'loc.list', 'loc.show', 'loc.refs', 'loc.lock', 'loc.unlock',
   'scene.list', 'scene.show', 'scene.add', 'scene.edit', 'shot.lock',
@@ -154,7 +155,7 @@ export const PANEL_ACTIONS = new Set([
   'shot.sheet', 'shot.approve', 'shot.reject', 'shot.reopen',
   // The pipeline's gates and the series itself are a person's (studio/roles.mjs).
   'episode.list', 'episode.show', 'episode.add', 'episode.edit', 'episode.start', 'episode.review', 'episode.assemble',
-  'order.list', 'char.voice', 'project.bgm',
+  'order.list', 'char.voice', 'voice.list', 'project.bgm',
   // The Keys panel: the studio's model keys (studio/keys.mjs). The answer carries hints, never keys.
   'keys.get', 'keys.set', 'keys.test',
 ])
