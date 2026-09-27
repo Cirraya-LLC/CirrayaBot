@@ -51,19 +51,19 @@ export async function runAssembly(id, { store, stash, stashText, addAsset, newGe
     // Speech for everything the camera doesn't say.
     const cfg = tts.config()
     const voices = new Map((await db.q('select lower(name) as n, card from characters where project_id = $1', [p.id])).rows.map(r => [r.n, tts.voiceOf(r.card)]))
-    const narrator = tts.voiceOf({ voice: p.info?.narrator })
+    const narrator = tts.voiceOf({ voice: p.info?.narrator }, tts.DEFAULT_NARRATOR)
     let skipped = 0
     for (const s of plan) for (const [i, l] of s.lines.entries()) {
       if (l.kind === 'onscreen') continue
       if (!tts.ready(cfg)) { skipped++; continue }
       const v = l.kind === 'narration' ? narrator : voices.get(l.speaker.toLowerCase()) ?? tts.voiceOf({})
-      const hash = createHash('sha1').update(JSON.stringify([cfg.model, v.voice, v.instructions, l.text])).digest('hex').slice(0, 20)
+      const hash = createHash('sha1').update(JSON.stringify([cfg.model, v.voice, v.emotion, l.text])).digest('hex').slice(0, 20)
       let a = (await db.q(`select * from assets where project_id = $1 and kind = 'voice' and $2 = any(tags) and status = 'active' limit 1`, [p.id, `tts:${hash}`])).rows[0]
       if (!a) {
         const gen = await newGeneration(p, { engine: 'tts', model: cfg.model, kind: 'audio', prompt: l.text,
-          params: { voice: v.voice, instructions: v.instructions, speaker: l.speaker || '(narrator)' }, status: 'running', requested_by: 'studio' })
+          params: { voice: v.voice, emotion: v.emotion, speaker: l.speaker || '(narrator)' }, status: 'running', requested_by: 'studio' })
         try {
-          const out = await tts.speak(cfg, { text: l.text, voice: v.voice, instructions: v.instructions })
+          const out = await tts.speak(cfg, { text: l.text, voice: v.voice, emotion: v.emotion })
           const file = await stash(out.audio, { maxBytes: 50 * 1024 ** 2, mime: out.mime })
           a = await addAsset(p, file, { kind: 'voice', tags: [`tts:${hash}`, `voice:${v.voice}`], generation_id: gen, created_by: 'studio' })
           await finishGeneration(gen, { ok: true, outputs: [a.id] })

@@ -17,6 +17,8 @@ export const READ = new Set([
   'loc.list', 'loc.show', 'loc.refs',
   'asset.show', 'scene.list', 'scene.show', 'shot.show', 'review.history',
   'episode.list', 'episode.show',
+  // The speech account's voices (names only — never the key): what `char.voice` can be set to.
+  'voice.list',
   // Your own work orders: list them, close the kind only you can close (actions.mjs checks the role).
   'order.list', 'order.done',
 ])

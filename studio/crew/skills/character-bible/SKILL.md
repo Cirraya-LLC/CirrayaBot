@@ -31,8 +31,10 @@ description: 建立和维护角色包与场景资产：身份卡、转面图、�
 5. `studio asset save` 入库，**标签要完整**：角度、表情、光照、景别。摄影靠这些标签自动匹配参考图，
    标签缺失等于这张图不存在。
 6. 新角色、新 look 保持草稿态。参考图入库后片场会自动请人定稿（`char lock` 只有人类能做）。
-7. 给有台词的角色设声音：`studio char voice <角色> --voice <声音名> --instructions <音色描述>`。
-   画外音和旁白由 TTS 按它配音；出镜台词由 Seedance 生成，声音描述也写进身份卡的外形要点里。
+7. 给有台词的角色设声音：先 `studio voice list --query <关键词>`（如「少女」「沉稳」「青年」）看账号里有哪些
+   MiniMax 声音，再 `studio char voice <角色> --voice <voice_id> [--emotion calm]`。按角色年龄、性别、性格挑，
+   同一部片里两个角色不要用同一个声音。画外音和旁白由 MiniMax 按它配音；出镜台词由 Seedance 生成，
+   声音特点也写进身份卡的外形要点里。
 
 ## 被 route=asset 打回时
 

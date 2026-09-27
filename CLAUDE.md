@@ -354,8 +354,9 @@ Cost: `pnpm install` wipes them, so `run.sh` replays this every time.
 - **`pkill -f "<pattern>"` kills the shell that invoked it too**, because the pattern appears in its
   own command line. Symptom: the command exits `144` and none of the following statements run —
   while the preceding statements did run, so it looks like "changed but didn't take effect".
-  **Hit three times.** Always find the PID by port instead:
-  `ss -ltnp | grep -oP ':<port>\b.*pid=\K[0-9]+'`
+  **Hit seven times** (the seventh in 2.36, "cleaning up" a self-test that hung). Always find the PID
+  by port instead: `ss -ltnp | grep -oP ':<port>\b.*pid=\K[0-9]+'` — or, where `ss` isn't installed,
+  match `/proc/<pid>/cmdline` exactly. And a hung test is killed with `timeout`, never by pattern.
 - **Under `set -e`, `[ condition ] && { ... }` exits the whole script when the condition is false**
   (the whole expression returns non-zero). Use `if ... fi`.
 - **After changing `run.sh`, make sure the old process is really dead**: the new process quietly
@@ -1614,7 +1615,7 @@ Decisions the boss made after the phase-0 report (his words, then the meaning):
 | scenes: "导演用 scene add 把它拆成场次" | The human posts the script; the director cuts it into scenes (code, title, script text). Only a person edits the text |
 | "把步数上限做成按 agent 可配" | `MAX_STEPS` (12) becomes a per-agent setting — a reviewer's batch is 5 steps per shot |
 | "Seedance 我填自己的转发站", "和官方路径一致" | Base URL + key are config; the relay speaks ModelArk's `/api/v3/contents/generations/tasks` |
-| "每个 agent 用哪个上游、哪个模型 手动选择" | The importer leaves `model` empty (same state as agents seeded from `bots/`); a person picks it in Edit Agent |
+| "每个 agent 用哪个上游、哪个模型 手动选择" | The importer leaves `model` empty (same state as agents seeded from `bots/`); a person picks it in Edit Agent. **Superseded in 2.36**: an empty model is filled from the spec's candidates; a person's pick still wins |
 
 ### Shape
 
@@ -1816,7 +1817,8 @@ The boss, on fixing the spec to match: "可以，你来改，接下来不用每�
 - **Idempotent, and it never touches what a person chose**: a rerun updates name / job / persona and
   skill text only. Verified: gave 严青 an upstream, a model and `max_steps: 40`, reimported — all three
   still there; second run created nothing new.
-- **Agents are created without a model** (the boss: "手动选择"). `POST /api/bots` now accepts an
+- **Agents are created without a model** (the boss: "手动选择"; since 2.36 the platform fills an empty
+  one from the spec's candidates). `POST /api/bots` now accepts an
   explicitly empty `model: ''` on create — the state `bots/` seeds already start in, answered on the
   first chat with "no model chosen yet". Omitting the field, or emptying it on an edit, is still 400.
 - **The spec was edited only where it no longer matched what was built** (diff is in git): the tool
@@ -1863,7 +1865,7 @@ model is used). Then, asked:
   the e2e greps `studio.audit` and `settings` for the key it set.
 - The form shows only what was set **in the panel**; the .env/default value is the placeholder. Filled
   in instead, one Save would copy .env into the panel and later .env edits would silently stop working.
-- **Test costs nothing**: Seedance lists one task, GPT image and speech list models, ComfyUI
+- **Test costs nothing**: Seedance lists one task, GPT image lists models, speech (MiniMax, 2.36) lists voices, ComfyUI
   `GET /system_stats` (checked in ComfyUI's server.py).
   Test saves first if the form changed — that's what a person pressing it means. Results carry a
   `code` the UI translates (`key.t.*`).
@@ -2063,10 +2065,10 @@ see what they had been asked. The order is stored in their chat first now.
 - **On-camera lines are added to the Seedance prompt by the studio at `shot.gen`, with
   `generate_audio: true`** — a cinematographer who forgets them can't lose them. The prompt stored in
   the generation row is what was sent (lineage). Narration is never sent to Seedance.
-- Off-screen and narration: TTS (`studio/tts.mjs`), any OpenAI-compatible `/audio/speech`, set in the
-  Keys panel (`tts` group; empty base URL = off, the boss sets it later). A character's voice is
+- Off-screen and narration: TTS (`studio/tts.mjs`) — **MiniMax since 2.36** (it was OpenAI's
+  `/audio/speech` here), set in the Keys panel (`tts` group; no key = off). A character's voice is
   `card.voice` (`char.voice`, allowed on a locked character — the voice isn't the look), the narrator's
-  `info.narrator`. Speech is cached per (model, voice, instructions, text) as a `voice` asset.
+  `info.narrator`. Speech is cached per (model, voice, emotion, text) as a `voice` asset.
 - **The cut** (`assembly.mjs` + `media.mjs assemble`): picked takes in script order, each cut to
   `trim_to` or its planned length, every segment re-encoded to one size / rate / sound format
   (Seedance mixes 10-bit HEVC and H.264, with and without sound — concatenating mixed streams makes
@@ -2340,6 +2342,93 @@ Verified: a fake `uname` (Darwin) + a fake engine with 3.9 GB → small-box ceil
 the real deployment rerun unchanged; the "not running" message with the daemon down. **Not verified**:
 a real Mac, Docker Desktop, arm64 builds of the four images.
 
+## 2.36 A fixed four-person crew, out of the box; MiniMax speech (2026-09-27)
+
+The boss: "把角色固定为导演、美术、摄影、审片，配好对应技能和默认参数，尽量简化做成开箱即用，tts用minimax"
+(fix the roles as director / art / cinematography / review, give them their skills and default
+parameters, make it work out of the box as far as possible, TTS on MiniMax), plus a link to a Feishu
+wiki to learn from (see the end). Asked, he chose:
+
+| Asked | The boss chose |
+| --- | --- |
+| The model, now that "手动选择" stands in the way of out-of-the-box | "自动选，人改了就以人为准" — fill an empty model from a candidate list; a person's pick wins |
+| What "fixed roles" means | "启动即有四人剧组，岗位锁定" — seeded on start, can't be deleted, roles can't move |
+
+### The crew is built in (`web/crew.mjs`)
+
+- With the studio on, `ensureCrew` runs at startup **before `db.seed`**, so a new studio deployment has
+  the four crew members instead of bots/' generic three. It only adds what is missing: a renamed,
+  re-prompted or re-modelled member is left alone. Skills and the `剧组` group (shared machine, the
+  director as lead) are made **once per database** (`settings crew.seeded`); a group a person later
+  disbands is not brought back. An existing `剧组` holding all four (from an earlier import) is adopted.
+- **Roles are set from the app, not the studio**: the studio starts after the app (it needs the role
+  `provisionStudio` makes), so `ensureRoles` retries `crew.set` every 10 s until it answers. Every start —
+  a role removed by hand comes back.
+- Locked: `DELETE /api/bots/crew-*` → 400 (`crew.fixed`), and **`crew.set` left `PANEL_ACTIONS`**. The
+  studio's own `crew.set` still exists (the seeding and the e2e setup use it as `human`, straight at the
+  studio). The settings page shows who holds each role, click → Edit crew member.
+- The pipeline still picks the role-holder **in the project's group**, so the e2e's own crews and old
+  crews on the test deployment keep working beside the built-in one.
+- Defaults live in the spec, `agents/<role>.md`: `模型候选` / `推理强度` / `步数上限` (set on creation only).
+  Reviewer's candidates are Opus → GPT-5.6 Sol only: deepseek-flash has never been seen judging a sheet.
+- **An empty model is filled** (`pickModel`): the first candidate the upstream's `/models` lists — exact,
+  else a listed id containing it once punctuation is dropped, shortest first (`anthropic/claude-sonnet-5`
+  over `…-thinking`). Saved on the agent with `fillModel` (`… where model = ''`), so the editor shows it,
+  and a person's choice is never overwritten. Runs on the first turn (`providerFor`) and after an
+  upstream is added, edited or made default. Nothing matches → nothing guessed; the turn says "pick a
+  model". The editor preselects the same pick (`pickCandidate` in app.js — the same rule, keep them equal).
+- New project: **one prompt (the name)**; the id is made up (a Chinese title makes no slug, 2.15) and
+  the crew group is its notice group from the start (`/api/studio/status` → `crew_group`).
+- `studio/crew/import.mjs` stays, for bringing text up to the spec; it's now importable (`loadSpec`) —
+  its CLI part only runs when executed directly.
+
+### MiniMax speech (`studio/tts.mjs`)
+
+- `POST {base}/v1/t2a_v2`, `voice_setting {voice_id, speed, vol, pitch, emotion?}`, mp3 32 kHz; the audio
+  comes back **hex** in `data.audio`. ⚠️ **Errors come with HTTP 200** and a non-zero
+  `base_resp.status_code` (1004 auth, 1002/1039 rate limit, 2013 bad input) — the status line says nothing.
+- Base `https://api.minimax.cn` by default (the docs' domain moved there from minimaxi.com; mainland);
+  international is `https://api.minimax.io`. **A key only works on the site that issued it** — the Test
+  says so on a 1004. A trailing `/v1` is stripped. Model `speech-2.8-hd` by default.
+- `voice.list` (readable by the crew and the page): `POST /v1/get_voice {voice_type:'all'}` — system,
+  cloned and designed voices; cached 10 min. The art director's skill says to pick from it; the page's
+  voice boxes suggest from it (`<datalist>`). An emotion (MiniMax's nine) replaces OpenAI's free-text
+  "instructions", which is now ignored when read.
+- Defaults: `male-qn-qingse` for an unknown speaker, `Chinese (Mandarin)_News_Anchor` for the narrator —
+  both from MiniMax's own docs. A voice name left over from the OpenAI days (`sage`, `onyx`) fails that
+  line (`tts_failed` in the cut's log); the cut goes on.
+- ⚠️ **`TTS_*` from `.env` never reached the studio container** (compose didn't pass them) since 2.31 —
+  only the Keys panel ever worked. Passed now; checked: a key in `.env` shows as `source: env`.
+- ⚠️ keys.mjs's Test can't import tts.mjs: tts.mjs imports keys.mjs, and **with the self-test's top-level
+  await the cycle never finishes loading** — the process just hangs, no error. It does its own fetch.
+
+### Verified / not verified
+
+Verified: all self-tests; `studio/e2e.mjs`; `e2e-workbench`; `e2e-platform` on the existing test
+deployment, now also checking the built-in crew (four `fixed`, roles set on start, the status names
+their group, delete → 400, the panel can't move a role), a model picked on upstream change (the plain
+variant) and a chosen one kept — **mutation-checked**: let the fill overwrite and "a person's choice
+stays" fails — and speech in MiniMax's shape (text, voice, emotion, hex audio, the art director setting
+a voice from `voice.list`). **A fresh deployment** (`COMPOSE_PROJECT_NAME=mafresh`, `MODULES=studio`):
+started with exactly the four, 5 skills, `剧组`, the roles; adding an upstream that lists
+`deepseek-flash` and `gpt-5.6-sol` gave each the right model at once. In a browser (zh-Hans): new
+project from its name alone with the crew group preselected, the fixed crew list, the voice box
+suggesting the account's voices, saving a voice + emotion, no delete on a built-in member, the model
+preselected, the MiniMax Test; zero page errors.
+
+Not verified: **the real MiniMax API** (no key here — a fake built from its documented shapes; the docs
+were read on 2026-09-27); `e2e-cli` wasn't rerun (the CLI path isn't touched, `providerFor` returns
+before the new code for a runtime); podman; the Flutter client (it shows the crew as ordinary agents
+and can still offer Delete — the server refuses).
+
+### Learning from the Feishu doc
+
+The link (`my.feishu.cn/wiki/X3pGw8I5Gi6E1fkMqQpcP5ZBnHd`) needs a Feishu login; search names it a
+**MiniMax Hub** tutorial. MiniMax Hub (now `design.minimax.io`): a five-step pipeline (idea → canvas →
+skill reuse → local asset center → review checkpoints), four parallel agents (copy / image / video /
+audio), one canvas with script, storyboard, video, music and editing as connected nodes, a skills square
+(short drama, storyboard, ads…), one-click export to Adobe tools. Ideas only; nothing built from it yet.
+
 ## 3. What runs now
 
 ```bash
@@ -2370,6 +2459,7 @@ node studio/keys.mjs       # self-test for the Keys panel's studio side (see 2.2
 node studio/e2e-workbench.mjs <deploy dir>  # the workbench: board, shot page, files by range, a person reviewing (see 2.30)
 MODULES=… ./start.sh / MEM_MB=4096 ./start.sh   # modules → profiles; size .env as if for a 4 GB box (see 2.30)
 node studio/crew/import.mjs --self-test     # the crew spec parses the way the importer needs
+node web/crew.mjs          # self-test for the built-in crew: seeding, picking a model from the candidates (see 2.36)
 docker compose exec app node studio/crew/import.mjs   # import the crew into a deployment (see 2.28)
 python3 check-bots.py      # check the seed definitions in bots/
 

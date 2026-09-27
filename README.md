@@ -306,7 +306,7 @@ its own job.
    goes to you (take a take yourself, or hand it back with a note).
 5. When every shot is approved, the studio **cuts the episode by itself**: the takes in order,
    each trimmed to its shot's length, 9:16 at 720×1280, narration and off-screen lines spoken by
-   TTS in each character's voice, subtitles burned in and as an `.srt`. H.264 — plays everywhere.
+   MiniMax in each character's voice, subtitles burned in and as an `.srt`. H.264 — plays everywhere.
    Every take is levelled to the same loudness and the finished cut to −14 LUFS (what short-video
    platforms normalise to); subtitles break between words, two lines at most, above the bottom
    15% of a vertical frame. Optional background music (Project settings → a music file and a
@@ -317,22 +317,39 @@ its own job.
 Every order is visible (who has what, and a stuck one says why); the crew group gets a one-line
 report per order. Anything that needs a person — the script, the two gates, locking — is yours.
 
-Setting it up:
+**The crew is built in.** With the studio on, the first start creates the four crew members —
+顾衡 director (the group's lead), 苏棠 art director, 林野 cinematographer, 严青 reviewer — with their
+skills, a group `剧组` that shares one machine, and their studio roles. The roles are fixed: the four
+can be renamed, re-modelled or re-prompted, not deleted, and a role can't move to someone else. Each
+starts with its own defaults:
 
-1. Model keys: sidebar → **Keys** (each card has a **Test** that costs nothing), or in `.env` before
-   `./start.sh`. What the panel holds wins over `.env`; either way the keys live in the studio
-   only. Seedance: ModelArk, or a relay with the same paths. GPT image: OpenAI, or a relay (base
-   includes `/v1`). ComfyUI on this machine: `http://host.docker.internal:8188`. **Speech (TTS)**:
-   anything speaking OpenAI's `/audio/speech` — empty means narration stays in the subtitles only.
-2. Import the crew — 4 Agents, 5 skills, a group (one shared machine), their studio roles:
-   `docker compose exec app node studio/crew/import.mjs` (safe to rerun; `--dry-run` shows the plan).
-3. In **Edit crew member**, give each one an upstream and a model. Suggested (details in
-   `studio/crew/README.md`): director Claude Opus 5.5 (effort high), art director GPT-5.6 Sol,
-   cinematographer Claude Sonnet 5 (medium), reviewer Claude Opus 5.5 (**must accept images**);
-   `deepseek-flash` is the budget choice for the first three.
-4. In the workbench, create the project (vertical 9:16 by default) and, in **Project settings**,
-   pick the crew's group as its notice group and a narrator voice. Each character's voice is set in
-   the **Bible**.
+| Member | Model, first one your upstream has | Effort | Steps |
+| --- | --- | --- | --- |
+| Director | claude-opus-5-5 → deepseek-flash | high | 30 |
+| Art director | gpt-5.6-sol → deepseek-flash | medium | 30 |
+| Cinematographer | claude-sonnet-5 → deepseek-flash | medium | 40 |
+| Reviewer (**must see images**) | claude-opus-5-5 → gpt-5.6-sol | high | 40 |
+
+A member without a model gets the first of its list that its upstream offers (a relay's spelling,
+like `anthropic/claude-opus-5.5`, counts), and it's saved on the member — pick another in **Edit crew
+member** any time; a model you picked is never replaced. If the upstream has none of them, the
+member says so on its first turn.
+
+Setting it up — three steps:
+
+1. **Model upstreams** (⚙, it opens by itself on the first visit): add one. The crew picks its models.
+2. **Keys** (sidebar, `K`; each card has a **Test** that costs nothing): Seedance (ModelArk, or a
+   relay with the same paths), GPT image (OpenAI or a relay; base includes `/v1`) or ComfyUI
+   (`http://host.docker.internal:8188` on this machine), and **MiniMax speech** — just the API key
+   (mainland `https://api.minimax.cn` by default; an international key needs
+   `https://api.minimax.io`). Keys can also go in `.env` before `./start.sh`; the panel wins, and
+   either way they live in the studio only. Without a speech key narration stays in the subtitles.
+3. **New project** in the workbench: just a name. It is vertical 9:16 and reports to the crew's
+   group. In **Project settings** pick a narrator voice and in the **Bible** each character's — the
+   boxes list your MiniMax account's voices (cloned ones included) — plus an optional emotion.
+
+`docker compose exec app node studio/crew/import.mjs` brings an existing crew's names, personas and
+skills up to the latest spec in `studio/crew/` (it never touches a model you chose).
 
 Generation is limited to 40 videos an hour and 4 at once per project (`SEEDANCE_PER_HOUR` /
 `SEEDANCE_CONCURRENT`, or per project in its settings). Studio files live in the `studiodata`
@@ -359,7 +376,7 @@ work in the client, on the same data as the web UI. Details in `app/README.md`.
 - **Containers have no egress restrictions** — Agents can reach anything on the internet.
 - **Seedance's own voices vary from shot to shot**: on-camera dialogue is generated with the picture
   (lips match), so the same character may not sound identical in every shot. Narration and
-  off-screen lines use one fixed TTS voice per character.
+  off-screen lines use one fixed MiniMax voice per character.
 - **A shared-machine group shares one browser**, and everyone in it can change everyone's files —
   that is the point, and the cost.
 - **1080p / 4K takes are 10-bit HEVC**, which many Chrome / Firefox setups can't play: the workbench

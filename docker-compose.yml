@@ -111,6 +111,10 @@ services:
       GPT_IMAGE_API_KEY: ${GPT_IMAGE_API_KEY:-}
       GPT_IMAGE_MODEL: ${GPT_IMAGE_MODEL:-gpt-image-1}
       COMFY_URL: ${COMFY_URL:-}
+      # MiniMax speech (narration, off-screen lines). Empty base = https://api.minimax.cn.
+      TTS_BASE_URL: ${TTS_BASE_URL:-}
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_MODEL: ${TTS_MODEL:-}
     # A ComfyUI on this machine is reachable as http://host.docker.internal:8188 (COMFY_URL).
     extra_hosts:
       - "host.docker.internal:host-gateway"
