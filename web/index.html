@@ -12,6 +12,13 @@
     document.documentElement.dataset.theme =
       t === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : t
     if (localStorage.getItem('ma_rail') === '1') document.documentElement.classList.add('rail')
+    // Widths someone dragged the two sidebars to. Clamped again (against the
+    // window) by app.js; here only the hard limits, so nothing absurd paints.
+    var w = [['ma_wide', '--wide', 220, 480], ['ma_side2', '--side2', 240, 520]]
+    for (var i = 0; i < w.length; i++) {
+      var v = +localStorage.getItem(w[i][0])
+      if (v) document.documentElement.style.setProperty(w[i][1], Math.min(w[i][3], Math.max(w[i][2], v)) + 'px')
+    }
   } catch (e) {}
 </script>
 <style>
@@ -153,6 +160,20 @@
   /* Collapsed, the name is the only thing left to identify a row by. One
      floating tip serves the whole rail — an absolutely positioned one would be
      clipped by the conversation list's own scrolling. */
+  /* Drag handles on the inner edge of each sidebar. Zero-width flex items, so
+     they take no room; the hit area hangs 3px either side of the border. While
+     one is dragged, html.resizing turns the width transitions off — the panel
+     follows the pointer instead of trailing 200ms behind it. */
+  .grip{flex:none;width:0;position:relative;z-index:4}
+  .grip::before{content:'';position:absolute;top:0;bottom:0;left:-3px;width:6px;cursor:col-resize}
+  .grip::after{content:'';position:absolute;top:0;bottom:0;left:-1px;width:2px;background:var(--accent);
+               opacity:0;transition:opacity var(--dur2) var(--ease)}
+  .grip:hover::after,.grip:focus-visible::after,html.resizing .grip.on::after{opacity:.7}
+  .grip:focus-visible{outline:none}
+  html.rail #gripL,#gripR:has(+ .side2.hide){display:none}
+  html.resizing,html.resizing *{cursor:col-resize!important;user-select:none!important}
+  html.resizing aside,html.resizing .side2,html.resizing .cbody,html.resizing .frest{transition:none}
+
   #tip{position:fixed;z-index:60;transform:translateY(-50%);background:var(--panel);color:var(--ink);
        border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:12.5px;
        white-space:nowrap;pointer-events:none;box-shadow:0 6px 20px var(--shadow);max-width:260px;
@@ -378,6 +399,7 @@
     </div>
   </div>
 </aside>
+<div class="grip" id="gripL" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-title="side.resize"></div>
 <div id="tip" hidden></div>
 <div id="menu" role="menu" hidden></div>
 
@@ -404,6 +426,7 @@
   </div>
 </main>
 
+<div class="grip" id="gripR" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-title="side.resize"></div>
 <div class="side2" id="side2">
   <div class="s2h" data-i18n="s2.members"></div>
   <div id="members"></div>

@@ -38,6 +38,7 @@ const Map<String, List<String>> workbenchStrings = {
   ],
   'wb.listSep': [', ', '、', '、'],
   'wb.hideRight': ['Hide side panel', '收起右栏', '收合右欄'],
+  'wb.resize': ['Drag to resize · double-click to reset', '拖动调整宽度 · 双击恢复默认', '拖曳調整寬度 · 按兩下還原預設'],
   'wb.collapseSidebar': ['Collapse sidebar', '收起侧栏', '收合側欄'],
   'wb.expandSidebar': ['Expand sidebar', '展开侧栏', '展開側欄'],
   'wb.showRight': ['Show side panel', '展开右栏', '展開右欄'],

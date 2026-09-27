@@ -38,6 +38,7 @@ const M = {
   'side.skills': ['Skill library', '技能库', '技能庫'],
   'side.noMatch': ['No matching conversations', '没有匹配的会话', '沒有符合的對話'],
   'side.noMessages': ['No messages yet', '还没说过话', '還沒有訊息'],
+  'side.resize': ['Drag to resize · double-click to reset', '拖动调整宽度 · 双击恢复默认', '拖曳調整寬度 · 按兩下還原預設'],
   'side.collapse': ['Collapse sidebar', '收起侧栏', '收合側欄'],
   'side.expand': ['Expand sidebar', '展开侧栏', '展開側欄'],
 

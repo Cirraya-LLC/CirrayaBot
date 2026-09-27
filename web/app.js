@@ -136,6 +136,74 @@ window.addEventListener('blur', hideTip)
 // Paints the toggle's icon and label for the state the <head> script restored.
 setRail(railOn())
 
+// ═══ Resizing the two sidebars ═══
+// Drag the inner edge; double-click it (or Home on the keyboard) for the default.
+// The chat in the middle always keeps MIN_CENTRE, so widening one side never
+// squeezes it away. The preference is kept as dragged; the window only clamps
+// what is shown, so shrinking the window and growing it back restores it.
+const MIN_CENTRE = 380
+const SIDES = {
+  gripL: { v: '--wide', key: 'ma_wide', def: 308, min: 220, max: 480, el: () => $('aside'), other: () => sideWidth('gripR') },
+  gripR: { v: '--side2', key: 'ma_side2', def: 290, min: 240, max: 520, el: () => $('#side2'), other: () => sideWidth('gripL') },
+}
+const wanted = {}
+function sideWidth(id) {
+  const s = SIDES[id], el = s.el()
+  if (id === 'gripL' && railOn()) return 72
+  if (id === 'gripR' && el.classList.contains('hide')) return 0
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(s.v)) || s.def
+}
+function setSide(id, px, save) {
+  const s = SIDES[id]
+  const room = innerWidth - s.other() - MIN_CENTRE
+  const w = Math.round(Math.max(s.min, Math.min(s.max, room, px)))
+  document.documentElement.style.setProperty(s.v, `${w}px`)
+  $(`#${id}`).setAttribute('aria-valuenow', w)
+  if (save) {
+    wanted[id] = px
+    try { px === s.def ? localStorage.removeItem(s.key) : localStorage.setItem(s.key, String(w)) } catch {}
+  }
+}
+for (const [id, s] of Object.entries(SIDES)) {
+  const grip = $(`#${id}`)
+  try { wanted[id] = +localStorage.getItem(s.key) || s.def } catch { wanted[id] = s.def }
+  grip.setAttribute('aria-valuemin', s.min)
+  grip.setAttribute('aria-valuemax', s.max)
+  grip.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    grip.setPointerCapture(e.pointerId)
+    grip.classList.add('on')
+    document.documentElement.classList.add('resizing')
+    hideTip()
+    const edge = id === 'gripL' ? s.el().getBoundingClientRect().left : s.el().getBoundingClientRect().right
+    const move = ev => setSide(id, id === 'gripL' ? ev.clientX - edge : edge - ev.clientX, false)
+    const up = ev => {
+      grip.removeEventListener('pointermove', move)
+      grip.removeEventListener('pointerup', up)
+      grip.removeEventListener('pointercancel', up)
+      grip.classList.remove('on')
+      document.documentElement.classList.remove('resizing')
+      setSide(id, sideWidth(id), true)
+    }
+    grip.addEventListener('pointermove', move)
+    grip.addEventListener('pointerup', up)
+    grip.addEventListener('pointercancel', up)
+  })
+  grip.addEventListener('dblclick', () => setSide(id, s.def, true))
+  grip.addEventListener('keydown', e => {
+    const step = e.shiftKey ? 48 : 16, dir = id === 'gripL' ? 1 : -1
+    const d = { ArrowRight: step * dir, ArrowLeft: -step * dir }[e.key]
+    if (d) setSide(id, sideWidth(id) + d, true)
+    else if (e.key === 'Home') setSide(id, s.def, true)
+    else return
+    e.preventDefault()
+  })
+}
+const fitSides = () => { for (const id of Object.keys(SIDES)) setSide(id, wanted[id], false) }
+window.addEventListener('resize', fitSides)
+fitSides()
+
 let BOTS = [], CONVS = [], cur = null, busy = false, filter = ''
 const bot = id => BOTS.find(b => b.id === id)
 
