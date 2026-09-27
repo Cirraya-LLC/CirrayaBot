@@ -9,10 +9,12 @@ library;
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../data/api.dart';
+import '../../data/settings.dart';
 import '../../l10n.dart';
 import 'browser_view.dart';
 import 'editors.dart';
@@ -22,15 +24,20 @@ import '../settings/providers_page.dart';
 import '../settings/skills_page.dart';
 import 'message_view.dart';
 
-/// Expanded and collapsed widths of the conversation list.
+/// Collapsed width of the conversation list. Expanded it is whatever the
+/// sidebar was dragged to ([_wide]).
 ///
 /// Everything inside stays laid out at [_wide] and is clipped, so collapsing
 /// animates one number and nothing reflows — the labels fade, the avatars do
 /// not move. [_rail] is chosen so the 34px avatar (8px list padding + 11px row
 /// padding) is already centred in the rail.
-const double _wide = 308;
 const double _rail = 72;
-const double _side2 = 290;
+
+/// How far each side can be dragged, and what the chat in the middle always
+/// keeps — widening one side never squeezes the conversation away.
+const _wideMin = 220.0, _wideMax = 480.0;
+const _side2Min = 240.0, _side2Max = 520.0;
+const _minCentre = 380.0;
 
 class WorkbenchPage extends StatefulWidget {
   const WorkbenchPage({
@@ -39,6 +46,9 @@ class WorkbenchPage extends StatefulWidget {
     required this.onEditServer,
     required this.collapsed,
     required this.onCollapsed,
+    this.sidebarWidth = Settings.defaultSidebarWidth,
+    this.panelWidth = Settings.defaultPanelWidth,
+    this.onResized,
   });
 
   final Workbench bench;
@@ -47,6 +57,12 @@ class WorkbenchPage extends StatefulWidget {
   /// Restored from the settings file; [onCollapsed] writes it back.
   final bool collapsed;
   final ValueChanged<bool> onCollapsed;
+
+  /// The widths the two sidebars were dragged to; [onResized] writes them back
+  /// when a drag ends.
+  final double sidebarWidth;
+  final double panelWidth;
+  final void Function(double sidebar, double panel)? onResized;
 
   @override
   State<WorkbenchPage> createState() => _WorkbenchPageState();
@@ -63,6 +79,20 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   final _scaffold = GlobalKey<ScaffoldState>();
   bool _rightOpen = true;
   late bool _railed = widget.collapsed;
+
+  // What was asked for; [_wide] and [_side2] are that, clamped to the window.
+  late double _wantWide = widget.sidebarWidth;
+  late double _wantSide2 = widget.panelWidth;
+  double _wide = Settings.defaultSidebarWidth;
+  double _side2 = Settings.defaultPanelWidth;
+
+  /// Which edge is being dragged. While one is, the widths follow the pointer
+  /// instead of trailing 200ms behind it.
+  String? _dragging;
+
+  /// The row under the pointer while collapsed: it gets a ring, not a row-wide
+  /// highlight — a band cut off by the rail's edge is what flashed before.
+  String? _hoverRow;
 
   /// Kept across builds so a row's tooltip can be shown on keyboard focus —
   /// Tooltip only opens itself on hover.
@@ -283,9 +313,93 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     _toBottom();
   }
 
+  /// Clamps what was asked for against the window. The preference itself is
+  /// kept, so shrinking the window and growing it back restores it.
+  void _fitWidths(double window, bool narrow) {
+    final right = narrow || !_rightOpen ? 0.0 : _side2;
+    final left = _railed ? _rail : _wide;
+    double room(double min, double max, double taken) =>
+        (window - taken - _minCentre).clamp(min, max).toDouble();
+    _wide = _wantWide.clamp(_wideMin, room(_wideMin, _wideMax, right)).toDouble();
+    _side2 = _wantSide2.clamp(_side2Min, room(_side2Min, _side2Max, left)).toDouble();
+  }
+
+  // Where the drag started and the width then. The width is recomputed from
+  // the pointer's absolute position, so the edge stays under the cursor —
+  // summing deltas loses the drag-start slop and lags behind it.
+  double _dragFrom = 0, _dragBase = 0;
+
+  void _dragStart(String edge, DragStartDetails d) {
+    setState(() {
+      _dragging = edge;
+      _dragFrom = d.globalPosition.dx;
+      _dragBase = edge == 'left' ? _wide : _side2;
+    });
+  }
+
+  void _dragTo(String edge, DragUpdateDetails d) {
+    final dx = d.globalPosition.dx - _dragFrom;
+    setState(() {
+      if (edge == 'left') {
+        _wantWide = (_dragBase + dx).clamp(_wideMin, _wideMax);
+      } else {
+        _wantSide2 = (_dragBase - dx).clamp(_side2Min, _side2Max);
+      }
+    });
+  }
+
+  void _dragDone() {
+    // What fits is what gets kept — not a width the window has no room for
+    // right now. Clamped here, not read from the last build: a quick flick can
+    // end before a frame has been laid out with the new width.
+    _fitWidths(MediaQuery.sizeOf(context).width, _narrow(context));
+    setState(() {
+      _dragging = null;
+      _wantWide = _wide;
+      _wantSide2 = _side2;
+    });
+    widget.onResized?.call(_wantWide, _wantSide2);
+  }
+
+  void _resetWidth(String edge) {
+    setState(() {
+      if (edge == 'left') {
+        _wantWide = Settings.defaultSidebarWidth;
+      } else {
+        _wantSide2 = Settings.defaultPanelWidth;
+      }
+    });
+    widget.onResized?.call(_wantWide, _wantSide2);
+  }
+
+  /// The drag handle on a sidebar's inner edge: 6px of hit area straddling the
+  /// border, an accent line while hovered or dragged. Double-click resets it.
+  Widget _grip(String edge) {
+    final active = _dragging == edge;
+    return Tooltip(
+      message: tr('wb.resize'),
+      waitDuration: const Duration(milliseconds: 700),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: GestureDetector(
+          key: ValueKey('grip-$edge'),
+          behavior: HitTestBehavior.opaque,
+          dragStartBehavior: DragStartBehavior.down,
+          onHorizontalDragStart: (d) => _dragStart(edge, d),
+          onHorizontalDragUpdate: (d) => _dragTo(edge, d),
+          onHorizontalDragEnd: (_) => _dragDone(),
+          onHorizontalDragCancel: _dragDone,
+          onDoubleTap: () => _resetWidth(edge),
+          child: _GripLine(active: active),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final narrow = _narrow(context);
+    _fitWidths(MediaQuery.sizeOf(context).width, narrow);
     return CallbackShortcuts(
       bindings: {
         // The conventional toggle everywhere else. The Agent's browser is a
@@ -299,11 +413,22 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       // disappearing. Hiding it outright left its toggle doing nothing, and a
       // new macOS window starts at 800 wide — so on a Mac it never showed.
       endDrawer: narrow ? Drawer(width: _side2, shape: const RoundedRectangleBorder(), child: _right()) : null,
-      body: Row(
+      body: Stack(
         children: [
-          _sidebar(),
-          Expanded(child: _centre()),
-          if (!narrow) _rightPane(),
+          Row(
+            children: [
+              _sidebar(),
+              Expanded(child: _centre()),
+              if (!narrow) _rightPane(),
+            ],
+          ),
+          // Over the borders rather than in the Row: a handle has to be
+          // grabbable on both sides of the line, and a Row child cannot take
+          // hits outside its own box.
+          if (!_railed)
+            Positioned(left: _wide - 3, top: 0, bottom: 0, width: 6, child: _grip('left')),
+          if (!narrow && _rightOpen)
+            Positioned(right: _side2 - 3, top: 0, bottom: 0, width: 6, child: _grip('right')),
         ],
       ),
     ),
@@ -312,7 +437,9 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 
   /// Zero when the desktop asks for less motion: the end state, no travel.
   Duration _motion(BuildContext context) =>
-      MediaQuery.disableAnimationsOf(context) ? Duration.zero : const Duration(milliseconds: 200);
+      MediaQuery.disableAnimationsOf(context) || _dragging != null
+          ? Duration.zero
+          : const Duration(milliseconds: 200);
 
   // ── left ──────────────────────────────────────────────────────────────
   Widget _sidebar() {
@@ -584,6 +711,17 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       onFocusChange: (has) {
         if (has && _railed) key.currentState?.ensureTooltipVisible();
       },
+      onHover: (h) {
+        if (h == (_hoverRow == c.id)) return;
+        setState(() => _hoverRow = h ? c.id : null);
+      },
+      // Collapsed, the row is still laid out at full width and clipped, so a
+      // ripple or highlight painted across it showed as a band of the expanded
+      // row. The rail's feedback is the ring on the avatar instead.
+      splashFactory: _railed ? NoSplash.splashFactory : null,
+      highlightColor: _railed ? Colors.transparent : null,
+      hoverColor: _railed ? Colors.transparent : null,
+      focusColor: _railed ? Colors.transparent : null,
       borderRadius: BorderRadius.circular(10),
       child: Container(
         margin: const EdgeInsets.only(top: 2),
@@ -607,6 +745,11 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                         BoxShadow(color: C.accent, spreadRadius: 4),
                         BoxShadow(color: C.side, spreadRadius: 2),
                       ],
+                    )
+                  : _railed && _hoverRow == c.id
+                  ? BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [BoxShadow(color: C.raise, spreadRadius: 3)],
                     )
                   : null,
               child: c.isGroup
@@ -1256,6 +1399,31 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 }
 
 Widget _heading(String text) => Text(text, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600));
+
+/// The visible part of a resize handle: nothing until hovered or dragged,
+/// then a 2px accent line down the border.
+class _GripLine extends StatefulWidget {
+  const _GripLine({required this.active});
+  final bool active;
+  @override
+  State<_GripLine> createState() => _GripLineState();
+}
+
+class _GripLineState extends State<_GripLine> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+    onEnter: (_) => setState(() => _hover = true),
+    onExit: (_) => setState(() => _hover = false),
+    child: Center(
+      child: AnimatedOpacity(
+        opacity: _hover || widget.active ? .7 : 0,
+        duration: const Duration(milliseconds: 130),
+        child: Container(width: 2, color: C.accent),
+      ),
+    ),
+  );
+}
 
 bool _narrow(BuildContext context) => MediaQuery.sizeOf(context).width < 1180;
 

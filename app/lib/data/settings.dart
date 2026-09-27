@@ -20,7 +20,12 @@ class Settings {
     this.lang = 'en',
     this.theme = ThemeMode.system,
     this.sidebarCollapsed = false,
+    this.sidebarWidth = defaultSidebarWidth,
+    this.panelWidth = defaultPanelWidth,
   });
+
+  static const double defaultSidebarWidth = 308;
+  static const double defaultPanelWidth = 290;
 
   /// e.g. `http://192.168.1.10:8080`. No trailing slash — normalised on the
   /// way in so every call site can just append a path.
@@ -37,6 +42,11 @@ class Settings {
   /// Whether the conversation list is showing as a rail.
   final bool sidebarCollapsed;
 
+  /// Widths someone dragged the conversation list and the right panel to.
+  /// The page clamps them against the window; these are what was asked for.
+  final double sidebarWidth;
+  final double panelWidth;
+
   bool get configured => baseUrl.isNotEmpty;
 
   Settings copyWith({
@@ -45,12 +55,16 @@ class Settings {
     String? lang,
     ThemeMode? theme,
     bool? sidebarCollapsed,
+    double? sidebarWidth,
+    double? panelWidth,
   }) => Settings(
     baseUrl: normaliseUrl(baseUrl ?? this.baseUrl),
     token: token ?? this.token,
     lang: lang ?? this.lang,
     theme: theme ?? this.theme,
     sidebarCollapsed: sidebarCollapsed ?? this.sidebarCollapsed,
+    sidebarWidth: sidebarWidth ?? this.sidebarWidth,
+    panelWidth: panelWidth ?? this.panelWidth,
   );
 
   Map<String, Object?> toJson() => {
@@ -59,6 +73,8 @@ class Settings {
     'lang': lang,
     'theme': theme.name,
     'sidebarCollapsed': sidebarCollapsed,
+    'sidebarWidth': sidebarWidth,
+    'panelWidth': panelWidth,
   };
 
   static Settings fromJson(Map<String, Object?> j) => Settings(
@@ -67,6 +83,8 @@ class Settings {
     lang: (j['lang'] as String?) ?? 'en',
     theme: parseTheme(j['theme'] as String?),
     sidebarCollapsed: (j['sidebarCollapsed'] as bool?) ?? false,
+    sidebarWidth: (j['sidebarWidth'] as num?)?.toDouble() ?? defaultSidebarWidth,
+    panelWidth: (j['panelWidth'] as num?)?.toDouble() ?? defaultPanelWidth,
   );
 
   /// Anything unrecognised means "follow the desktop" — the answer that is

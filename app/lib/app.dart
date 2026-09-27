@@ -121,6 +121,12 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
                 _settings = _settings.copyWith(sidebarCollapsed: v);
                 widget.store.save(_settings).ignore();
               },
+              sidebarWidth: _settings.sidebarWidth,
+              panelWidth: _settings.panelWidth,
+              onResized: (side, panel) {
+                _settings = _settings.copyWith(sidebarWidth: side, panelWidth: panel);
+                widget.store.save(_settings).ignore();
+              },
             ),
     );
   }

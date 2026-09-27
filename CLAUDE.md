@@ -1511,6 +1511,33 @@ is enough), and "你把软件名字改为 CirrayaBot" (call the software Cirraya
   everyone's saved server), compose project, database and image names, the export format string.
   macOS `PRODUCT_NAME` stays too: the Xcode test target's `TEST_HOST` points at `multi_agent.app`.
 
+### Dragging the widths (2026-09-27)
+
+The boss: "左右侧栏需要可以自由调节宽度 以及现在左侧栏收缩之后点击还会有未收缩状态下的白色闪烁动画"
+(both sidebars need a freely adjustable width; and clicking in the collapsed sidebar flashes the
+expanded state in white).
+
+- Drag the inner edge of either sidebar; double-click (web also Home) resets. Left 220–480, right
+  240–520, and **the chat keeps 380px** — the window only clamps what is shown, the dragged value is
+  kept, so shrinking the window and growing it back restores it. Web: `--wide` / `--side2` set on
+  `<html>`, stored in `ma_wide` / `ma_side2` and restored by the `<head>` script before first paint;
+  the grips are zero-width flex items (`.grip`, `role=separator`, arrow keys ±16). Client:
+  `Settings.sidebarWidth` / `panelWidth`, grips `Positioned` over the borders in a `Stack` (a Row
+  child can't take hits outside its own box). Collapsed, there is no left grip; a closed right panel
+  has none either.
+- **While dragging, the width transitions are off** (`html.resizing`; `_dragging` → `Duration.zero`),
+  or the edge trails the pointer by 200ms.
+- ⚠️ Client: compute the width from the pointer's **absolute** position since the drag started
+  (`DragStartBehavior.down`), not by summing `delta` — the drag slop is lost and the edge lags the
+  cursor. And **clamp on release yourself** instead of reading the last build: a quick flick can end
+  before a frame is laid out, and the old width got written back (the test caught this).
+- ⚠️ **The flash was the client's InkWell, and it wasn't in the rail at all.** Ink (hover highlight,
+  press ripple) paints on the nearest `Material` — the Scaffold's, **outside** the sidebar's
+  `ClipRect` — so the full-width row's highlight showed as a grey block over the chat, 72→300px.
+  A capture of only the rail's 72px showed nothing; the full-width frames showed it at once.
+  Collapsed rows now use `NoSplash` + transparent highlight/hover/focus, with a hover ring on the
+  avatar like the web. The web never had it (its `.conv` background is off in `html.rail`).
+
 ### The right panel
 
 Closing it is the same move (width 290 → 0, contents pinned and clipped, `AnimatedContainer` +
