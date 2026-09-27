@@ -1,0 +1,48 @@
+# This deployment's subscription-backed images and fully offline local speech.
+# Included by COMPOSE_FILE in .env; no media service publishes a host port.
+services:
+  studio:
+    networks:
+      - default
+      - local-tts
+
+  codex-image:
+    image: multi-agent-cli
+    profiles: [studio]
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+    command: [node, /opt/cirraya-image/server.mjs]
+    environment:
+      CODEX_IMAGE_TOKEN: ${CODEX_IMAGE_TOKEN:-}
+      NODE_OPTIONS: --max-old-space-size=1024
+    volumes:
+      - clihome:/home/node
+      - ./deploy/codex-image:/opt/cirraya-image:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8092/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+
+  local-tts:
+    build: ./deploy/local-tts
+    profiles: [studio]
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+    environment:
+      LOCAL_TTS_TOKEN: ${LOCAL_TTS_TOKEN:-}
+    networks:
+      - local-tts
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  local-tts:
+    internal: true

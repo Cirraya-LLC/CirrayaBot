@@ -3,18 +3,20 @@
 // All state lives in PostgreSQL (web/db.mjs); agents work in their own containers (one per agent);
 // model upstreams are configured in the UI — several of them, switchable at any time — not hard-coded in .env.
 //
-// Auth: put ?k=<ACCESS_TOKEN> in the URL once, then a cookie carries it. Without a token we only listen on 127.0.0.1.
+// Auth: deployments may use a password-only browser session; otherwise ?k=<ACCESS_TOKEN> sets the auth cookie.
 import { env, ROOT } from './env.mjs'
 import * as db from './db.mjs'
 import { fitContext, listModels, probeContext, estimateUsage } from './model.mjs'
 import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
+import { isPasswordHash, makePasswordSession, SESSION_MAX_AGE, verifyPassword, verifyPasswordSession } from './password.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
 import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT } from './sandbox.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import * as studio from './studio.mjs'
+import * as crews from './crews.mjs'
 import * as mcp from './mcp.mjs'
 import { RUNTIMES, RUNTIME_IDS, GROK_ENV, turnArgs, grokMcpBlock, reader, needsLogin,
   loginArgs, logoutArgs, statusArgs, statusOf, loginPrompt, plain } from './cli.mjs'
@@ -30,8 +32,10 @@ const WORKROOT = join(ROOT, 'workspace')
 
 const CFG = {
   token: env.ACCESS_TOKEN || '',
+  loginPasswordHash: env.LOGIN_PASSWORD_HASH || '',
+  proxySecret: env.WEB_PROXY_SECRET || '',
   port:  Number(env.WEB_PORT || 8080),
-  host:  env.BIND_HOST || (env.ACCESS_TOKEN ? '0.0.0.0' : '127.0.0.1'),
+  host:  env.BIND_HOST || (env.ACCESS_TOKEN || env.LOGIN_PASSWORD_HASH ? '0.0.0.0' : '127.0.0.1'),
   tools: env.AGENT_TOOLS === 'on',
 }
 
@@ -67,23 +71,25 @@ const loadBots = async (lang = 'en') => (await db.listAgents()).map(r => toBot(r
 /** Groups and direct chats mixed together, sorted by last activity — that's what an IM looks like. */
 async function listConversations(lang) {
   const bots = await loadBots(lang)
+  const bindings = await crews.list()
+  const groups = await db.listGroups()
   const last = await db.lastMessages()
   const cut = (s, n) => String(s ?? '').replace(/\s+/g, ' ').slice(0, n)
   const items = bots.map(b => {
     const m = last.get(`dm:${b.id}`)
     return {
       kind: 'agent', id: b.id, name: b.name, tag: b.description, color: b.color,
-      members: [b.id],
+      members: [b.id], project_id: bindings.find(c => groups.find(g => g.id === c.group_id)?.members.includes(b.id))?.project_id ?? null,
       preview: m ? (m.speaker === studio.STUDIO_SPEAKER ? tr(lang, 'conv.said', { who: tr(lang, 'conv.studio'), text: cut(m.content, 60) })
         : m.role === 'user' ? tr(lang, 'conv.youSaid', { text: cut(m.content, 60) }) : cut(m.content, 60)) : '',
       at: m?.at ?? 0,
     }
   })
-  for (const g of await db.listGroups()) {
+  for (const g of groups) {
     const m = last.get(`group:${g.id}`)
     items.push({
       kind: 'group', id: g.id, name: g.name, tag: tr(lang, 'conv.members', { n: g.members.length }), lead: g.lead ?? '',
-      members: g.members,
+      members: g.members, project_id: bindings.find(c => c.group_id === g.id)?.project_id ?? null,
       colors: g.members.map(id => bots.find(b => b.id === id)?.color).filter(Boolean),
       preview: m ? tr(lang, 'conv.said', {
         who: m.speaker === USER_SPEAKER ? tr(lang, 'conv.user') : m.speaker === studio.STUDIO_SPEAKER ? tr(lang, 'conv.studio') : m.speaker,
@@ -154,13 +160,19 @@ function askApproval(ctx, onTool, name, args) {
  * Fed to him in direct chats too: a real employee doesn't forget this morning's group chat just because the window changed.
  */
 async function groupRecallFor(bot) {
-  const groups = (await db.listGroups()).filter(g => g.members.includes(bot.id))
+  const bound = await crews.forAgent(bot.id)
+  const groups = (await db.listGroups()).filter(g => g.members.includes(bot.id) && (!bound || g.id === bound.group_id))
   const chunks = []
   for (const g of groups) {
     const log = await db.recent('group', g.id, 30)
     if (log.length) chunks.push(`[Group: ${g.name}]\n` + log.map(e => `[${modelSpeaker(e.speaker)}] ${e.content}`).join('\n'))
   }
   return chunks.join('\n\n')
+}
+
+async function projectIdentity(bot) {
+  const c = await crews.forAgent(bot.id)
+  return c ? `\n\n当前唯一项目编号：${c.project_id}。你只属于这个项目的独立剧组，Studio 已限制项目访问；无需让用户选择项目。` : ''
 }
 
 function systemFor(bot, memory, peers, box, recall, skills = [], lead = null, studioRole = null, shared = null) {
@@ -807,6 +819,8 @@ function cliPrompt(messages) {
  * agent's CLI state stays apart.
  */
 async function runCli(p, messages, onDelta, onTool, ctx) {
+  // A stream can close while the database/context is loading, before this listener exists.
+  if (ctx.signal?.aborted) throw new Say('chat.aborted')
   if (!CLIMOD.container) throw new Say('cli.off')
   const rt = p.runtime
   const spec = RUNTIMES[rt]
@@ -1012,7 +1026,7 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate, from
     const tools = await toolsFor(bot)
     const ctx = { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, tools, maxSteps: bot.max_steps ?? undefined, ...gate }
     const full = await runAgent(p,
-      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id), null, await studio.roleOf(bot.id).catch(() => null), await sharedName(bot.id)) },
+      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id), null, await studio.roleOf(bot.id).catch(() => null), await sharedName(bot.id)) + await projectIdentity(bot) },
        ...prior, { role: 'user', content: text }],
       onDelta, onTool, ctx)
     await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full, reasoning: ctx.reasoning })
@@ -1025,7 +1039,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
     const tools = await toolsFor(bot)
-    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead, await studio.roleOf(bot.id).catch(() => null), await sharedName(bot.id)) }]
+    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead, await studio.roleOf(bot.id).catch(() => null), await sharedName(bot.id)) + await projectIdentity(bot) }]
     for (const e of await db.recent('group', groupId, FETCH_MAX)) {
       messages.push(e.speaker === bot.name
         ? { role: 'assistant', content: e.content, ...e.reasoning ? { reasoning_content: e.reasoning } : {} }   // what he said himself
@@ -1382,9 +1396,12 @@ async function postOrder(req) {
   // The studio knows roles, not groups: of the agents with this role, the one in the project's
   // group gets it (a second film's crew is a second group); otherwise the studio's first choice.
   const g = str(b.group) ? (await db.listGroups()).find(x => x.id === str(b.group)) : null
+  const binding = g && await crews.forGroup(g.id)
+  if (binding && b.project !== binding.project_id) return [400, { ok: false, error: 'work order project/crew mismatch' }]
   const known = new Set((await db.listAgents()).map(a => a.id))
   const ids = (Array.isArray(b.candidates) ? b.candidates : []).filter(x => typeof x === 'string' && known.has(x))
-  const pick = ids.find(id => g?.members.includes(id)) ?? ids[0]
+  // A missing member is an error, never a fallback to another project's same-role member.
+  const pick = g ? ids.find(id => g.members.includes(id)) : null
   const bot = pick ? await db.getAgent(pick) : null
   if (!bot) return [404, { ok: false, error: 'none of the crew members with this role exists on the platform' }]
   if (g && str(b.report)) await withGroup(g.id, () => db.addMessage('group', g.id,
@@ -1409,15 +1426,43 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 
 // Compared as hashes of equal length, so the time taken says nothing about how much of a guess was right.
 const digest = v => createHash('sha256').update(String(v)).digest()
-const sameToken = v => v != null && timingSafeEqual(digest(v), digest(CFG.token))
-const cookieToken = req => {
+const sameToken = v => !!CFG.token && v != null && timingSafeEqual(digest(v), digest(CFG.token))
+const cookieValue = (req, name) => {
   for (const part of (req.headers.cookie ?? '').split(';')) {
     const i = part.indexOf('=')
-    if (i > 0 && part.slice(0, i).trim() === 'ma_token') return decodeURIComponent(part.slice(i + 1).trim())
+    if (i > 0 && part.slice(0, i).trim() === name) {
+      try { return decodeURIComponent(part.slice(i + 1).trim()) } catch { return null }
+    }
   }
   return null
 }
+const cookieToken = req => cookieValue(req, 'ma_token')
+const passwordSession = req => cookieValue(req, '__Host-ma_session')
+const secureRequest = req => req.socket.encrypted || (CFG.proxySecret && req.headers['x-forwarded-proto'] === 'https' &&
+  req.headers['x-login-proxy-token'] != null && timingSafeEqual(digest(req.headers['x-login-proxy-token']), digest(CFG.proxySecret)))
+const LOGIN_WINDOW_MS = 15 * 60_000
+const LOGIN_MAX_FAILURES = 5
+const loginFailures = new Map()
+const loginIp = req => String(req.headers['x-forwarded-for'] ?? '').split(',').map(s => s.trim()).filter(Boolean).at(-1)
+  || req.socket.remoteAddress || 'unknown'
+function loginBlockedFor(ip, now = Date.now()) {
+  const entry = loginFailures.get(ip)
+  if (!entry) return 0
+  if (now - entry.startedAt >= LOGIN_WINDOW_MS) { loginFailures.delete(ip); return 0 }
+  return entry.failures >= LOGIN_MAX_FAILURES ? LOGIN_WINDOW_MS - (now - entry.startedAt) : 0
+}
+function recordLoginFailure(ip, now = Date.now()) {
+  const entry = loginFailures.get(ip)
+  if (!entry || now - entry.startedAt >= LOGIN_WINDOW_MS) loginFailures.set(ip, { startedAt: now, failures: 1 })
+  else entry.failures++
+  if (loginFailures.size > 4096) loginFailures.delete(loginFailures.keys().next().value)
+}
 function authed(req, url) {
+  if (CFG.loginPasswordHash) {
+    if (verifyPasswordSession(passwordSession(req), CFG.loginPasswordHash)) return true
+    // Keep the native client/API credential working, but never let a pasted token link open the browser UI.
+    return url.pathname.startsWith('/api/') && sameToken(url.searchParams.get('k'))
+  }
   if (!CFG.token) return true                       // no guard when only listening locally
   return sameToken(url.searchParams.get('k')) || sameToken(cookieToken(req))
 }
@@ -1429,6 +1474,21 @@ const readBody = async req => {
   let v
   try { v = JSON.parse(b) } catch { throw new Say('body.notJson') }
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Say('body.notObject')
+  return v
+}
+const readLoginBody = async req => {
+  let size = 0, tooLarge = false
+  const chunks = []
+  for await (const c of req) {
+    size += c.length
+    if (size > 4096) tooLarge = true
+    else chunks.push(c)
+  }
+  if (tooLarge) throw Object.assign(new Error('request too large'), { status: 413 })
+  let v
+  try { v = JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+  catch { throw Object.assign(new Error('invalid request'), { status: 400 }) }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw Object.assign(new Error('invalid request'), { status: 400 })
   return v
 }
 const str = v => (typeof v === 'string' ? v : '')
@@ -1443,7 +1503,10 @@ async function checkAgent(b, selfId = null) {
     // Group logs identify people by name: duplicate names make two agents take each other's words as their own,
     // and one named like the user marker (or "User", as the model sees it) would take the human's words as its own
     if ([USER_SPEAKER, studio.STUDIO_SPEAKER].some(r => r.toLowerCase() === name.toLowerCase())) throw new Say('agent.nameReserved', { name })
-    const clash = (await db.listAgents()).find(a => a.id !== selfId && a.name.toLowerCase() === name.toLowerCase())
+    const existing = selfId ? await db.getAgent(selfId) : null
+    if (existing && await crews.forAgent(selfId) && name !== existing.name)
+      throw Object.assign(new Error('独立剧组的固定成员名称不能更改。'), { status: 400 })
+    const clash = existing?.name === name ? null : (await db.listAgents()).find(a => a.id !== selfId && a.name.toLowerCase() === name.toLowerCase())
     if (clash) throw new Say('agent.exists', { name: clash.name })
     out.name = name
   }
@@ -1529,6 +1592,14 @@ async function checkGroup(b, cur = null) {
     const known = new Set((await db.listAgents()).map(a => a.id))
     const members = [...new Set(b.members)].filter(m => known.has(m))
     if (members.length < 2) throw new Say('group.tooFew')
+    const fixed = cur && await crews.forGroup(cur.id)
+    if (fixed && (members.length !== cur.members.length || members.some(id => !cur.members.includes(id))))
+      throw Object.assign(new Error('项目剧组固定四个岗位；新项目请新建独立剧组。'), { status: 400 })
+    for (const id of members) {
+      const bound = await crews.forAgent(id)
+      if (bound && bound.group_id !== cur?.id)
+        throw Object.assign(new Error('该成员属于独立项目，不能加入其他剧组。请新建项目 / 剧组。'), { status: 400 })
+    }
     out.members = members
   }
   // The lead must be in the group. If members changed and the lead was removed, fall back to "not set"
@@ -1578,11 +1649,69 @@ const server = createServer(async (req, res) => {
     if (!replies.length) { res.writeHead(202); return res.end() }
     return send(200, Array.isArray(msg) ? replies : replies[0])
   }
-  if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
+  if (CFG.loginPasswordHash && url.pathname === '/api/auth/login' && req.method === 'POST') {
+    res.setHeader('cache-control', 'no-store')
+    if (!secureRequest(req)) return send(426, { error: 'https_required' })
+    if (!/^application\/json\b/i.test(String(req.headers['content-type'] ?? ''))) return send(415, { error: 'json_required' })
+    const origin = req.headers.origin
+    if (origin) {
+      try {
+        const parsed = new URL(origin)
+        if (parsed.protocol !== 'https:' || parsed.host.toLowerCase() !== String(req.headers.host ?? '').toLowerCase())
+          return send(403, { error: 'same_origin_required' })
+      } catch { return send(403, { error: 'same_origin_required' }) }
+    }
+    let body
+    try { body = await readLoginBody(req) }
+    catch (e) { return send(e.status ?? 400, { error: 'invalid_request' }) }
+    const ip = loginIp(req), wait = loginBlockedFor(ip)
+    if (wait) {
+      res.setHeader('retry-after', String(Math.ceil(wait / 1000)))
+      return send(429, { error: 'rate_limited' })
+    }
+    const password = str(body.password)
+    const ok = password.length > 0 && password.length <= 1024 && await verifyPassword(password, CFG.loginPasswordHash)
+    if (!ok) {
+      recordLoginFailure(ip)
+      const retry = loginBlockedFor(ip)
+      if (retry) res.setHeader('retry-after', String(Math.ceil(retry / 1000)))
+      return send(retry ? 429 : 401, { error: retry ? 'rate_limited' : 'invalid_password' })
+    }
+    loginFailures.delete(ip)
+    const cookie = `__Host-ma_session=${makePasswordSession(CFG.loginPasswordHash)}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; Secure; SameSite=Lax`
+    res.setHeader('set-cookie', [cookie, 'ma_token=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'])
+    return send(200, { ok: true })
+  }
+  if (CFG.loginPasswordHash && url.pathname === '/api/auth/logout' && req.method === 'POST') {
+    res.setHeader('cache-control', 'no-store')
+    res.setHeader('set-cookie', `__Host-ma_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`)
+    return send(200, { ok: true })
+  }
+  if (CFG.loginPasswordHash && req.method === 'GET' &&
+      (url.pathname === '/' || url.pathname === '/index.html') && url.searchParams.has('k')) {
+    const langArg = url.searchParams.get('lang')
+    res.writeHead(303, { location: langArg ? `/?lang=${encodeURIComponent(langArg)}` : '/', 'cache-control': 'no-store' })
+    return res.end()
+  }
+  if (CFG.loginPasswordHash && !authed(req, url)) {
+    res.setHeader('cache-control', 'no-store')
+    if (req.method === 'GET' && url.pathname === '/login.js')
+      return send(200, await readFile(join(WEB, 'login.js'), 'utf8'), MIME['.js'])
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+      if (url.pathname === '/index.html') {
+        const langArg = url.searchParams.get('lang')
+        res.writeHead(303, { location: langArg ? `/?lang=${encodeURIComponent(langArg)}` : '/', 'cache-control': 'no-store' })
+        return res.end()
+      }
+      return send(200, await readFile(join(WEB, 'login.html'), 'utf8'), MIME['.html'])
+    }
+    return send(401, { error: 'login_required' })
+  }
+  if (!CFG.loginPasswordHash && !authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
   // HttpOnly: no script on the page can read it. Lax, not Strict: Strict would drop it when the page is
   // opened from a link in another app, and every write here is a POST/PUT/PATCH/DELETE, which Lax
   // already keeps from other sites. Secure when a TLS proxy in front says the request was https.
-  if (CFG.token && sameToken(url.searchParams.get('k'))) {
+  if (!CFG.loginPasswordHash && CFG.token && sameToken(url.searchParams.get('k'))) {
     const https = req.headers['x-forwarded-proto'] === 'https' || req.socket.encrypted
     res.setHeader('set-cookie', `ma_token=${encodeURIComponent(CFG.token)}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`)
   }
@@ -1633,6 +1762,7 @@ const server = createServer(async (req, res) => {
     }
     if (bm && req.method === 'DELETE') {
       if (!await db.getAgent(bm[1])) return send(404, { error: t('err.noAgent') })
+      if (await crews.forAgent(bm[1])) return send(400, { error: '固定剧组成员不能单独删除，旧项目及记录会保留。' })
       await db.deleteAgent(bm[1])
       // Delete the container too — an ownerless container only wastes memory,
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
@@ -1926,7 +2056,8 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       // target: {type:'agent'|'group', id}. botIds is the old field, kept for compatibility.
-      const { target, botIds = [], text = '' } = await readBody(req)
+      const { target, botIds = [], text = '', request_id = randomUUID() } = await readBody(req)
+      if (typeof text !== 'string' || text.length > 20000) return send(400, { error: '消息最多 20000 字。' })
       const all = await loadBots()
       let bots, groupId = null
       if (target?.type === 'group') {
@@ -1941,6 +2072,10 @@ const server = createServer(async (req, res) => {
         bots = all.filter(b => botIds.includes(b.id))
       }
       if (!bots?.length || !text.trim()) return send(400, { error: t('chat.needTarget') })
+      if (!groupId && bots.length > 1) {
+        for (const b of bots) if (await crews.forAgent(b.id))
+          return send(400, { error: '独立项目成员只能在所属剧组或单独私聊中工作。' })
+      }
 
       // Resolve everyone's upstream first: if one is missing, say so before opening the stream, not halfway through a group relay
       const providers = new Map()
@@ -1953,10 +2088,60 @@ const server = createServer(async (req, res) => {
       // 6 people × 12 steps of upstream calls and keep running commands in containers with nobody watching.
       const ac = new AbortController()
       res.on('close', () => { if (!res.writableEnded) ac.abort() })
-
-      await converse(bots, groupId, providers, text, emit, ac.signal, lang)
+      const heartbeat = setInterval(() => { if (!res.destroyed) res.write(': keep-alive\n\n') }, 15000)
+      try {
+        const bound = groupId && await crews.forGroup(groupId)
+        if (bound && await crews.enabled()) {
+          let decision
+          const p = (await db.pool.query('select name,info from studio.projects where id=$1', [bound.project_id])).rows[0]
+          if (crews.explicitNew(text)) decision = { intent: 'new', name: crews.titleOf(text.replace(/^.*?(?:项目|剧组|作品)\s*[：:，,]?\s*/u, '')) }
+          else if (/^(?:好[的]?|可以|继续|确认|收到|谢谢|进度[？?]?|你好|在吗)[。！!？?]?$/u.test(text.trim())) decision = { intent: 'continue' }
+          else if (p.info?.awaiting_brief) {
+            // A manually created empty crew receives its first brief, not a second new crew.
+            decision = { intent: 'continue' }
+            await db.pool.query("update studio.projects set info=info || $2::jsonb where id=$1",
+              [bound.project_id, JSON.stringify({ origin_brief: text, awaiting_brief: false })])
+          }
+          else {
+            emit('note', { text: '正在识别本次需求是否需要独立项目…' })
+            const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(45000)])
+            // No persona, history, memories, skills, or tools reach this separate routing turn.
+            const lead = bots[0]
+            const provider = { ...providers.get(lead.id), effort: 'low' }
+            const messages = [{ role: 'system', content: crews.ROUTER_SYSTEM }, { role: 'user', content: JSON.stringify({
+              current: { name: p.name, brief: String(p.info?.origin_brief ?? '').slice(0, 800) }, message: text }) }]
+            let raw
+            if (provider.runtime) raw = await runCli(provider, messages, null, null,
+              { bot: { id: `router-${groupId}` }, signal, tools: [], scope: 'group', scopeId: groupId, lang, maxSteps: 1 })
+            else raw = (await callModel(provider, messages, null, { bare: true, signal })).content
+            decision = crews.routingResult(raw)
+          }
+          if (ac.signal.aborted) return res.end()
+          if (decision.intent === 'new') {
+            const made = await crews.create({ name: decision.name, brief: text, request_id })
+            studio.forgetCrew()
+            groupId = made.group_id
+            const g = (await db.listGroups()).find(g => g.id === groupId)
+            bots = (await loadBots(lang)).filter(b => g.members.includes(b.id))
+            providers.clear()
+            for (const b of bots) providers.set(b.id, await providerFor(b))
+            emit('crew', { conversation: (await listConversations(lang)).find(c => c.kind === 'group' && c.id === groupId), bots })
+            emit('note', { text: '已创建独立项目和四岗位剧组，当前上下文为空；旧剧组记录保留。' })
+          }
+        }
+        await converse(bots, groupId, providers, text, emit, ac.signal, lang)
+      } catch (e) {
+        emit('error', { message: `${errorText(e, lang)}；如需新项目，可点“新建项目 / 剧组”或发送“新项目：需求”。` })
+      } finally { clearInterval(heartbeat) }
       emit('done', {})
       return res.end()
+    }
+
+    if (url.pathname === '/api/crews' && req.method === 'POST') {
+      const b = await readBody(req)
+      const made = await crews.create({ name: b.name, request_id: b.request_id })
+      studio.forgetCrew()
+      return send(200, made)
     }
 
     // Groups: an entity with a name and members
@@ -1978,6 +2163,7 @@ const server = createServer(async (req, res) => {
       return send(200, saved)
     }
     if (gm && req.method === 'DELETE') {         // disband; files in the shared drive are left alone
+      if (await crews.forGroup(gm[1])) return send(400, { error: '独立剧组和项目记录会保留；新作品请新建项目 / 剧组。' })
       const g = (await db.listGroups()).find(x => x.id === gm[1])
       await db.deleteGroup(gm[1])
       if (g) dropContainersOf(g.members)
@@ -2061,6 +2247,19 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/studio/call' && req.method === 'POST') {
       const { action, args = {} } = await readBody(req)
       if (!studio.PANEL_ACTIONS.has(action)) return send(400, { error: t('studio.notPanel', { action: String(action) }) })
+      if (action === 'project.create' && await crews.enabled()) {
+        const made = await crews.create({ name: args.name, id: args.id, info: args.info, request_id: args.request_id })
+        studio.forgetCrew()
+        const r = await studio.call('human', 'project.info', { project: made.project_id })
+        return send(r.ok ? 200 : 502, r.ok ? r.result : { error: r.error?.message })
+      }
+      if (action === 'project.edit') {
+        const bound = (await crews.list()).find(c => c.project_id === args.project)
+        if (bound && args.notify_group !== undefined && args.notify_group !== bound.group_id)
+          return send(400, { error: '一个项目固定一个独立剧组，不能改派到其他剧组。' })
+      }
+      if (action === 'crew.set' && await crews.forAgent(args.agent_id))
+        return send(400, { error: '独立剧组已固定四个职责，不需要重新分配岗位。' })
       const r = await studio.call('human', action, args)
       if (action === 'crew.set') studio.forgetCrew()      // a new role takes effect on the next turn, not in 30 s
       return r.ok ? send(200, r.result) : send(r.status || 502, { error: r.error?.message ?? 'studio error', code: r.error?.code })
@@ -2113,9 +2312,18 @@ or point it at an existing database:
   process.exit(1)
 }
 
+if (CFG.loginPasswordHash && !isPasswordHash(CFG.loginPasswordHash)) {
+  console.error('LOGIN_PASSWORD_HASH has an unsupported or invalid format; refusing to start.')
+  process.exit(1)
+}
+if (CFG.loginPasswordHash && !CFG.proxySecret) {
+  console.error('WEB_PROXY_SECRET is required when password login is enabled; refusing to start.')
+  process.exit(1)
+}
+
 // No auth + listening publicly = a (possibly shell-capable) backend exposed on the internet.
 // That combination can only be a misconfiguration, so refuse to start rather than print a warning nobody reads.
-if (!CFG.token && !['127.0.0.1', 'localhost', '::1'].includes(CFG.host)) {
+if (!CFG.token && !CFG.loginPasswordHash && !['127.0.0.1', 'localhost', '::1'].includes(CFG.host)) {
   console.error(`Refusing to start: BIND_HOST=${CFG.host} listens publicly, but ACCESS_TOKEN is not set.
 Set one in .env (./start.sh generates it), or change BIND_HOST back to 127.0.0.1.`)
   process.exit(1)
@@ -2236,7 +2444,7 @@ tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))
 
 
 server.listen(CFG.port, CFG.host, () => {
-  console.log(`CirrayaBot  http://${CFG.host}:${CFG.port}${CFG.token ? `/?k=${CFG.token}` : ''}`)
-  if (!CFG.token) console.log('(ACCESS_TOKEN not set; only listening on 127.0.0.1)')
+  console.log(`CirrayaBot  http://${CFG.host}:${CFG.port}${CFG.loginPasswordHash ? ' (password login enabled)' : CFG.token ? `/?k=${CFG.token}` : ''}`)
+  if (!CFG.token && !CFG.loginPasswordHash) console.log('(ACCESS_TOKEN not set; only listening on 127.0.0.1)')
   if (!CFG.tools) console.log('(AGENT_TOOLS is off; agents can only talk, not act)')
 })

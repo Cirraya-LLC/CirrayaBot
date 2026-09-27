@@ -175,6 +175,13 @@ alter table messages add column if not exists reasoning text not null default ''
 -- Weak isolation (2.31): the members of a group marked shared_machine work on ONE machine, the
 -- group's, with the group's drive as their desk — a film crew passes files all day.
 alter table groups add column if not exists shared_machine bool not null default false;
+-- A project owns one crew for its entire lifetime. Never reuse its members in another crew.
+create table if not exists project_crews (
+  project_id text primary key,
+  group_id text not null unique references groups(id),
+  request_id text unique,
+  created_at timestamptz not null default now()
+);
 alter table messages drop constraint if exists messages_role_check;
 alter table messages add constraint messages_role_check check (role in ('user','assistant','tool'));
 `

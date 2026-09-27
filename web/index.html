@@ -272,7 +272,17 @@
   .wsb .lead{color:var(--dim);font-size:13px;margin:0 0 14px;max-width:760px}
   .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
   .chip{background:var(--chip);color:var(--chipink);border-radius:14px;padding:3px 11px;font-size:12px;white-space:nowrap}
-  @media (max-width:760px){ .quota{display:none} .wsb{padding:12px} }
+  @media (max-width:760px){
+    .quota{display:none} .wsb{padding:12px}
+    body>.side2{display:none} #htoggle{display:none}
+    html:not(.rail) aside{position:fixed;inset:0 auto 0 0;z-index:30;box-shadow:6px 0 25px var(--shadow)}
+    html:not(.rail) main{margin-left:var(--rail)}
+    main>header{padding:10px;gap:8px}
+    main>header>div:nth-child(2){min-width:0;flex:1}
+    .hsub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    main .log{padding:12px 10px} main .composer{padding:8px}
+    main .msg{gap:6px} main .mwrap{max-width:calc(100% - 36px)}
+  }
   .chip.on{background:var(--accent);color:var(--onacc)}
   /* Seven states side by side: shared out across the width, scrolling sideways only when a
      column would drop below 140px — a board you have to scroll to see "approved" hides the point. */
@@ -515,6 +525,8 @@
     </div>
   </div>
   <div class="proj" id="proj" hidden>
+    <button class="fitem" id="newcrew" title="自动配好四岗位，开启干净上下文"><b>＋</b> <span>新建项目 / 剧组</span></button>
+    <button class="fitem" id="crewchat"><b>💬</b> <span>给当前剧组发消息</span></button>
     <label class="fitem cur" data-tip-key="ws.project"><b>🎬</b> <select id="wsproj" data-i18n-aria-label="ws.project"></select></label>
     <button class="fitem" data-view="board" data-tip-key="ws.board"><b>▤</b> <span data-i18n="ws.board"></span></button>
     <button class="fitem" data-view="episodes" data-tip-key="ws.episodes"><b>▶</b> <span data-i18n="ws.episodes"></span></button>

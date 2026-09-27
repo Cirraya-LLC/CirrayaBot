@@ -1,5 +1,7 @@
 # CirrayaBot Studio
 
+本机 Codex + 独立项目剧组 + 本地媒体部署说明：[deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md)。
+
 An open-source, AI-native short-drama studio: a crew of AI coworkers (director, art director,
 cinematographer, reviewer) making a vertical series episode by episode, and a workbench where a
 person writes the scripts, checks each stage and has the final say. From an episode's script to

@@ -178,7 +178,8 @@ export function startNotifier({ quietMs = Number(process.env.NOTIFY_QUIET_MS || 
       // Roles are the studio's, not per film, so there may be several directors. The platform picks
       // the one in this project's group; failing that, whoever works in this project; then anyone.
       const candidates = (await db.q(`select c.agent_id from crew c left join actor_project ap on ap.actor = 'agent:' || c.agent_id
-          where c.role = $1 order by (ap.project_id = $2) desc nulls last, c.agent_id`, [r.role, r.project_id])).rows.map(x => x.agent_id)
+          where c.role = $1 and (c.project_id is null or c.project_id = $2)
+          order by (ap.project_id = $2) desc nulls last, c.agent_id`, [r.role, r.project_id])).rows.map(x => x.agent_id)
       if (!candidates.length || !app || !token) {
         const why = !candidates.length ? `nobody on the crew is ${r.role}` : 'APP_URL / STUDIO_EVENT_TOKEN not set'
         await db.q(`update orders set status = 'stuck', error = $2 where id = any($1)`, [orders.map(o => o.id), why])
@@ -195,7 +196,7 @@ export function startNotifier({ quietMs = Number(process.env.NOTIFY_QUIET_MS || 
           const res = await fetch(`${app}/api/events/order`, {
             method: 'POST', signal: AbortSignal.timeout(Number(process.env.ORDER_TURN_MS || 45 * 60_000)),
             headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-            body: JSON.stringify({ candidates, text: composeOrders(orders, lang), group: p?.notify_group || '', report: reportLine(orders, lang) }),
+            body: JSON.stringify({ project: r.project_id, candidates, text: composeOrders(orders, lang), group: p?.notify_group || '', report: reportLine(orders, lang) }),
           })
           const j = await res.json().catch(() => ({}))
           if (j.agent) {

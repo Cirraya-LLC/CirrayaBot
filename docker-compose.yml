@@ -48,6 +48,8 @@ services:
     environment:
       DATABASE_URL: postgres://multiagent:${POSTGRES_PASSWORD}@db:5432/multiagent
       ACCESS_TOKEN: ${ACCESS_TOKEN:?run ./start.sh first to generate .env}
+      LOGIN_PASSWORD_HASH: ${LOGIN_PASSWORD_HASH:-}
+      WEB_PROXY_SECRET: ${WEB_PROXY_SECRET:-}
       AGENT_TOOLS: ${AGENT_TOOLS:-off}
       AGENT_IMAGE: ${AGENT_IMAGE:-multi-agent-worker:2}
       AGENT_MEMORY: ${AGENT_MEMORY:-2g}
@@ -105,6 +107,8 @@ services:
       # Model keys: here and nowhere else (not the app, not any agent container).
       SEEDANCE_BASE_URL: ${SEEDANCE_BASE_URL:-}
       SEEDANCE_API_KEY: ${SEEDANCE_API_KEY:-}
+      SEEDANCE_MODEL_20: ${SEEDANCE_MODEL_20:-dreamina-seedance-2-0-260128}
+      SEEDANCE_MODEL_25: ${SEEDANCE_MODEL_25:-dreamina-seedance-2-5-260628}
       SEEDANCE_PER_HOUR: ${SEEDANCE_PER_HOUR:-40}
       SEEDANCE_CONCURRENT: ${SEEDANCE_CONCURRENT:-4}
       GPT_IMAGE_BASE_URL: ${GPT_IMAGE_BASE_URL:-https://api.openai.com/v1}
