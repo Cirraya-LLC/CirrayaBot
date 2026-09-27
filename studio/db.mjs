@@ -47,6 +47,8 @@ create table if not exists actor_project (
   actor      text primary key,                  -- 'agent:<id>' or 'human'
   project_id text not null references projects(id) on delete cascade
 );
+-- Optional on generic deployments; fixed for isolated project crews.
+alter table crew add column if not exists project_id text references projects(id);
 
 create table if not exists characters (
   id          text primary key,

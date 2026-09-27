@@ -72,12 +72,27 @@ const server = createServer(async (req, res) => {
       const actor = parseActor(req.headers['x-studio-actor'])
       if (!actor) return send(400, { ok: false, error: { code: 'no_actor', message: 'x-studio-actor must be "human" or "agent:<id>"' } })
       const actorKey = actor.kind === 'human' ? 'human' : `agent:${actor.id}`
-      const { action, args = {} } = await readJson(req)
+      const { action, args: rawArgs = {} } = await readJson(req)
+      const args = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? { ...rawArgs } : {}
       const role = actor.kind === 'agent' ? await db.roleOf(actor.id) : null
       const why = deny(actor, role, String(action ?? ''))
       if (why) {
         await db.audit(actorKey, String(action ?? ''), '', false, why)
         return send(403, { ok: false, error: { code: 'forbidden', message: why } })
+      }
+      // Fixed crew members cannot enumerate, switch to, read or mutate another film.
+      // This is enforced here even if a client omits/misroutes its current-project pointer.
+      const bound = actor.kind === 'agent'
+        ? (await db.q('select project_id from crew where agent_id=$1', [actor.id])).rows[0]?.project_id : null
+      if (bound) {
+        if (args.project != null && args.project !== '' && args.project !== bound)
+          fail('project_scope', 'This crew member belongs to a different project.', 403)
+        args.project = bound
+        if (action === 'project.list') {
+          const p = await db.getProject(bound)
+          return send(200, { ok: true, result: [{ id: p.id, name: p.name }] })
+        }
+        if (action === 'project.current') return send(200, { ok: true, result: { project: bound } })
       }
       const handler = HANDLERS[action]
       if (!handler) return send(501, { ok: false, error: { code: 'not_implemented', message: `${action} is not available yet` } })

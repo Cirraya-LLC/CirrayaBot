@@ -95,6 +95,11 @@ function setRail(on) {
   hideTip()
 }
 $('#collapse').onclick = () => setRail(!railOn())
+const narrowScreen = matchMedia('(max-width:760px)')
+const fitMobile = () => { if (narrowScreen.matches) { setRail(true); $('#side2').classList.add('hide') } }
+narrowScreen.addEventListener('change', fitMobile)
+// Defer until tooltip helpers below have initialized.
+queueMicrotask(fitMobile)
 // A search box you cannot type in is a dead control, so the rail's magnifier
 // opens the sidebar and puts the cursor in the real one.
 $('#railsearch').onclick = () => { setRail(false); $('#q').focus() }
@@ -172,8 +177,8 @@ function avatar(c, cls = 'av') {
 // ═══ Left column ═══
 function renderConvs() {
   const box = $('#convs'); box.innerHTML = ''
-  const list = CONVS.filter(c => !filter ||
-    (c.name + c.tag + c.preview).toLowerCase().includes(filter.toLowerCase()))
+  const list = CONVS.filter(c => (c.kind === 'group' || !c.project_id || filter) && (!filter ||
+    (c.name + c.tag + c.preview).toLowerCase().includes(filter.toLowerCase())))
   if (!list.length) { box.innerHTML = `<div style="padding:14px;color:var(--dim2);font-size:12.5px">${esc(t('side.noMatch'))}</div>`; return }
   for (const c of list) {
     const on = cur && cur.kind === c.kind && cur.id === c.id
@@ -205,17 +210,24 @@ $('#q').oninput = e => { filter = e.target.value; renderConvs() }
 // doesn't match belongs to a conversation no longer on screen and must not be drawn.
 let shown = 0
 
-async function openConv(c) {
+async function openConv(c, { fresh = false } = {}) {
   wsLeave()
   const ticket = ++shown
   cur = { kind: c.kind, id: c.id }
+  if (c.project_id) {
+    WS.project = c.project_id
+    $('#wsproj').value = c.project_id
+    try { localStorage.setItem('ma_project', c.project_id) } catch {}
+  }
   const log = $('#log'); log.innerHTML = ''
   $('#hav').outerHTML = avatar(c).replace('class="av', 'id="hav" class="av')
   $('#htitle').textContent = c.name
   $('#hsub').textContent = c.kind === 'group'
     ? t('head.groupSub', { members: listJoin(c.members.map(id => bot(id)?.name ?? id)) })
     : (c.tag || '')
-  $('#in').placeholder = t(c.kind === 'group' ? 'comp.toGroup' : 'comp.toAgent', { name: c.name })
+  $('#in').placeholder = c.project_id && c.kind === 'group'
+    ? '直接发需求；新作品会自动建立独立剧组，也可说“新项目：…”' : t(c.kind === 'group' ? 'comp.toGroup' : 'comp.toAgent', { name: c.name })
+  if (c.project_id) $('#hsub').textContent += ' · 独立项目上下文'
   renderMembers(c)
   renderSpend(c)
   loadMemory(c)
@@ -223,7 +235,8 @@ async function openConv(c) {
   loadBotSkills()
   loadBrowsers()
 
-  if (!await drawHistory(c, ticket)) return
+  if (fresh) empty(c)
+  else if (!await drawHistory(c, ticket)) return
   renderConvs(); $('#in').focus(); $('#send').disabled = busy
 }
 
@@ -234,13 +247,13 @@ async function drawHistory(c, ticket) {
   const log = $('#log'); log.innerHTML = ''
   for (const e of hist) {
     if (e.role === 'tool') {
-      finishTool(toolLine(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, toolLabel(e.name, e.args)), e.output)
+      finishTool(toolLine(BOTS.find(b => b.name === e.speaker && (c.kind !== 'group' || c.members.includes(b.id)))?.id ?? c.id, toolLabel(e.name, e.args)), e.output)
       continue
     }
     // 'User' is the speaker the server stores for the person in group logs, 'Studio' the studio's notices
     // (both data, not UI text). A Studio notice is a user-role row but not something *you* said.
     if (c.kind === 'group' && e.speaker === 'Studio') bubble(null, false, t('st.speaker')).innerHTML = fmt(e.text)
-    else if (c.kind === 'group') bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User').innerHTML = fmt(e.text)
+    else if (c.kind === 'group') bubble(BOTS.find(b => b.name === e.speaker && c.members.includes(b.id))?.id ?? null, e.role === 'user' || e.speaker === 'User').innerHTML = fmt(e.text)
     // In a DM, a user-role row from "Studio" is a work order the studio sent this crew member.
     else if (e.speaker === 'Studio') bubble(null, false, t('st.speaker')).innerHTML = fmt(e.content)
     else bubble(c.id, e.role === 'user').innerHTML = fmt(e.content)
@@ -253,7 +266,7 @@ async function drawHistory(c, ticket) {
 function empty(c) {
   $('#log').innerHTML = c.kind === 'group'
     ? `<div class="empty"><h2>${esc(c.name)}</h2><p>${esc(t('empty.groupMembers', { members: listJoin(c.members.map(id => bot(id)?.name ?? id)) }))}</p>
-       <p>${esc(t('empty.groupHow'))}</p></div>`
+       <p>${esc(c.project_id ? '直接告诉剧组你想做什么。四个岗位已配好；新作品自动分到独立剧组，旧项目记录保留。' : t('empty.groupHow'))}</p></div>`
     : `<div class="empty"><h2>${esc(c.name)}</h2><p>${esc(c.tag)}</p>
        <p>${esc(t('empty.agentRecall'))}</p></div>`
 }
@@ -267,7 +280,7 @@ function renderMembers(c) {
     const el = document.createElement('div')
     el.className = 'mem'
     el.innerHTML = `<div class="av" style="background:${col(b.color)}">${esc(b.name.slice(0,1))}</div>
-      <span>${esc(b.name)}</span>${c.kind === 'group' && c.lead === id ? `<span class="lead">${esc(t('s2.lead'))}</span>` : ''}${c.kind === 'group' && ids.length > 2 ? `<span class="x" title="${esc(t('s2.remove'))}">×</span>` : ''}`
+      <span>${esc(b.name)}</span>${c.kind === 'group' && c.lead === id ? `<span class="lead">${esc(t('s2.lead'))}</span>` : ''}${c.kind === 'group' && !c.project_id && ids.length > 2 ? `<span class="x" title="${esc(t('s2.remove'))}">×</span>` : ''}`
     el.querySelector('.x')?.addEventListener('click', async ev => {
       ev.stopPropagation()
       await patchGroup(c.id, { members: ids.filter(x => x !== id) })
@@ -275,7 +288,7 @@ function renderMembers(c) {
     el.onclick = ev => { if (!ev.target.classList.contains('x')) editBot(b) }
     box.appendChild(el)
   }
-  $('#addmem').style.display = c.kind === 'group' ? '' : 'none'
+  $('#addmem').style.display = c.kind === 'group' && !c.project_id ? '' : 'none'
 }
 
 $('#htoggle').onclick = () => $('#side2').classList.toggle('hide')
@@ -418,11 +431,11 @@ async function send() {
   input.value = ''; input.style.height = 'auto'
   bubble(null, true).innerHTML = fmt(text)
   busy = true; $('#send').disabled = true
-  const ticket = shown, target = cur
+  let ticket = shown, target = cur
   const bubs = new Map(), tools = new Map()
   try {
     const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text }) })
+      body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text, request_id: crypto.randomUUID() }) })
     if (!res.ok) throw new Error((await errText(res)).slice(0, 300))
     const rd = res.body.getReader(), dec = new TextDecoder()
     let buf = ''
@@ -433,6 +446,18 @@ async function send() {
       for (const part of parts) {
         const ev = part.match(/^event: (.+)$/m)?.[1]
         const d = JSON.parse(part.match(/^data: (.+)$/m)?.[1] ?? '{}')
+        if (ev === 'crew') {
+          BOTS = [...BOTS.filter(b => !d.bots.some(x => x.id === b.id)), ...d.bots]
+          CONVS = [...CONVS.filter(c => c.id !== d.conversation.id), d.conversation]
+          if (ticket === shown) {
+            await wsProjects(d.conversation.project_id)
+            if (ticket !== shown) continue
+            await openConv(d.conversation, { fresh: true })
+            ticket = shown; target = cur
+            bubble(null, true).innerHTML = fmt(text)
+          }
+          continue
+        }
         // user switched away: keep reading (the server finishes the turn) but don't draw
         if (ticket !== shown) continue
         // Create the bubble on the first delta: tool calls often arrive right after start, and
@@ -443,7 +468,10 @@ async function send() {
           if (!s) { s = { el: bubble(d.botId, false), raw: '' }; bubs.set(d.botId, s) }
           s.raw += d.text; s.el.innerHTML = fmt(s.raw); $('#log').scrollTop = $('#log').scrollHeight
         }
-        else if (ev === 'error') { (bubs.get(d.botId)?.el ?? bubble(d.botId, false)).textContent = '⚠ ' + d.message }
+        else if (ev === 'error') {
+          (bubs.get(d.botId)?.el ?? bubble(d.botId, false)).textContent = '⚠ ' + d.message
+          if (!input.value) input.value = text
+        }
         else if (ev === 'note') note(d.text)
         else if (ev === 'handoff') note(`${bot(d.from)?.name ?? d.from} → @${bot(d.to)?.name ?? d.to}`)
         else if (ev === 'tool') {
@@ -471,7 +499,7 @@ async function send() {
         }
       }
     }
-  } catch (e) { if (ticket === shown) note('⚠ ' + (e.message ?? e)) }
+  } catch (e) { if (ticket === shown) { note('⚠ ' + (e.message ?? e)); if (!input.value) input.value = text } }
   busy = false; $('#send').disabled = false; input.focus()
   CONVS = await (await fetch(api('/api/conversations'))).json(); renderConvs()
   loadUsage()                                         // the turn just cost something; show it
@@ -484,6 +512,7 @@ async function send() {
 // ═══ Groups ═══
 let gEditing = null
 const newMenu = e => openMenu(e.currentTarget, [
+  ...WS.on ? [{ label: '新建项目 / 独立剧组', on: wsNewProject }] : [],
   { label: t('side.newAgent'), on: () => editBot(null) },
   { label: t('side.newGroup'), on: () => openGroupDlg(null) },
 ])
@@ -1276,13 +1305,21 @@ $('#wsproj').onchange = e => {
   wsShow(!WS.view || WS.view === 'shot' ? 'board' : WS.view)
 }
 async function wsNewProject() {
-  const pid = prompt(t('st.newIdPrompt'))?.trim(); if (!pid) return
-  const name = prompt(t('st.newNamePrompt'), pid)?.trim(); if (!name) return
-  try { await stCall('project.create', { id: pid, name, info: { lang: lang === 'en' ? 'en' : lang } }) }
-  catch (e) { alert(e.message); return }
-  await wsProjects(pid)
-  try { localStorage.setItem('ma_project', pid) } catch {}
-  wsShow('settings')
+  if (busy) return alert('请等待当前回复结束后再新建剧组。')
+  const name = prompt('新作品叫什么？将自动配置四个岗位，使用全新上下文。')?.trim(); if (!name) return
+  try {
+    const r = await fetch(api('/api/crews'), { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, request_id: crypto.randomUUID() }) })
+    if (!r.ok) throw new Error(await errText(r))
+    const made = await r.json()
+    await reload(); await wsProjects(made.project_id)
+    await openConv(CONVS.find(c => c.kind === 'group' && c.id === made.group_id))
+  } catch (e) { alert(e.message) }
+}
+$('#newcrew').onclick = wsNewProject
+$('#crewchat').onclick = () => {
+  const c = CONVS.find(c => c.kind === 'group' && c.project_id === WS.project)
+  if (c) openConv(c)
 }
 for (const b of document.querySelectorAll('#proj [data-view]')) b.onclick = () => wsShow(b.dataset.view)
 
@@ -1868,6 +1905,7 @@ async function wsSettings(ticket) {
   $('#stname').value = info.name
   $('#stlang').value = ['en', 'zh-Hans', 'zh-Hant'].includes(plang) ? plang : 'en'
   $('#stgroup').value = groups.some(g => g.id === info.notify_group) ? info.notify_group : ''
+  $('#stgroup').disabled = groups.some(g => g.project_id === WS.project)
   $('#stinfo').value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''
   $('#stratio').value = ['9:16', '16:9', '3:4', '1:1'].includes(pratio) ? pratio : '16:9'
   $('#stnarr').value = nv.voice ?? ''; $('#stnarrhow').value = nv.instructions ?? ''
@@ -1902,11 +1940,13 @@ async function wsSettings(ticket) {
   }
   // One role per crew member, saved as soon as it is picked.
   const roleOf = new Map(crew.map(c => [c.agent_id, c.role]))
-  for (const b of BOTS) {
+  const fixedCrew = groups.find(g => g.project_id === WS.project)
+  for (const b of BOTS.filter(b => !fixedCrew || fixedCrew.members.includes(b.id))) {
     const row = document.createElement('div'); row.className = 'mem'; row.style.padding = '6px 0'
     row.innerHTML = `<div class="av" style="background:${col(b.color)}">${esc(b.name.slice(0, 1))}</div><span style="flex:1;min-width:0">${esc(b.name)}</span>
       <select class="fi" style="width:200px;margin:0">${['', ...ROLES].map(r => `<option value="${r}">${esc(t(r ? `st.role.${r}` : 'st.role.none'))}</option>`).join('')}</select>`
     const s = row.querySelector('select'); s.value = roleOf.get(b.id) ?? ''
+    s.disabled = !!fixedCrew
     s.onchange = async () => {
       try { await stCall('crew.set', { agent_id: b.id, role: s.value || null }) }
       catch (e) { alert(e.message); s.value = roleOf.get(b.id) ?? '' }
@@ -2116,11 +2156,14 @@ async function reload() {
   try {
     await reload()
     loadClis()
-    // A film studio opens on its project; without the studio configured it is the chat as before.
-    if (await wsInit()) wsShow('board')
+    // The crew's conversation, not a parameter form, is the default entrance.
+    if (await wsInit()) {
+      const c = CONVS.find(c => c.kind === 'group' && c.project_id === WS.project) ?? CONVS.find(c => c.kind === 'group')
+      if (c) await openConv(c); else wsShow('board')
+    }
     else if (CONVS.length) openConv(CONVS[0])
     await loadProvs()
-    if (!PROVS.length) { fillProv(null); $('#pdlg').showModal()
+    if (!PROVS.length && !BOTS.some(b => b.runtime)) { fillProv(null); $('#pdlg').showModal()
       hint(t('p.first')) }
   } catch (e) { note(t('err.backend', { msg: e.message ?? e })) }
 })()

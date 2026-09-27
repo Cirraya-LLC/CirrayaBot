@@ -161,6 +161,8 @@ async function selfTest() {
   console.log('import.mjs: all checks passed')
 }
 
-const o = args(process.argv.slice(2))
-if (o.selfTest) await selfTest()
-else await main(o).catch(e => { console.error(`Import failed: ${e.message}`); process.exit(1) })
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const o = args(process.argv.slice(2))
+  if (o.selfTest) await selfTest()
+  else await main(o).catch(e => { console.error(`Import failed: ${e.message}`); process.exit(1) })
+}

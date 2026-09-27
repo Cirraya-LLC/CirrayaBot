@@ -65,7 +65,7 @@ export function turnArgs(rt, { model = '', effort = '', maxTurns = null, system 
   }
   if (rt === 'codex') {
     const server = `{url=${toml(mcp.url)},bearer_token_env_var="MA_TURN_TOKEN",tool_timeout_sec=86400,startup_timeout_sec=60,default_tools_approval_mode="approve"}`
-    return ['codex', 'exec', '--json', '--skip-git-repo-check', '--ephemeral', '--ignore-rules', '-s', 'read-only',
+    return ['codex', 'exec', '--json', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '-s', 'read-only',
       '-c', `mcp_servers.${MCP_NAME}=${server}`, '-c', 'web_search="disabled"',
       '-c', `model_instructions_file=${toml(systemFile)}`, '-c', 'project_doc_max_bytes=0',
       ...CODEX_OFF.flatMap(f => ['--disable', f]),
