@@ -72,6 +72,7 @@ class Agent {
     this.model = '',
     this.effort = '',
     this.approval = '',
+    this.autonomy = '',
     this.dailyCapMicro,
   });
 
@@ -91,6 +92,9 @@ class Agent {
   /// When this one has to ask first: '' (follow the platform) / off / match / all.
   final String approval;
 
+  /// How far it goes on its own: '' (follow the platform) / auto / manual.
+  final String autonomy;
+
   /// Daily spend cap in micro-dollars. null = no cap of its own, so the
   /// platform default applies.
   final int? dailyCapMicro;
@@ -105,6 +109,7 @@ class Agent {
     model: (j['model'] as String?) ?? '',
     effort: (j['effort'] as String?) ?? '',
     approval: (j['approval'] as String?) ?? '',
+    autonomy: (j['autonomy'] as String?) ?? '',
     dailyCapMicro: (j['daily_cap_micro'] as num?)?.toInt(),
   );
 }
@@ -189,6 +194,30 @@ class SearchHit {
 }
 
 /// The platform-wide answer to "when does an Agent have to ask first".
+/// A message still being worked on. In auto mode it outlives the page that
+/// started it, so the app has to be able to see it and stop it.
+class Run {
+  const Run({required this.kind, required this.id, required this.session, this.speaker = '', this.startedAt = 0});
+
+  factory Run.fromJson(Map<String, Object?> j) => Run(
+    kind: (j['kind'] as String?) ?? 'agent',
+    id: (j['id'] as String?) ?? '',
+    session: (j['session'] as String?) ?? '',
+    speaker: (j['speaker'] as String?) ?? '',
+    startedAt: (j['started_at'] as num?)?.toInt() ?? 0,
+  );
+
+  final String kind;
+  final String id;
+  final String session;
+
+  /// The Agent working right now (its id).
+  final String speaker;
+  final int startedAt;
+
+  bool isFor(Conversation c) => c.kind == kind && c.id == id;
+}
+
 class ApprovalPolicy {
   const ApprovalPolicy({this.mode = 'match', this.patterns = const []});
 
@@ -853,6 +882,28 @@ class Api {
 
   Future<void> setDefaultEffort(String effort) =>
       _json('PUT', '/api/settings/effort', {'effort': effort});
+
+  /// The platform-wide autonomy ('auto' / 'manual'), for every Agent that has none of its own.
+  Future<String> defaultAutonomy() async {
+    final j = (await _json('GET', '/api/settings/autonomy')) as Map<String, Object?>;
+    return (j['autonomy'] as String?) ?? 'auto';
+  }
+
+  Future<void> setDefaultAutonomy(String mode) => _json('PUT', '/api/settings/autonomy', {'autonomy': mode});
+
+  // ---- Runs ----
+
+  Future<List<Run>> runs() async {
+    final j = await _list('/api/runs');
+    return j.map((e) => Run.fromJson(e as Map<String, Object?>)).toList();
+  }
+
+  /// Stop whatever is being worked on in [c]. Nothing running is not an error here.
+  Future<void> stopRun(Conversation c) async {
+    try {
+      await _json('POST', '/api/runs/stop', {'kind': c.kind, 'id': c.id});
+    } on ApiException catch (_) {}
+  }
 
   // ---- Approvals ----
   Future<ApprovalPolicy> approvalPolicy() async =>

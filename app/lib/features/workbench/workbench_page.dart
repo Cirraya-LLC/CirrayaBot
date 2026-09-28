@@ -829,6 +829,11 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                         ),
                       ],
                       const SizedBox(width: 6),
+                      if (bench.isRunning(c))
+                        Padding(
+                          padding: const EdgeInsets.only(right: 5),
+                          child: Tooltip(message: tr('wb.runWorking'), child: _RunDot(motion: _motion(context))),
+                        ),
                       Text(when(c.at), style: TextStyle(fontSize: 10.5, color: C.dim2)),
                     ],
                   ),
@@ -1068,6 +1073,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (_mentions.isNotEmpty) _mentionList(),
+          if (bench.backgroundRun(bench.current) case final run?) _runBar(run),
           // Keyed: without it, inserting the popup above shifts this box to a
           // new index, Flutter rebuilds it, and the TextField loses focus —
           // every key after the @ went nowhere.
@@ -1109,20 +1115,54 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   ),
                 ),
                 const SizedBox(width: 6),
-                IconButton.filled(
-                  onPressed: ready && !bench.busy ? _send : null,
-                  icon: bench.busy
-                      ? SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: C.onAccent),
-                        )
-                      : const Icon(Icons.arrow_upward, size: 17),
-                  style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
-                ),
+                // While a reply streams, this is Stop — in auto mode closing the app
+                // no longer stops a run, so stopping has to be a button.
+                bench.busy
+                    ? IconButton.filled(
+                        tooltip: tr('wb.stopTitle'),
+                        onPressed: bench.stop,
+                        icon: const Icon(Icons.stop_rounded, size: 18),
+                        style: IconButton.styleFrom(backgroundColor: C.chip, foregroundColor: C.ink),
+                      )
+                    : IconButton.filled(
+                        onPressed: ready ? _send : null,
+                        icon: const Icon(Icons.arrow_upward, size: 17),
+                        style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
+                      ),
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  /// Above the composer: this conversation is being worked on, but not by a
+  /// stream in this app (started before it was opened, or elsewhere).
+  Widget _runBar(Run run) {
+    final who = bench.agentById(run.speaker)?.name ?? '';
+    final min = ((DateTime.now().millisecondsSinceEpoch - run.startedAt) / 60000).round().clamp(0, 1 << 30);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(12, 4, 6, 4),
+      decoration: BoxDecoration(
+        color: C.panel,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: C.line),
+      ),
+      child: Row(
+        children: [
+          _RunDot(motion: _motion(context)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              tr('wb.background', {'who': who, 'min': min}),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12.5, color: C.dim),
+            ),
+          ),
+          TextButton(onPressed: bench.stop, child: Text(tr('wb.stop'))),
         ],
       ),
     );
@@ -1514,6 +1554,41 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 }
 
 Widget _heading(String text) => Text(text, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600));
+
+/// Something is being worked on: a small accent dot that breathes. Reduced
+/// motion: it just sits there.
+class _RunDot extends StatefulWidget {
+  const _RunDot({required this.motion});
+  final Duration motion;
+  @override
+  State<_RunDot> createState() => _RunDotState();
+}
+
+class _RunDotState extends State<_RunDot> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400));
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.motion != Duration.zero) _c.repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: Tween(begin: 1.0, end: 0.35).animate(_c),
+    child: Container(
+      width: 7,
+      height: 7,
+      decoration: BoxDecoration(color: C.accent, shape: BoxShape.circle),
+    ),
+  );
+}
 
 /// A search hit's message, outlined in the accent colour that then fades — the
 /// eye finds it without the outline staying around. Reduced motion: no fade.
