@@ -186,4 +186,13 @@ const Map<String, List<String>> settingsStrings = {
     '設成「跟隨平台設定」的 Agent 用這個。不支援的模型會忽略它；上游拒絕時會去掉它重試一次。',
   ],
   'ef.saved': ['Reasoning effort saved', '推理强度已保存', '推理強度已儲存'],
+  'au.title': ['How far Agents go on their own', 'Agent 自己能走多远', 'Agent 自己能走多遠'],
+  'au.auto': ['Auto: works until the task is done', '自动：一直做到任务完成', '自動：一直做到任務完成'],
+  'au.manual': ['Manual: a few steps per message, you push it on', '手动：每条消息只走几步，由你推着走', '手動：每則訊息只走幾步，由你推著走'],
+  'au.hint': [
+    "Auto: an Agent writes a plan and works through it without waiting to be told to continue; in a group, replies go back to the lead until the lead wraps up; closing the app doesn't stop it — press Stop. Approvals and the daily cap still apply. An Agent's own setting wins.",
+    '自动：Agent 先列计划，然后一直做下去，不用你催；群里做完的人会自动交回统筹，直到统筹收尾；关掉应用也不会停 —— 要停就按「停止」。审批和每日上限照样生效。Agent 自己的设置优先。',
+    '自動：Agent 先列計畫，然後一直做下去，不用你催；群組裡做完的人會自動交回統籌，直到統籌收尾；關掉應用也不會停 —— 要停就按「停止」。審批與每日上限照樣生效。Agent 自己的設定優先。',
+  ],
+  'au.saved': ['Autonomy saved', '自主模式已保存', '自主模式已儲存'],
 };

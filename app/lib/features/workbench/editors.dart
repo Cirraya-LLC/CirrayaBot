@@ -32,6 +32,13 @@ const _effortLevels = <MapEntry<String, String>>[
 ];
 
 /// When this one has to ask a person first. '' = whatever the platform says.
+/// How far it goes on its own. '' = follow the platform setting.
+const _autonomyModes = <MapEntry<String, String>>[
+  MapEntry('', 'ed.autonomyDefault'),
+  MapEntry('auto', 'ed.autonomyAuto'),
+  MapEntry('manual', 'ed.autonomyManual'),
+];
+
 const _approvalModes = <MapEntry<String, String>>[
   MapEntry('', 'ed.approvalDefault'),
   MapEntry('off', 'ed.approvalOff'),
@@ -63,6 +70,7 @@ class _AgentEditorState extends State<_AgentEditor> {
   /// '' = send nothing, which is what every model got before this setting existed.
   late String _effort = const ['low', 'medium', 'high'].contains(widget.agent?.effort) ? widget.agent!.effort : '';
   late String _approval = const ['off', 'match', 'all'].contains(widget.agent?.approval) ? widget.agent!.approval : '';
+  late String _autonomy = const ['auto', 'manual'].contains(widget.agent?.autonomy) ? widget.agent!.autonomy : '';
   List<Provider> _providers = const [];
   List<String> _models = const [];
   String _model = '';
@@ -171,6 +179,7 @@ class _AgentEditorState extends State<_AgentEditor> {
       'model': _chosenModel,
       'effort': _effort,
       'approval': _approval,
+      'autonomy': _autonomy,
       'daily_cap_micro': cap.value,
     };
     await _run(() async {
@@ -313,6 +322,17 @@ class _AgentEditorState extends State<_AgentEditor> {
                   DropdownMenuItem(value: m.key, child: Text(tr(m.value))),
               ],
               onChanged: (v) => setState(() => _approval = v ?? ''),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              initialValue: _autonomy,
+              isExpanded: true,
+              decoration: InputDecoration(labelText: tr('ed.autonomy')),
+              items: [
+                for (final m in _autonomyModes)
+                  DropdownMenuItem(value: m.key, child: Text(tr(m.value))),
+              ],
+              onChanged: (v) => setState(() => _autonomy = v ?? ''),
             ),
             const SizedBox(height: 10),
             TextField(

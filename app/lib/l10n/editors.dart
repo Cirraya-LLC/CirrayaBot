@@ -122,4 +122,8 @@ const Map<String, List<String>> editorStrings = {
   'ed.approvalOff': ['Never ask', '从不询问', '從不詢問'],
   'ed.approvalMatch': ['Ask on risky commands', '命中清单才问', '命中清單才問'],
   'ed.approvalAll': ['Ask every time', '每次都问', '每次都問'],
+  'ed.autonomy': ['How far it goes on its own', '自己能走多远', '自己能走多遠'],
+  'ed.autonomyDefault': ['Platform default', '跟随平台默认', '跟隨平台預設'],
+  'ed.autonomyAuto': ['Auto — works until the task is done', '自动 —— 一直做到任务完成', '自動 —— 一直做到任務完成'],
+  'ed.autonomyManual': ['Manual — a few steps per message', '手动 —— 每条消息只走几步', '手動 —— 每則訊息只走幾步'],
 };

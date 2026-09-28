@@ -160,6 +160,9 @@ alter table agents add column if not exists effort text not null default '';
 -- 'off', 'match' (only commands the pattern list catches) or 'all'.
 alter table agents add column if not exists approval text not null default '';
 
+-- How far this agent goes on its own: '' (follow the platform setting), 'auto' or 'manual'.
+alter table agents add column if not exists autonomy text not null default '';
+
 -- A tool call is a message too, so reopening a conversation still shows which commands ran.
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
 alter table messages drop constraint if exists messages_role_check;
@@ -231,18 +234,18 @@ export async function getAgent(id) {
 
 export async function upsertAgent(a) {
   const { rows } = await q(`
-    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
-      approval = excluded.approval
+      approval = excluded.approval, autonomy = excluded.autonomy
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
-     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? ''])
+     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? ''])
   return rows[0]
 }
 
@@ -624,6 +627,11 @@ export const setDefaultCap = micro => setSetting(CAP_KEY, micro)
 const EFFORT_KEY = 'model.default_effort'
 export const defaultEffort = () => getSetting(EFFORT_KEY, '')
 export const setDefaultEffort = e => setSetting(EFFORT_KEY, e)
+
+// The platform-wide autonomy ('auto' / 'manual'); never set means auto.
+const AUTONOMY_KEY = 'autonomy'
+export const defaultAutonomy = () => getSetting(AUTONOMY_KEY, '')
+export const setDefaultAutonomy = m => setSetting(AUTONOMY_KEY, m)
 
 // ---------- first-start seed / legacy import ----------
 //

@@ -114,6 +114,51 @@ class Workbench extends ChangeNotifier {
   String? selfMemoryFor;
   bool loading = true;
   bool busy = false;
+
+  /// Messages still being worked on, anywhere. In auto mode a run outlives the
+  /// stream that started it (the app was closed, or it started elsewhere).
+  List<Run> runs = const [];
+
+  /// The conversation this app is streaming a reply for right now.
+  Conversation? _streaming;
+  Timer? _runTimer;
+
+  /// The run in [c] that isn't being streamed here — shown as "still working", with Stop.
+  Run? backgroundRun(Conversation? c) {
+    if (c == null || (busy && _streaming?.id == c.id && _streaming?.kind == c.kind)) return null;
+    return runs.where((r) => r.isFor(c)).firstOrNull;
+  }
+
+  bool isRunning(Conversation c) => runs.any((r) => r.isFor(c));
+
+  /// Look at what is running, and follow the open conversation closely while it
+  /// runs: its history is redrawn as the work lands, and once more when it ends.
+  Future<void> loadRuns() async {
+    final c = current;
+    final was = c != null && isRunning(c);
+    try {
+      runs = await api.runs();
+    } on ApiException catch (_) {
+      return;
+    }
+    notifyListeners();
+    final now = c != null && isRunning(c);
+    if (c != null && !busy && (now || was) && c.id == current?.id) {
+      final ticket = _shown;
+      if (!now) await _loadSessions(c);
+      if (ticket == _shown) await _drawHistory(c, ticket);
+    }
+    _runTimer?.cancel();
+    if (runs.isNotEmpty) _runTimer = Timer(const Duration(seconds: 4), () => unawaited(loadRuns()));
+  }
+
+  /// Stop: the reply being streamed here, or else whatever runs in the open conversation.
+  Future<void> stop() async {
+    final c = (busy ? _streaming : null) ?? current;
+    if (c == null) return;
+    await api.stopRun(c);
+    await loadRuns();
+  }
   String? error;
 
   List<String> get agentNames => agents.map((a) => a.name).toList();
@@ -210,6 +255,7 @@ class Workbench extends ChangeNotifier {
         ? last
         : sessions.firstOrNull?.id;
     await _drawHistory(c, ticket);
+    unawaited(loadRuns());
   }
 
   Future<void> _loadSessions(Conversation c) async {
@@ -324,6 +370,7 @@ class Workbench extends ChangeNotifier {
     final c = current;
     if (c == null || busy || ticket != _shown) return;
     unawaited(loadRoutines());
+    if (runs.isEmpty) unawaited(loadRuns()); // started elsewhere (another device, a scheduled task)
     if (c.at != before) {
       // A scheduled task may have written into a session of its own
       await _loadSessions(c);
@@ -374,6 +421,7 @@ class Workbench extends ChangeNotifier {
     if (c == null || busy || text.trim().isEmpty) return;
 
     busy = true;
+    _streaming = c;
     error = null;
     final ticket = _shown;
     // Only while this conversation is still the one on screen — otherwise the
@@ -428,7 +476,7 @@ class Workbench extends ChangeNotifier {
           case 'handoff':
             final from = agentById((ev.data['from'] as String?) ?? '')?.name ?? '';
             final to = agentById((ev.data['to'] as String?) ?? '')?.name ?? '';
-            add(Note('$from → @$to'));
+            add(Note(ev.data['auto'] == true ? '$from → @$to · ${tr('state.backToLead')}' : '$from → @$to'));
           case 'error':
             add(Note('⚠ ${ev.data['message'] ?? ''}'));
             live?.streaming = false;
@@ -446,6 +494,14 @@ class Workbench extends ChangeNotifier {
             }
             if (phase == 'trim') {
               add(Note(tr('state.trimmed', {'n': ev.data['dropped']})));
+              break;
+            }
+            if (phase == 'nudge') {
+              // Stopped with its plan unfinished and was sent back to it: what it
+              // says next is a new bubble, not more of the one that asked to stop.
+              live?.streaming = false;
+              live = null;
+              add(Note(tr('state.nudge', {'n': ev.data['open']})));
               break;
             }
             final args = (ev.data['args'] as Map?) ?? const {};
@@ -492,7 +548,9 @@ class Workbench extends ChangeNotifier {
     }
     live?.streaming = false;
     busy = false;
+    _streaming = null;
     notifyListeners();
+    unawaited(loadRuns());
     await refresh();
     if (current?.id == c.id && current?.kind == c.kind) await _loadSessions(c);
     // Left and came back while it was answering: what's on screen is the
@@ -530,6 +588,7 @@ class Workbench extends ChangeNotifier {
   }
 
   static String _label(Object? tool, Map args) => switch (tool) {
+    'update_plan' => _planLabel(args['plan']),
     'bash' => '${args['command'] ?? ''}',
     'read_file' => tr('tool.read', {'path': args['path'] ?? ''}),
     'write_file' => tr('tool.write', {'path': args['path'] ?? ''}),
@@ -568,9 +627,16 @@ class Workbench extends ChangeNotifier {
     };
   }
 
+  static String _planLabel(Object? plan) {
+    final steps = plan is List ? plan : const [];
+    final done = steps.where((x) => x is Map && x['status'] == 'completed').length;
+    return tr('tool.plan', {'done': done, 'n': steps.length});
+  }
+
   @override
   void dispose() {
     _poller.cancel();
+    _runTimer?.cancel();
     api.close();
     super.dispose();
   }

@@ -12,6 +12,7 @@ import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
+import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor, nextSpeaker } from './autonomy.mjs'
 import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT } from './sandbox.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
@@ -48,6 +49,8 @@ const toBot = (r, lang = 'en') => ({
   effort: r.effort ?? '',
   // When this one has to ask before acting. '' = follow the platform setting.
   approval: r.approval ?? '',
+  // How far it goes on its own. '' = follow the platform setting.
+  autonomy: r.autonomy ?? '',
   // Capability tags reflect the tools the backend actually grants, not what the persona says —
   // a tag claiming bash that can't actually run it is worse than no tag.
   tools: (CFG.tools ? ['shell', 'files', 'browser', 'sandbox'] : ['chatOnly']).map(k => tr(lang, `bot.tool.${k}`)),
@@ -144,7 +147,6 @@ function snippetAround(content, text) {
   return (from > 0 ? '…' : '') + flat.slice(from, from + 140) + (from + 140 < flat.length ? '…' : '')
 }
 
-const MAX_HANDOFFS = 5       // max handoffs between agents in one round, so they can't chat forever
 const FETCH_MAX = 300        // how many candidate rows to pull from the DB; the real trimming is by context budget
 const TOOL_TRACE = 400       // how much tool output the transcript keeps, same as the live stream sends
 
@@ -170,18 +172,21 @@ const pendingApprovals = new Map()
  * refused straight away rather than stalling a task nobody is watching.
  */
 function askApproval(ctx, onTool, name, args) {
-  if (ctx.unattended) return Promise.resolve(false)
+  // Nobody to ask: a scheduled task, or an auto-mode run whose page was closed.
+  if (ctx.unattended || ctx.run?.detached) return Promise.resolve(false)
   const id = randomUUID()
   onTool?.({ phase: 'ask', id, name, args })
   return new Promise(resolve => {
     const answer = ok => {
       if (!pendingApprovals.delete(id)) return
+      ctx.run?.asking.delete(id)
       ctx.signal?.removeEventListener('abort', onAbort)
       onTool?.({ phase: 'answered', id, name, args, ok })
       resolve(ok)
     }
     const onAbort = () => answer(false)
     pendingApprovals.set(id, answer)
+    ctx.run?.asking.add(id)
     ctx.signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
@@ -200,7 +205,7 @@ async function groupRecallFor(bot) {
   return chunks.join('\n\n')
 }
 
-function systemFor(bot, memory, peers, box, recall, skills = [], lead = null) {
+function systemFor(bot, memory, peers, box, recall, skills = [], lead = null, auto = false, relayAuto = auto) {
   const parts = [bot.persona]
   parts.push(`
 
@@ -215,6 +220,19 @@ In group chats there is a ./group directory: the group's shared drive, visible t
 to hand something to a colleague, \`cp x group/\`; what colleagues give you is there too.` : ''}
 Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).
 You also have your own browser (the browser tool): open pages, click buttons, fill forms, take screenshots to see the page.`)
+  if (auto && box) parts.push(`
+
+--- How you work: on your own, until it's done ---
+Nobody is going to push you along. Take the task all the way to done yourself.
+- Don't stop to ask whether to continue, and don't end with offers like "Shall I …?" — if the next step is clear, take it.
+- For routine choices, make a sensible assumption and mention it in your report instead of asking.
+- Anything with more than a couple of steps: write a plan with update_plan first and keep it current as you go.
+  You are not finished while a step in it is still open.
+- Check your own work — run it, test it, look at the result. "It should work" is not done.
+- Stop only when it is done, or when you are truly blocked on something only the user can give you (a password,
+  a login, a decision about what they want). Then mark that step blocked and say exactly what you need.
+- What your role says to ask a person about first (irreversible actions and the like) you still ask about — that is the right kind of stop.
+- If a command is refused, don't retry it: find another way, or say why it can't be done.`)
   if (peers?.length) {
     parts.push(`
 
@@ -227,7 +245,10 @@ ${!lead ? '' : lead.id === bot.id ? `
 **You are this group's lead.** When the user hasn't named anyone, you speak first: think the matter through, break it into
 pieces that can be handed out, @ the right colleague to do each, keep track of progress, and finally summarize the result for the user.
 Don't grind away alone on work you could hand out.` : `
-**This group's lead is ${lead.name}.** When your part is done, when you're stuck, or when you're unsure who should pick it up next, @${lead.name}.`}
+**This group's lead is ${lead.name}.** When your part is done, when you're stuck, or when you're unsure who should pick it up next, @${lead.name}.${relayAuto ? `
+If you don't @ anyone, your reply goes back to ${lead.name} automatically.` : ''}`}${relayAuto && lead?.id === bot.id ? `
+The group keeps going until you end it: when a colleague reports back, check the result, then @ whoever should do the next piece.
+Only when the whole goal is met, write the summary for the user without @-ing anyone — that ends it.` : ''}
 
 **This group is turn-based — this rule matters most:**
 Only one person talks at a time. After you finish, the person you @ starts working; when they finish,
@@ -244,7 +265,7 @@ Other rules:
 - Speak only for your own part. Don't speak for colleagues, and don't make up things they said.
 - Don't repeat what's already been said; if a colleague got it right, build on it instead of restating it.
 - @ only one person at a time, on its own line at the end of your reply.
-- When the matter is done and nobody needs to follow up, don't @ anyone — that is what stops the group chat.
+- ${relayAuto && lead ? `The group stops when ${lead.id === bot.id ? 'you reply' : `${lead.name} replies`} without @-ing anyone.` : `When the matter is done and nobody needs to follow up, don't @ anyone — that is what stops the group chat.`}
 - People are watching you, so don't treat "I've done X" as a figure of speech: if you didn't do it, say so.`)
   }
   if (skills.length) parts.push(box ? `
@@ -457,6 +478,15 @@ const TOOL_SPECS = [
       description: { type: 'string', description: 'When to use it — this sentence is how you will recall it later, so describe the triggering situation clearly' },
       body: { type: 'string', description: 'The full procedure (Markdown): steps, decision rules, expected output, what to ask a human first. Write it so someone else could follow it' } } } } },
   { type: 'function', function: {
+    name: 'update_plan',
+    description: 'Write down your plan for this task and keep it current: the whole list every time, each step with its status. ' +
+      'Use it for anything with more than a couple of steps. Exactly one step is in_progress while you work; mark steps completed as you finish them, ' +
+      'and blocked (saying why in your reply) when only the user can unblock them. Your turn is not over while a step is still pending or in_progress.',
+    parameters: { type: 'object', required: ['plan'], properties: {
+      plan: { type: 'array', items: { type: 'object', required: ['step', 'status'], properties: {
+        step: { type: 'string', description: 'One step, a few words' },
+        status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked'] } } } } } } } },
+  { type: 'function', function: {
     name: 'remember',
     description: 'Keep one short fact in your own notes, so you still know it next time. Use it when you learn something about the user, their setup or how they want things done. ' +
       'Keep it short — one fact per call, one sentence. Only things that will still be true later, not what is only true in this conversation. ' +
@@ -580,6 +610,13 @@ async function runTool(name, args, ctx) {
   }
   if (name === 'save_skill') return saveSkillFromAgent(ctx.bot, args)
   if (name === 'remember') return rememberFromAgent(ctx.bot, args.fact)
+  if (name === 'update_plan') {
+    const plan = checkPlan(args.plan)
+    if (typeof plan === 'string') return `Plan not saved: ${plan}`
+    ctx.plan = plan
+    const open = openSteps(plan).length
+    return `Plan saved:\n${planText(plan)}\n${open ? `${open} step${open > 1 ? 's' : ''} to go.` : 'Every step is done or blocked.'}`
+  }
   if (name === 'bash') {
     const { code, out, err } = await execIn(c, ['-w', '/work', c, 'bash', '-lc', args.command])
     const killed = code === 124 ? `\n(over ${EXEC_TIMEOUT / 1000}s — we stopped waiting; the command may still be running in the container)` : ''
@@ -662,10 +699,10 @@ const upstreamStatus = e => Number(e?.upstreamStatus) || 0
  * and trimming only at the entrance would overflow by step three or four.
  */
 async function runAgent(p, messages, onDelta, onTool, ctx) {
-  const MAX_STEPS = 12
+  const limits = limitsFor(ctx.autonomy)
   const lang = ctx.lang ?? 'en'
-  let text = ''
-  for (let step = 0; step < MAX_STEPS; step++) {
+  let text = '', nudged = 0
+  for (let step = 0; step < limits.steps; step++) {
     await checkCap(ctx.bot, p)
     const fit = fitContext(messages, p.context_tokens)
     if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
@@ -686,7 +723,9 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
           onTool?.({ phase: 'retry', reason: tr(lang, 'chat.noImages') })
           r = null; break
         }
-        if (ctx.signal?.aborted || !isUpstreamError(e) || wait === 6000) throw e
+        // Stopped (the Stop button, or a manual run's page closing): say that, not the fetch library's words
+        if (ctx.signal?.aborted) throw new Say('chat.aborted')
+        if (!isUpstreamError(e) || wait === 6000) throw e
         onTool?.({ phase: 'retry', reason: errorText(e, lang).slice(0, 120) })
       }
     }
@@ -694,7 +733,17 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     const { content, calls, usage } = r
     noteUsage(ctx, p, usage)
     if (content) text = content
-    if (!calls.length) return text
+    if (!calls.length) {
+      // Stopped with its own plan unfinished: in auto mode that is a pause, not the end. Send it back,
+      // a few times at most — an agent that keeps stopping has a reason, and it should say it.
+      const nudge = nudgeFor(ctx.plan, nudged, limits)
+      if (!nudge) return text
+      nudged++
+      if (content) messages.push({ role: 'assistant', content })
+      messages.push({ role: 'user', content: nudge })
+      onTool?.({ phase: 'nudge', open: openSteps(ctx.plan).length })
+      continue
+    }
 
     messages.push({
       role: 'assistant',
@@ -716,7 +765,8 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       // only thing it will ever see about this call.
       const res = allowed
         ? await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
-        : `Refused${ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
+        : `Refused${ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)'
+          : ctx.run?.detached ? ' (the user closed the page, so nobody was there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
 Do not try this again. Do it another way, or say why you cannot.`
       const out = typeof res === 'string' ? res : res.text
       if (res?.image) shot = res.image
@@ -735,7 +785,11 @@ Do not try this again. Do it another way, or say why you cannot.`
       messages.push({ role: 'user', content: '(this is the page captured by the browser screenshot just now)', images: [shot] })
     }
   }
-  return text || '(hit the tool-use limit; stopping here for now)'
+  if (text) return text
+  // Said nothing at all before the limit: say that, live as well as in the stored transcript
+  const limit = `(hit the limit of ${limits.steps} steps in one turn; stopping here for now)`
+  onDelta?.(limit)
+  return limit
 }
 
 /**
@@ -782,6 +836,18 @@ function dropImages(messages, note = '(a screenshot was here; the current model 
   return n > 0
 }
 
+/**
+ * Run a turn; if it is stopped, leave a line in the transcript saying so. Otherwise a conversation
+ * reopened later shows the question and the commands that ran, and then nothing — which reads as
+ * "it's still thinking" or "it crashed", not "someone pressed Stop".
+ */
+async function stopNoted(write, signal, fn) {
+  try { return await fn() } catch (e) {
+    if (signal?.aborted) await write('(Stopped before finishing.)').catch(() => {})
+    throw e
+  }
+}
+
 // One-on-one
 function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate, session) {
   return withAgent(bot.id, async () => {
@@ -792,10 +858,10 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate, sess
     await db.addMessage('dm', bot.id, session, { role: 'user', speaker: USER_SPEAKER, content: text })
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
-    const full = await runAgent(p,
-      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id)) },
+    const full = await stopNoted(ctx => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content: ctx }), signal, async () => runAgent(p,
+      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id), null, gate.autonomy === 'auto') },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, ...gate })
+      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, ...gate }))
     await db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content: full })
     return full
   })
@@ -805,13 +871,14 @@ function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate, sess
 function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate, session) {
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
-    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead) }]
+    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead, gate.autonomy === 'auto', gate.relayAuto) }]
     for (const e of await db.recent('group', groupId, FETCH_MAX, { session })) {
       messages.push(e.speaker === bot.name
         ? { role: 'assistant', content: e.content }                                   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, session, ...gate })
+    return stopNoted(note => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content: note }), signal,
+      async () => runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, session, ...gate }))
   })
 }
 
@@ -842,7 +909,9 @@ function findMention(text, peers) {
  * Sending from the UI and a scheduled task firing both go through this one function — two implementations would drift apart.
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
-async function converse(bots, groupId, providers, text, emit, signal, lang = 'en', { unattended = false, session: want = null } = {}) {
+async function converse(bots, groupId, providers, text, emit, controller, lang = 'en',
+  { unattended = false, session: want = null, run = newRun() } = {}) {
+  const signal = controller.signal
   let session = null
   try {
     // Which session this goes into, said first: a client that asked for a new one learns its id
@@ -851,13 +920,20 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
       ? await sessionFor('group', groupId ?? 'main', want)
       : await sessionFor('dm', bots[0].id, want)
     holdSession(session)
+    Object.assign(run, { session, scope: groupId || bots.length > 1 ? 'group' : 'dm',
+      scopeId: groupId ?? (bots.length > 1 ? 'main' : bots[0].id), abort: () => controller.abort(), startedAt: Date.now() })
+    runs.set(session, run)
     emit('session', { id: session })
     const policy = await approvalPolicy()
+    const platform = await db.defaultAutonomy()
+    const autonomyOf = b => resolveAutonomy(b.autonomy, platform)
     // Per agent: its own setting wins, otherwise the platform's. Resolved here so one turn can't
     // change its mind halfway through because someone saved the settings dialog.
-    const gateFor = b => ({ unattended, approval: { ...policy, mode: b.approval || policy.mode } })
+    const gateFor = (b, relayAuto = false) => ({ unattended, run, autonomy: autonomyOf(b), relayAuto,
+      approval: { ...policy, mode: b.approval || policy.mode } })
     if (!groupId && bots.length === 1) {
       const bot = bots[0]
+      run.speaker = bot.id
       emit('start', { botId: bot.id })
       await askSolo(providers.get(bot.id), bot, text,
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
@@ -871,19 +947,26 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
       await db.addMessage('group', gid, session, { role: 'user', speaker: USER_SPEAKER, content: text })
       const g = (await db.listGroups()).find(x => x.id === gid)
       const lead = bots.find(b => b.id === g?.lead) ?? null
-      let speaker = findMention(text, bots) ?? lead ?? bots[0]
+      // How the relay runs follows whoever coordinates it: the lead, else the first by order. In auto mode
+      // that person is the coordinator even when no lead was chosen — someone has to decide when it's done.
+      const coordinator = lead ?? bots[0]
+      const relayAuto = autonomyOf(coordinator) === 'auto'
+      const limits = limitsFor(relayAuto ? 'auto' : 'manual')
+      const shownLead = relayAuto ? coordinator : lead
+      let speaker = findMention(text, bots) ?? coordinator
       const spoken = new Map()
-      for (let turn = 0; turn <= MAX_HANDOFFS && !signal.aborted; turn++) {
+      for (let turn = 0; turn <= limits.handoffs && !signal.aborted; turn++) {
         const peers = bots.filter(b => b.id !== speaker.id)
+        run.speaker = speaker.id
         emit('start', { botId: speaker.id, turn })
         let reply = ''
         try {
-          reply = await askInGroup(providers.get(speaker.id), speaker, peers, lead,
+          reply = await askInGroup(providers.get(speaker.id), speaker, peers, shownLead,
             { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
               group: await db.getMemory('group', gid) },
             d => emit('delta', { botId: speaker.id, text: d }),
             t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }),
-            gid, signal, lang, gateFor(speaker), session)
+            gid, signal, lang, gateFor(speaker, relayAuto), session)
         } catch (e) {
           emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
           break
@@ -891,22 +974,57 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
         await db.addMessage('group', gid, session, { role: 'assistant', speaker: speaker.name, content: reply })
         emit('end', { botId: speaker.id })
 
-        const next = findMention(reply, peers)
-        if (!next) break                                   // nobody @-ed = the matter is done
+        // An @ wins; with none, a manual group stops and an auto one goes back to its coordinator
+        const hop = nextSpeaker({ mention: findMention(reply, peers), speaker, coordinator, auto: relayAuto })
+        if (!hop) break
+        const next = hop.bot
         const count = (spoken.get(next.id) ?? 0) + 1
         spoken.set(next.id, count)
-        if (count > 2) { emit('note', { text: tr(lang, 'chat.spokenEnough', { name: next.name, n: count - 1 }) }); break }
+        if (count > limits.perPerson) { emit('note', { text: tr(lang, 'chat.spokenEnough', { name: next.name, n: count - 1 }) }); break }
         // The last turn still @-ed someone: the relay limit is reached. Without saying so the UI shows "A → @B" and B never speaks
-        if (turn === MAX_HANDOFFS) { emit('note', { text: tr(lang, 'chat.relayLimit', { max: MAX_HANDOFFS, name: next.name }) }); break }
-        emit('handoff', { from: speaker.id, to: next.id })
+        if (turn === limits.handoffs) { emit('note', { text: tr(lang, 'chat.relayLimit', { max: limits.handoffs, name: next.name }) }); break }
+        emit('handoff', { from: speaker.id, to: next.id, ...hop.auto ? { auto: true } : {} })
         speaker = next
       }
     }
   } catch (e) {
     emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
   } finally {
-    if (session) releaseSession(session)
+    if (session) {
+      releaseSession(session)
+      if (runs.get(session) === run) runs.delete(session)
+    }
   }
+}
+
+// ---------- Runs ----------
+// A message being worked on, by session. In auto mode a run outlives the page that started it —
+// the point of auto mode is that nobody has to sit and watch — so it has to be findable (which
+// conversations are still working) and stoppable from anywhere, not just by closing a tab.
+const runs = new Map()
+
+/** detached: the page that started it is gone. asking: approval cards open right now. */
+function newRun() { return { detached: false, asking: new Set() } }
+
+/** The page is gone. Cards still waiting can't be answered by anyone, so they are refused now. */
+function detachRun(run) {
+  run.detached = true
+  for (const id of [...run.asking]) pendingApprovals.get(id)?.(false)
+}
+
+/** What a client needs to show "still working" and a Stop button. */
+const runView = r => ({ session: r.session, kind: r.scope === 'dm' ? 'agent' : 'group', id: r.scopeId,
+  speaker: r.speaker ?? '', started_at: r.startedAt, detached: r.detached })
+
+/** Whether a new message to these agents would run in auto mode — decided before the stream opens. */
+async function runsAuto(bots, groupId) {
+  const platform = await db.defaultAutonomy()
+  let who = bots[0]
+  if (groupId) {
+    const g = (await db.listGroups()).find(x => x.id === groupId)
+    who = bots.find(b => b.id === g?.lead) ?? bots[0]
+  }
+  return resolveAutonomy(who?.autonomy, platform) === 'auto'
 }
 
 // ---------- Scheduled tasks ----------
@@ -958,7 +1076,7 @@ async function runRoutine(r) {
     }
     await converse(bots, groupId, providers, text,
       (ev, d) => { if (ev === 'error' && !error) { error = d.message; capped = d.capped === true } },
-      new AbortController().signal, 'en', { unattended: true, session: session.id })
+      new AbortController(), 'en', { unattended: true, session: session.id })
   } catch (e) {
     error = errorText(e, 'en').slice(0, 300)
   } finally {
@@ -1188,6 +1306,12 @@ async function checkAgent(b, selfId = null) {
     const a = str(b.approval).trim()
     if (a && !APPROVAL_MODES.includes(a)) throw new Say('agent.approval', { list: APPROVAL_MODES.join(' / ') })
     out.approval = a
+  }
+  // '' = follow the platform setting; see AUTONOMY_MODES.
+  if (b.autonomy !== undefined) {
+    const a = str(b.autonomy).trim()
+    if (a && !normAutonomy(a)) throw new Say('agent.autonomy', { list: AUTONOMY_MODES.join(' / ') })
+    out.autonomy = a
   }
   if (b.model !== undefined || !selfId) {
     const model = str(b.model).trim()
@@ -1495,6 +1619,30 @@ const server = createServer(async (req, res) => {
       return send(200, { effort: e })
     }
 
+    // The platform-wide autonomy, for every agent that has none of its own. Never set = auto.
+    if (url.pathname === '/api/settings/autonomy' && req.method === 'GET')
+      return send(200, { autonomy: resolveAutonomy('', await db.defaultAutonomy()), modes: AUTONOMY_MODES })
+
+    if (url.pathname === '/api/settings/autonomy' && req.method === 'PUT') {
+      const m = str((await readBody(req)).autonomy).trim()
+      if (!normAutonomy(m)) return send(400, { error: t('agent.autonomy', { list: AUTONOMY_MODES.join(' / ') }) })
+      await db.setDefaultAutonomy(m)
+      return send(200, { autonomy: m })
+    }
+
+    // ---- Runs: what is still being worked on, and stopping it ----
+    if (url.pathname === '/api/runs' && req.method === 'GET') return send(200, [...runs.values()].map(runView))
+
+    if (url.pathname === '/api/runs/stop' && req.method === 'POST') {
+      // By session, or every run in one conversation ({kind, id}) — the Stop button knows the conversation for sure.
+      const b = await readBody(req)
+      const scope = b.kind === 'group' ? 'group' : 'dm'
+      const hit = [...runs.values()].filter(r => b.session ? r.session === str(b.session) : r.scope === scope && r.scopeId === str(b.id))
+      if (!hit.length) return send(404, { error: t('run.none') })
+      for (const r of hit) r.abort()
+      return send(200, { stopped: hit.length })
+    }
+
     // ---- Approvals ----
     // The platform default, and the pattern list "match" uses.
     if (url.pathname === '/api/approvals/policy' && req.method === 'GET')
@@ -1636,14 +1784,31 @@ const server = createServer(async (req, res) => {
       try { for (const b of bots) providers.set(b.id, await providerFor(b)) }
       catch (e) { return send(400, { error: errorText(e, lang) }) }
 
+      // One run per session at a time: a second message would race the first for the same history.
+      // (Stop it, or wait — the Stop button is on the conversation.) 'new' can't collide with anything.
+      const want = str(session) || null
+      if (want !== 'new') {
+        const target = want ?? (await db.latestSession(groupId || bots.length > 1 ? 'group' : 'dm',
+          groupId ?? (bots.length > 1 ? 'main' : bots[0].id)))?.id
+        if (target && runs.has(target)) return send(409, { error: t('run.busy') })
+      }
+      const auto = await runsAuto(bots, groupId)
+
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
       const emit = (ev, d) => { if (!res.destroyed) res.write(`event: ${ev}\ndata: ${JSON.stringify(d)}\n\n`) }
-      // The client closed the page / lost the network: stop. Otherwise a group relay would keep spending
-      // 6 people × 12 steps of upstream calls and keep running commands in containers with nobody watching.
+      // A comment line every so often: long tool runs send nothing for minutes, and proxies (and the
+      // client's own silence timer) take a quiet connection for a dead one.
+      const ping = setInterval(() => { if (!res.destroyed) res.write(': ping\n\n') }, 25_000)
+      // The client closed the page / lost the network. In manual mode that stops the run — a group relay
+      // would otherwise keep spending upstream calls with nobody watching. In auto mode nobody watching
+      // is the point: the run carries on, and the conversation shows it as still working, with a Stop button.
       const ac = new AbortController()
-      res.on('close', () => { if (!res.writableEnded) ac.abort() })
+      const run = newRun()
+      res.on('close', () => { if (!res.writableEnded) auto ? detachRun(run) : ac.abort() })
 
-      await converse(bots, groupId, providers, text, emit, ac.signal, lang, { session: str(session) || null })
+      try {
+        await converse(bots, groupId, providers, text, emit, ac, lang, { session: want, run })
+      } finally { clearInterval(ping) }
       emit('done', {})
       return res.end()
     }

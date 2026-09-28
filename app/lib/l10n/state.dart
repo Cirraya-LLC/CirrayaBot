@@ -63,6 +63,13 @@ const Map<String, List<String>> stateStrings = {
 
   // Tool card labels
   'tool.read': ['read {path}', '读 {path}', '讀 {path}'],
+  'tool.plan': ['Plan · {done}/{n} done', '计划 · 已完成 {done}/{n}', '計畫 · 已完成 {done}/{n}'],
+  'state.nudge': [
+    "The plan isn't finished ({n} steps left) — carrying on",
+    '计划还没做完（剩 {n} 步）—— 继续',
+    '計畫還沒做完（剩 {n} 步）—— 繼續',
+  ],
+  'state.backToLead': ['back to the lead', '交回统筹', '交回統籌'],
   'tool.write': ['write {path}', '写 {path}', '寫 {path}'],
   'tool.browser': ['Browser · {what}', '浏览器 · {what}', '瀏覽器 · {what}'],
   'tool.b.open': ['open {url}', '打开 {url}', '開啟 {url}'],

@@ -18,6 +18,13 @@ answering on their own.
   sees the session on screen; memory and skills carry across all of them. The same panel searches
   everything said in that conversation and jumps to the message. Scheduled tasks write into a
   session of their own, and an imported history becomes a new session.
+- **Works on its own until the job is done (auto mode, the default)** — an Agent writes a plan
+  and works through it without waiting for you to say "continue", checks its own work, and only
+  stops when it's done or needs something only you can give. In a group, whoever finishes hands
+  back to the lead until the lead wraps up. Closing the page doesn't stop it: a dot marks the
+  conversations still being worked on, and **Stop** is on the conversation. Switch an Agent (or
+  the whole platform, in ⚙) to *manual* to go back to a few steps per message. Approvals and the
+  daily cap apply either way.
 - **Bring your own model upstream** — name / endpoint URL / key / model / context window.
   Configure several and switch any time. Three API shapes are supported:
   OpenAI Chat Completions, OpenAI Responses and Anthropic Messages.

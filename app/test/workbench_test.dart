@@ -208,4 +208,50 @@ void main() {
     bench.dispose();
     await server.close(force: true);
   });
+
+  // Auto mode: a run outlives the app that started it. The app has to see it
+  // (so it can say "still working") and stop it; and a plan card reads as progress.
+  test('a run started elsewhere shows as running and Stop stops it', () async {
+    var running = true;
+    Map<String, Object?>? stopped;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      final res = req.response..headers.contentType = ContentType.json;
+      switch (req.uri.path) {
+        case '/api/conversations':
+          res.write(jsonEncode([{'kind': 'agent', 'id': 'a', 'name': 'A', 'members': ['a']}]));
+        case '/api/bots':
+          res.write(jsonEncode([{'id': 'a', 'name': 'A', 'persona': 'x'}]));
+        case '/api/sessions':
+          res.write(jsonEncode([{'id': 's1', 'title': 'one'}]));
+        case '/api/dm/a':
+          res.write(jsonEncode([
+            {'id': 1, 'role': 'tool', 'name': 'update_plan', 'output': 'Plan saved',
+              'args': {'plan': [{'step': 'x', 'status': 'completed'}, {'step': 'y', 'status': 'in_progress'}]}},
+          ]));
+        case '/api/runs':
+          res.write(jsonEncode(running ? [{'kind': 'agent', 'id': 'a', 'session': 's1', 'speaker': 'a', 'started_at': 0}] : []));
+        case '/api/runs/stop':
+          stopped = jsonDecode(await utf8.decoder.bind(req).join()) as Map<String, Object?>;
+          running = false;
+          res.write('{"stopped":1}');
+        default:
+          res.write('[]');
+      }
+      await res.close();
+    });
+    final bench = Workbench(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    await bench.refresh();
+    await bench.open(bench.conversations.first);
+    await bench.loadRuns();
+    expect(bench.backgroundRun(bench.current)?.session, 's1');
+    expect(bench.isRunning(bench.current!), isTrue);
+    expect((bench.entries.single as Ran).label, contains('1/2'), reason: 'a plan card says how far along it is');
+
+    await bench.stop();
+    expect(stopped, {'kind': 'agent', 'id': 'a'});
+    expect(bench.backgroundRun(bench.current), isNull);
+    bench.dispose();
+    await server.close(force: true);
+  });
 }

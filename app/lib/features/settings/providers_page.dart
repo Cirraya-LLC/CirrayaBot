@@ -44,6 +44,9 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   /// The platform-wide reasoning effort. '' = send nothing at all.
   String _effort = '';
+
+  /// The platform-wide autonomy: auto (the default) or manual.
+  String _autonomy = 'auto';
   bool _auto = true;
   bool _busy = false;
   String _protocol = 'chat';
@@ -72,6 +75,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       _approvalMode = policy.mode;
       _patterns.text = policy.patterns.join('\n');
       _effort = await widget.api.defaultEffort();
+      _autonomy = await widget.api.defaultAutonomy();
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
     } on ApiException catch (e) {
       _say(e.message, bad: true);
@@ -175,6 +179,13 @@ class _ProvidersPageState extends State<ProvidersPage> {
     await _act(tr('prov.saving'), () async {
       await widget.api.setDefaultCap(cap.value);
       _say(tr('prov.capSaved', {'cap': cap.value == null ? tr('prov.noCap') : moneyText(cap.value)}), good: true);
+    });
+  }
+
+  Future<void> _saveAutonomy() async {
+    await _act(tr('prov.saving'), () async {
+      await widget.api.setDefaultAutonomy(_autonomy);
+      _say(tr('au.saved'), good: true);
     });
   }
 
@@ -346,6 +357,30 @@ class _ProvidersPageState extends State<ProvidersPage> {
                       ],
                     ),
                     const SizedBox(height: 10),
+                    // Not an upstream's business either: how far Agents go on their own.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            initialValue: _autonomy,
+                            isExpanded: true,
+                            decoration: InputDecoration(labelText: tr('au.title')),
+                            items: [
+                              for (final m in const ['auto', 'manual'])
+                                DropdownMenuItem(value: m, child: Text(tr('au.$m'))),
+                            ],
+                            onChanged: (v) => setState(() => _autonomy = v ?? 'auto'),
+                          ),
+                        ),
+                        const SizedBox(width: 9),
+                        TextButton(onPressed: _busy ? null : _saveAutonomy, child: Text(tr('common.save'))),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(tr('au.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+                    const SizedBox(height: 14),
+                    const Divider(height: 1),
+                    const SizedBox(height: 12),
                     // Not an upstream's business either: how hard every model thinks.
                     Row(
                       children: [

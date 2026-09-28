@@ -205,6 +205,8 @@ window.addEventListener('resize', fitSides)
 fitSides()
 
 let BOTS = [], CONVS = [], cur = null, busy = false, filter = ''
+// Messages still being worked on, from /api/runs. In auto mode a run outlives the page that started it.
+let RUNS = [], streaming = null      // streaming: the conversation this page is streaming a reply for
 const bot = id => BOTS.find(b => b.id === id)
 
 // Times like an IM: time of day for today, weekday within a week, date otherwise
@@ -256,7 +258,7 @@ function renderConvs() {
         <div class="crow">
           <span class="cname">${esc(c.name)}</span>
           ${c.tag ? `<span class="tag">${esc(c.tag.length > 14 ? c.tag.slice(0,13) + '…' : c.tag)}</span>` : ''}
-          <span class="ctime">${when(c.at)}</span>
+          ${running(c) ? `<span class="cwork" title="${esc(t('run.working'))}"></span>` : ''}<span class="ctime">${when(c.at)}</span>
         </div>
         <div class="cprev">${esc(c.preview) || `<span style="color:var(--dim2)">${esc(t('side.noMessages'))}</span>`}</div>
       </div>`
@@ -301,7 +303,7 @@ async function openConv(c) {
   paintSession()
 
   if (!await drawHistory(c, ticket)) return
-  renderConvs(); $('#in').focus(); $('#send').disabled = busy
+  renderConvs(); $('#in').focus(); sendMode(); paintRun()
 }
 
 /** Fetch history and redraw it all. Returns false if the user has switched away. */
@@ -558,6 +560,10 @@ function bubble(botId, mine) {
 }
 
 function toolLabel(name, args = {}) {
+  if (name === 'update_plan') {
+    const plan = Array.isArray(args.plan) ? args.plan : []
+    return t('tool.plan', { done: plan.filter(x => x?.status === 'completed').length, n: plan.length })
+  }
   return name === 'bash' ? args.command
     : name === 'read_file' ? t('tool.read', { path: args.path })
     : name === 'write_file' ? t('tool.write', { path: args.path })
@@ -658,15 +664,69 @@ input.addEventListener('input', () => { mSel = 0; renderMention() })
 input.addEventListener('click', renderMention)
 input.addEventListener('blur', () => setTimeout(() => $('#mention').classList.add('hide'), 150))
 $('#mention').onmousedown = e => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); pickMention(mOpts[+d.dataset.i]) } }
-$('#send').onclick = send
+$('#send').onclick = () => busy ? stopRun(streaming) : send()
+
+// ═══ Runs: still working, and Stop ═══
+const running = c => c && RUNS.some(r => r.kind === c.kind && r.id === c.id)
+
+/** The send button is Stop while this page is streaming a reply. */
+function sendMode() {
+  const b = $('#send')
+  b.classList.toggle('stop', busy)
+  b.textContent = busy ? '■' : '↑'
+  b.title = busy ? t('run.stopTitle') : ''
+  b.disabled = busy ? false : !cur
+}
+
+async function stopRun(c = cur) {
+  if (!c) return
+  await fetch(api('/api/runs/stop'), { method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ kind: c.kind, id: c.id }) }).catch(() => {})
+  await loadRuns()
+}
+$('#runstop').onclick = () => stopRun()
+
+/**
+ * The bar above the composer: this conversation is being worked on, but not by a stream on this
+ * page (it was started elsewhere, or before this page was opened/reloaded). History is redrawn
+ * while it runs, so the work shows up as it lands.
+ */
+function paintRun() {
+  const r = !busy && cur && RUNS.find(x => x.kind === cur.kind && x.id === cur.id)
+  $('#runbar').hidden = !r
+  if (!r) return
+  const who = bot(r.speaker)?.name ?? ''
+  $('#runtxt').textContent = t('run.bg', { who, min: Math.max(0, Math.round((Date.now() - r.started_at) / 60000)) })
+}
+
+let runTimer = null
+async function loadRuns() {
+  const was = running(cur)
+  RUNS = await fetch(api('/api/runs')).then(r => r.ok ? r.json() : RUNS).catch(() => RUNS)
+  renderConvs(); paintRun()
+  // Follow a run in the open conversation closely; when it ends, one last redraw shows the answer
+  const now = running(cur)
+  if (cur && !busy && (now || was)) {
+    const before = CONVS.find(x => x.kind === cur.kind && x.id === cur.id)?.at
+    CONVS = await fetch(api('/api/conversations')).then(r => r.json()).catch(() => CONVS)
+    renderConvs()
+    const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id)
+    // Tool calls don't move the list's timestamp, so while it runs redraw every tick — unless the
+    // person has scrolled up to read, which a redraw would yank them away from.
+    const log = $('#log'), reading = log.scrollHeight - log.scrollTop - log.clientHeight > 80
+    if (c && (!now || (!reading || c.at !== before))) { if (!now) { await loadSessions(c); paintSession() } drawHistory(c, shown) }
+  }
+  clearTimeout(runTimer)
+  if (RUNS.length) runTimer = setTimeout(loadRuns, 4000)
+}
 
 async function send() {
   const text = input.value.trim()
   if (!text || !cur || busy) return
   input.value = ''; input.style.height = 'auto'
   bubble(null, true).innerHTML = fmt(text)
-  busy = true; $('#send').disabled = true
   const ticket = shown, target = cur
+  busy = true; streaming = target; sendMode(); paintRun()
   const bubs = new Map(), tools = new Map()
   try {
     const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
@@ -701,7 +761,7 @@ async function send() {
         }
         else if (ev === 'error') { (bubs.get(d.botId)?.el ?? bubble(d.botId, false)).textContent = '⚠ ' + d.message }
         else if (ev === 'note') note(d.text)
-        else if (ev === 'handoff') note(`${bot(d.from)?.name ?? d.from} → @${bot(d.to)?.name ?? d.to}`)
+        else if (ev === 'handoff') note(`${bot(d.from)?.name ?? d.from} → @${bot(d.to)?.name ?? d.to}${d.auto ? ' · ' + t('note.backToLead') : ''}`)
         else if (ev === 'tool') {
           if (d.phase === 'retry') {
             // the failed attempt may have streamed half a sentence; the retry repeats it all
@@ -709,6 +769,7 @@ async function send() {
             note(t('note.retry', { name: bot(d.botId)?.name ?? '', reason: d.reason })); continue
           }
           if (d.phase === 'trim') { note(t('note.trim', { n: d.dropped })); continue }
+          if (d.phase === 'nudge') { bubs.delete(d.botId); note(t('note.nudge', { n: d.open })); continue }
           const key = `${d.botId}:${d.name}:${JSON.stringify(d.args)}`
           if (d.phase === 'run') {
             // Close the current bubble when a tool starts; later text gets a new one, otherwise
@@ -728,7 +789,8 @@ async function send() {
       }
     }
   } catch (e) { if (ticket === shown) note('⚠ ' + (e.message ?? e)) }
-  busy = false; $('#send').disabled = false; input.focus()
+  busy = false; streaming = null; sendMode(); input.focus()
+  loadRuns()
   CONVS = await (await fetch(api('/api/conversations'))).json(); renderConvs()
   loadUsage()                                         // the turn just cost something; show it
   if (cur?.kind === target.kind && cur?.id === target.id) { await loadSessions(cur); paintSession() }
@@ -836,6 +898,9 @@ function editBot(b) {
   $('#bapproval').innerHTML = ['', 'off', 'match', 'all']
     .map(m => `<option value="${m}">${esc(t(m ? `b.approval${m[0].toUpperCase()}${m.slice(1)}` : 'b.approvalDefault'))}</option>`).join('')
   $('#bapproval').value = ['off', 'match', 'all'].includes(b?.approval) ? b.approval : ''
+  $('#bauto').innerHTML = ['', 'auto', 'manual']
+    .map(m => `<option value="${m}">${esc(t(m ? `b.auto${m[0].toUpperCase()}${m.slice(1)}` : 'b.autoDefault'))}</option>`).join('')
+  $('#bauto').value = ['auto', 'manual'].includes(b?.autonomy) ? b.autonomy : ''
   $('#bcap').value = dollars(b?.daily_cap_micro)
   // A cap only means something when the upstream has prices; say so rather than let it look guarded.
   const u = b && spendOf(b.id)
@@ -869,7 +934,7 @@ $('#bsave').onclick = async () => {
   const cap = toMicro($('#bcap').value)
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
-    provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value,
+    provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
     daily_cap_micro: cap === '' ? null : cap }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
@@ -958,7 +1023,20 @@ async function loadProvs() {
 }
 
 $('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
-  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); $('#pdlg').showModal() }
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); await loadAutonomy(); $('#pdlg').showModal() }
+
+async function loadAutonomy() {
+  const r = await (await fetch(api('/api/settings/autonomy'))).json().catch(() => null)
+  if (!r) return
+  $('#pdefauto').innerHTML = (r.modes ?? ['auto', 'manual']).map(m => `<option value="${m}">${esc(t(`au.${m}`))}</option>`).join('')
+  $('#pdefauto').value = r.autonomy ?? 'auto'
+}
+$('#pautosave').onclick = async () => {
+  const r = await fetch(api('/api/settings/autonomy'), { method:'PUT', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ autonomy: $('#pdefauto').value }) })
+  if (!r.ok) { hint((await r.json()).error, 'bad'); return }
+  hint(t('au.saved'), 'good')
+}
 
 async function loadEffort() {
   const r = await (await fetch(api('/api/settings/effort'))).json().catch(() => null)
@@ -1455,6 +1533,7 @@ setInterval(async () => {
   renderConvs()
   loadRoutines()
   loadUsage()
+  if (!RUNS.length) loadRuns()                      // started elsewhere (another tab, a scheduled task)
   const now = cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)
   if (now && now.at !== before && !busy) {
     await loadSessions(now); paintSession()          // a scheduled task may have written into a session of its own
@@ -1475,6 +1554,7 @@ async function reload() {
   try {
     await reload()
     if (CONVS.length) openConv(CONVS[0])
+    loadRuns()
     await loadProvs()
     if (!PROVS.length) { fillProv(null); $('#pdlg').showModal()
       hint(t('p.first')) }

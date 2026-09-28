@@ -464,7 +464,7 @@ Not parallel broadcast, but **relay**:
 3. The speaker ends the reply with `@name` to hand off the work, and the system lets that person speak
    next
 4. No @ = done talking, the group chat stops; `MAX_HANDOFFS=5` and "the same person speaks at most 2
-   rounds" as backstops
+   rounds" as backstops (**manual mode only since 2.30** — in auto a reply without @ goes back to the lead)
 
 Verified on the real machine: `Chief of Staff → @Researcher → @Chief of Staff → stop`,
 and `Researcher writes a file → cp into group/ → @Operator → Operator reads it from group/`.
@@ -994,7 +994,8 @@ back into the input box", which only appear when really typing.
   repointed to B, and group A's artifacts land in group B's shared drive (the concurrent version of 2.14)
 - **Abort when the client disconnects** (`res.on('close')` + an AbortController passed all the way down
   to fetch): otherwise closing the page lets the group relay run all the way through, 6 people × 12
-  steps. Measured: after disconnecting, no replies were stored for 90 seconds
+  steps. Measured: after disconnecting, no replies were stored for 90 seconds. **Manual mode only since
+  2.30** — an auto run is meant to carry on unwatched, and has a Stop button instead
 - **When tools are off (`AGENT_TOOLS` defaults to off), no container is started**, and the persona
   doesn't say "you have your own machine"
 - **Every write endpoint validates**, errors are 400 + one sentence (bad JSON, empty name, duplicate
@@ -1714,6 +1715,66 @@ reply and allowed after, a routine's two runs in one "Daily digest" session. Web
 headless Chromium, zero page errors. Client: 42 tests (a new one for sessions), and on the Linux
 build: panel, search + jump + outline, new session named by its first message, rename, delete.
 
+## 2.30 Auto mode: an agent works until it's done (2026-09-29)
+
+Feedback the boss passed on: "只能催着跑 但是真正的需求是 主动运行 也就是claudecode/codex的auto模式 全自动"
+(it only runs when you keep pushing it; what's actually needed is running on its own — Claude Code /
+Codex auto mode, fully automatic).
+
+Why it had to be pushed, all by design at the time: **12 model calls per turn** then
+"(hit the tool-use limit)", a group relay of **5 handoffs / 2 turns per person** that **stopped the
+moment nobody was @-ed**, models ending turns with "Shall I continue?", and **closing the page
+aborted the run** (2.20).
+
+- **`autonomy`: `auto` (default) / `manual`**, per agent (`agents.autonomy`, '' = follow) over a
+  platform setting (settings key `autonomy`, never set = auto). Rules and limits are pure in
+  `web/autonomy.mjs` (`node web/autonomy.mjs`). manual = exactly the old behaviour.
+- **Limits** (auto / manual): steps per turn 150 / 12, handoffs 40 / 5, turns per colleague 12 / 2.
+  In auto the step count is a runaway guard; **the daily cap is the budget** — an unpriced upstream
+  has no budget at all (2.25), so auto on an unpriced upstream is only held by the step guard.
+- **The plan is how "done" is told from "stopped"**: tool `update_plan` (the whole list each time,
+  statuses pending / in_progress / completed / blocked). When the model ends its turn with steps
+  still pending/in_progress, `runAgent` sends it back with a `[Platform]` user message listing them —
+  **at most 3 times per turn**, and never without a plan (no heuristics on "does the text end in a
+  question"). `blocked` is how an agent says "only the user can unblock this" without being nudged.
+  The stream emits `tool {phase:'nudge', open}`; clients show a note. A plan card is labelled
+  "Plan · 2/5 done".
+- **Prompt**: an auto agent gets a "work on your own until it's done" section — no "shall I…?",
+  assumptions stated instead of asked, verify your work, stop only when done or blocked. **Its
+  persona's "ask a person first about irreversible actions" still stands** — that stop is right.
+- **Group relay in auto**: an @ still wins; a reply with **no @ goes back to the coordinator**
+  (the lead, else the first by order — in auto a group always has one), and **only the coordinator
+  replying without @ ends it**. `nextSpeaker()` in autonomy.mjs; the handoff event carries
+  `auto: true` ("back to the lead"). The relay's mode follows the coordinator's autonomy; each
+  member's step limit and prompt follow their own.
+- **Runs outlive the page** (auto only): `runs` Map in server.mjs keyed by session. On disconnect a
+  manual run aborts as before; an auto run is **detached** and carries on. Pending approval cards of a
+  detached run are refused at once, and later gated calls refuse immediately, with the tool result
+  saying the page was closed (nobody is there to answer; same rule as scheduled tasks). Scheduled
+  tasks register as runs too, so they show up and can be stopped.
+- `GET /api/runs`, `POST /api/runs/stop` `{kind,id}` or `{session}`. **A second message to a session
+  that is still running is 409** `run.busy` (it would race the first for the same history). Stopping
+  maps the fetch AbortError to `chat.aborted` ("Stopped") and **writes "(Stopped before finishing.)"
+  into the transcript** (`stopNoted`) — otherwise a reopened conversation shows a question and some
+  tool cards and then nothing, which reads as "still thinking".
+- The chat stream sends `: ping` every 25s: long tool runs are silent for minutes, and the client's
+  own 5-minute silence timer (2.20) would otherwise hang up on a working agent.
+- **UI** (both): the send button is **Stop** while this page streams; a pulsing dot in the list marks
+  conversations being worked on; a bar above the composer says "X is still working on this in the
+  background · N min" with Stop when the run isn't streamed here (reloaded page, other device,
+  scheduled task). While that runs, history is polled every 4s (`loadRuns`) — **tool rows don't move
+  the conversation list's `at`**, so the web redraws each tick unless the person has scrolled up.
+
+Verified: scripted fake upstream (tools on, real worker containers): plan stopped at "Shall I
+continue?" → nudged → finished; 150 vs 12 steps; group auto returns Researcher → Chief who ends it,
+manual stops after Researcher; disconnect in auto → run finished and stored, 409 meanwhile; disconnect
+in manual → aborted; a `git push` waiting for approval refused when the page closed; Stop attached and
+detached, with the transcript note. Web in headless Chromium (plan cards, nudge note, Stop, run bar
+after reload, list dot, editor + settings selects, no page errors). Client: 43 tests (a new one for
+runs/Stop/plan label); Linux build: Stop while streaming, app killed mid-run → run finished, restarted
+app shows the run bar, Stop from it, settings row. **Not verified with a real model** — whether a given
+model actually keeps its plan current is up to the model; the nudge only holds it to one it wrote.
+
 ## 3. What runs now
 
 ```bash
@@ -1725,6 +1786,7 @@ node web/skill.mjs         # self-test for SKILL.md read/write
 node web/approve.mjs       # self-test for which tool calls need a person
 node web/sandbox.mjs       # self-test for what an agent's container sees (mounts, caps, the path guard)
 node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
+node web/autonomy.mjs      # self-test for auto mode: limits, the plan, nudges, the relay
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/
