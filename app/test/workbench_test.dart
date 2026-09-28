@@ -24,6 +24,10 @@ Future<(HttpServer, Completer<void>)> fakeServer({String historyB = 'B history',
           {'id': 'a', 'name': 'A', 'persona': 'x'},
           {'id': 'b', 'name': 'B', 'persona': 'x'},
         ]));
+      case '/api/sessions':
+        res.write(jsonEncode([
+          {'id': 's-${req.uri.queryParameters['id']}', 'title': 'only'},
+        ]));
       case '/api/dm/a':
         res.write('[]');
       case '/api/dm/b':
@@ -120,6 +124,7 @@ void main() {
         '/api/conversations' => jsonEncode([{'kind': 'agent', 'id': 'a', 'name': 'A', 'members': ['a'], 'at': at}]),
         '/api/bots' => jsonEncode([{'id': 'a', 'name': 'A', 'persona': 'x'}]),
         '/api/dm/a' => jsonEncode(history),
+        '/api/sessions' => '[{"id":"s1","title":"only"}]',
         '/api/routines' => '[]',
         '/api/memory/agent/a' => '{"text":""}',
         _ => '{}',
@@ -143,6 +148,63 @@ void main() {
     bench.busy = true;
     await bench.poll();
     expect((bench.entries.last as Said).text, 'routine result');
+    bench.dispose();
+    await server.close(force: true);
+  });
+
+  // A conversation holds several sessions. The screen asks for one session's
+  // history, a new session is nothing until its first message (the chat asks
+  // for 'new' and the server names it), and a search hit opens its session.
+  test('sessions: new one starts empty, the server names it, a hit opens its session', () async {
+    final asked = <String>[];
+    String? chatSession;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      final res = req.response..headers.contentType = ContentType.json;
+      asked.add('${req.uri.path}?${req.uri.query}');
+      switch (req.uri.path) {
+        case '/api/conversations':
+          res.write(jsonEncode([{'kind': 'agent', 'id': 'a', 'name': 'A', 'members': ['a']}]));
+        case '/api/bots':
+          res.write(jsonEncode([{'id': 'a', 'name': 'A', 'persona': 'x'}]));
+        case '/api/sessions':
+          res.write(jsonEncode([
+            {'id': 's2', 'title': 'latest', 'count': 1},
+            {'id': 's1', 'title': 'older', 'count': 1},
+          ]));
+        case '/api/dm/a':
+          final ses = req.uri.queryParameters['session'];
+          res.write(jsonEncode([{'id': ses == 's1' ? 11 : 22, 'role': 'user', 'content': 'in $ses'}]));
+        case '/api/chat':
+          chatSession = (jsonDecode(await utf8.decoder.bind(req).join()) as Map)['session'] as String?;
+          res.headers.contentType = ContentType('text', 'event-stream', charset: 'utf-8');
+          res.write('event: session\ndata: {"id":"s3"}\n\n');
+          res.write('event: delta\ndata: {"botId":"a","text":"hi"}\n\n');
+          res.write('event: done\ndata: {}\n\n');
+        default:
+          res.write('[]');
+      }
+      await res.close();
+    });
+    final bench = Workbench(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    await bench.refresh();
+    await bench.open(bench.conversations.first);
+    expect(bench.session, 's2', reason: 'opens on the most recent session');
+    expect((bench.entries.single as Said).text, 'in s2');
+
+    await bench.openSession('s1', jumpTo: 11);
+    expect((bench.entries.single as Said).text, 'in s1');
+    expect(bench.entries.single.id, 11, reason: 'history rows keep their id, so a hit can find its message');
+    expect(bench.jumpTo, 11);
+
+    await bench.newSession();
+    expect(bench.session, isNull);
+    expect(bench.entries, isEmpty, reason: 'nothing from the other sessions carries over');
+    await bench.send('fresh');
+    expect(chatSession, 'new', reason: 'the session is created by its first message');
+    expect(bench.session, 's3', reason: 'the id the server named it');
+    expect(asked.where((a) => a.startsWith('/api/dm/a')), everyElement(contains('session=')));
+
     bench.dispose();
     await server.close(force: true);
   });

@@ -13,6 +13,11 @@ answering on their own.
   `cp report.md group/` is how you hand something to a coworker.
 - **Memory carries across contexts** — what was discussed in a group, he still remembers
   in a direct chat.
+- **Sessions, and search across them** — a DM or a group holds as many separate sessions as you
+  like (the ▾ next to the name in the chat header: new, switch, rename, delete). The model only
+  sees the session on screen; memory and skills carry across all of them. The same panel searches
+  everything said in that conversation and jumps to the message. Scheduled tasks write into a
+  session of their own, and an imported history becomes a new session.
 - **Bring your own model upstream** — name / endpoint URL / key / model / context window.
   Configure several and switch any time. Three API shapes are supported:
   OpenAI Chat Completions, OpenAI Responses and Anthropic Messages.

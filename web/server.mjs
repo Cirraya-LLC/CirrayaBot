@@ -88,11 +88,60 @@ async function listConversations(lang) {
  * making both frontends parse it; a row that somehow isn't JSON is dropped to text.
  */
 function transcriptRow(m, text) {
-  if (m.role !== 'tool') return { role: m.role, at: m.at, ...text }
+  // id: a search hit jumps to its message, so the transcript has to say which row is which.
+  if (m.role !== 'tool') return { id: Number(m.id), role: m.role, at: m.at, ...text }
   try {
     const { name, args, output } = JSON.parse(m.content)
-    return { role: 'tool', speaker: m.speaker, at: m.at, name, args: args ?? {}, output: output ?? '' }
-  } catch { return { role: m.role, at: m.at, ...text } }
+    return { id: Number(m.id), role: 'tool', speaker: m.speaker, at: m.at, name, args: args ?? {}, output: output ?? '' }
+  } catch { return { id: Number(m.id), role: m.role, at: m.at, ...text } }
+}
+
+// ---------- Sessions ----------
+// A conversation (a DM, a group) holds several sessions; the model only sees the current one.
+
+const scopeOf = kind => (kind === 'group' ? 'group' : 'dm')
+
+/**
+ * The session a turn goes into. An id must belong to this conversation — a session is not a
+ * way to read another agent's history. 'new' starts one (so an unused "New session" leaves
+ * nothing behind); nothing at all carries on in the most recent, or starts the first.
+ */
+async function sessionFor(scope, scopeId, want) {
+  if (want && want !== 'new') {
+    const s = await db.getSession(want)
+    if (!s || s.scope !== scope || s.scope_id !== scopeId) throw new Say('session.none', {}, 404)
+    return s.id
+  }
+  if (!want) {
+    const s = await db.latestSession(scope, scopeId)
+    if (s) return s.id
+  }
+  return (await db.createSession(scope, scopeId)).id
+}
+
+// Sessions a turn is running in right now. Deleting one of those would leave the turn writing
+// into a session that no longer exists, so it is refused until the turn ends.
+const liveSessions = new Map()
+const holdSession = id => liveSessions.set(id, (liveSessions.get(id) ?? 0) + 1)
+const releaseSession = id => { const n = (liveSessions.get(id) ?? 1) - 1; n > 0 ? liveSessions.set(id, n) : liveSessions.delete(id) }
+
+/** A session's transcript, tool rows included. Without a session, the most recent one. */
+async function historyOf(scope, scopeId, want) {
+  const s = want ? await db.getSession(want) : await db.latestSession(scope, scopeId)
+  if (!s || s.scope !== scope || s.scope_id !== scopeId) {
+    if (want) throw new Say('session.none', {}, 404)
+    return []
+  }
+  return db.recent(scope, scopeId, FETCH_MAX, { tools: true, session: s.id })
+}
+
+/** About 140 characters around the first match, so a hit in a long reply still shows why it matched. */
+function snippetAround(content, text) {
+  const flat = String(content).replace(/\s+/g, ' ')
+  const at = flat.toLowerCase().indexOf(text.toLowerCase())
+  if (at < 0) return flat.slice(0, 140)
+  const from = Math.max(0, at - 50)
+  return (from > 0 ? '…' : '') + flat.slice(from, from + 140) + (from + 140 < flat.length ? '…' : '')
 }
 
 const MAX_HANDOFFS = 5       // max handoffs between agents in one round, so they can't chat forever
@@ -675,7 +724,7 @@ Do not try this again. Do it another way, or say why you cannot.`
       onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {} })
       // Keep the call in the transcript, cut to the same length the live stream shows — reopening a
       // conversation should show the same cards, not more and not fewer.
-      if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.bot?.name ?? '',
+      if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.session, ctx.bot?.name ?? '',
         { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE) })
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
     }
@@ -734,34 +783,35 @@ function dropImages(messages, note = '(a screenshot was here; the current model 
 }
 
 // One-on-one
-function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate) {
+function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate, session) {
   return withAgent(bot.id, async () => {
-    const prior = (await db.recent('dm', bot.id, FETCH_MAX))
+    // Only this session's history: a new session is a clean slate for the model, not a new view of the old one
+    const prior = (await db.recent('dm', bot.id, FETCH_MAX, { session }))
       .map(m => ({ role: m.role, content: m.content }))
     // Store first, then start the container: if the container won't start, what the user said shouldn't vanish with it
-    await db.addMessage('dm', bot.id, { role: 'user', speaker: USER_SPEAKER, content: text })
+    await db.addMessage('dm', bot.id, session, { role: 'user', speaker: USER_SPEAKER, content: text })
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
     const full = await runAgent(p,
       [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id)) },
        ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, ...gate })
-    await db.addMessage('dm', bot.id, { role: 'assistant', speaker: bot.name, content: full })
+      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, ...gate })
+    await db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content: full })
     return full
   })
 }
 
 // One person speaking once in a group chat: he sees the WHOLE group log, with other people's words prefixed by name
-function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate) {
+function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate, session) {
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
     const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead) }]
-    for (const e of await db.recent('group', groupId, FETCH_MAX)) {
+    for (const e of await db.recent('group', groupId, FETCH_MAX, { session })) {
       messages.push(e.speaker === bot.name
         ? { role: 'assistant', content: e.content }                                   // what he said himself
         : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
     }
-    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, ...gate })
+    return runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, session, ...gate })
   })
 }
 
@@ -792,8 +842,16 @@ function findMention(text, peers) {
  * Sending from the UI and a scheduled task firing both go through this one function — two implementations would drift apart.
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
-async function converse(bots, groupId, providers, text, emit, signal, lang = 'en', { unattended = false } = {}) {
+async function converse(bots, groupId, providers, text, emit, signal, lang = 'en', { unattended = false, session: want = null } = {}) {
+  let session = null
   try {
+    // Which session this goes into, said first: a client that asked for a new one learns its id
+    // before the first word arrives, and switches its session list over to it.
+    session = groupId || bots.length > 1
+      ? await sessionFor('group', groupId ?? 'main', want)
+      : await sessionFor('dm', bots[0].id, want)
+    holdSession(session)
+    emit('session', { id: session })
     const policy = await approvalPolicy()
     // Per agent: its own setting wins, otherwise the platform's. Resolved here so one turn can't
     // change its mind halfway through because someone saved the settings dialog.
@@ -804,13 +862,13 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
       await askSolo(providers.get(bot.id), bot, text,
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
         d => emit('delta', { botId: bot.id, text: d }),
-        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang, gateFor(bot))
+        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang, gateFor(bot), session)
       emit('end', { botId: bot.id })
     } else {
       // Group chat: colleagues relay. Who speaks first — whoever the user @-ed; if nobody, the group's lead;
       // if no lead is set, whoever sorts first (the old behavior; Chief of Staff is 0).
       const gid = groupId ?? 'main'
-      await db.addMessage('group', gid, { role: 'user', speaker: USER_SPEAKER, content: text })
+      await db.addMessage('group', gid, session, { role: 'user', speaker: USER_SPEAKER, content: text })
       const g = (await db.listGroups()).find(x => x.id === gid)
       const lead = bots.find(b => b.id === g?.lead) ?? null
       let speaker = findMention(text, bots) ?? lead ?? bots[0]
@@ -825,12 +883,12 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
               group: await db.getMemory('group', gid) },
             d => emit('delta', { botId: speaker.id, text: d }),
             t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }),
-            gid, signal, lang, gateFor(speaker))
+            gid, signal, lang, gateFor(speaker), session)
         } catch (e) {
           emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
           break
         }
-        await db.addMessage('group', gid, { role: 'assistant', speaker: speaker.name, content: reply })
+        await db.addMessage('group', gid, session, { role: 'assistant', speaker: speaker.name, content: reply })
         emit('end', { botId: speaker.id })
 
         const next = findMention(reply, peers)
@@ -846,6 +904,8 @@ async function converse(bots, groupId, providers, text, emit, signal, lang = 'en
     }
   } catch (e) {
     emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
+  } finally {
+    if (session) releaseSession(session)
   }
 }
 
@@ -888,9 +948,17 @@ async function runRoutine(r) {
     for (const b of bots) providers.set(b.id, await providerFor(b))
     // The opening line tells the agent this isn't a human talking live, so the result must be written out for when they come back
     const text = `[Scheduled task "${r.name}", sent automatically — nobody is watching live. When you're done, write up the result clearly.]\n${r.prompt}`
+    // A session of its own, named after the task: its runs line up together instead of landing in
+    // the middle of whatever the person was talking about. Recreated if someone deleted it.
+    const scope = groupId ? 'group' : 'dm', scopeId = groupId ?? bots[0].id
+    let session = r.session_id ? await db.getSession(r.session_id) : null
+    if (!session || session.scope !== scope || session.scope_id !== scopeId) {
+      session = await db.createSession(scope, scopeId, r.name)
+      await db.setRoutineSession(r.id, session.id)
+    }
     await converse(bots, groupId, providers, text,
       (ev, d) => { if (ev === 'error' && !error) { error = d.message; capped = d.capped === true } },
-      new AbortController().signal, 'en', { unattended: true })
+      new AbortController().signal, 'en', { unattended: true, session: session.id })
   } catch (e) {
     error = errorText(e, 'en').slice(0, 300)
   } finally {
@@ -1181,12 +1249,47 @@ const server = createServer(async (req, res) => {
   try {
     if (url.pathname === '/api/conversations') return send(200, await listConversations(lang))
 
-    // Direct chat history: the frontend wants {role, content, at}
+    // Direct chat history: the frontend wants {role, content, at}. ?session= picks one; without it,
+    // the most recent (what an old client, which knows nothing of sessions, would expect to see).
     const dm = url.pathname.match(/^\/api\/dm\/([a-z0-9-]+)$/)
     if (dm && req.method === 'GET')
-      return send(200, (await db.recent('dm', dm[1], FETCH_MAX, { tools: true }))
+      return send(200, (await historyOf('dm', dm[1], url.searchParams.get('session')))
         .map(m => transcriptRow(m, { content: m.content })))
-    if (dm && req.method === 'DELETE') { await db.clearMessages('dm', dm[1]); return send(200, { ok: true }) }
+
+    // Sessions of one conversation: ?kind=agent|group&id=
+    if (url.pathname === '/api/sessions' && req.method === 'GET') {
+      const kind = url.searchParams.get('kind'), id = url.searchParams.get('id') ?? ''
+      return send(200, await db.listSessions(scopeOf(kind), id))
+    }
+    const sm = url.pathname.match(/^\/api\/sessions\/([\w-]+)$/)
+    if (sm) {
+      const s = await db.getSession(sm[1])
+      if (!s) return send(404, { error: t('session.none') })
+      if (req.method === 'PATCH') {
+        const title = str((await readBody(req)).title).replace(/\s+/g, ' ').trim()
+        if (title.length > 80) return send(400, { error: t('session.titleLong') })
+        await db.renameSession(s.id, title)
+        return send(200, { ok: true })
+      }
+      if (req.method === 'DELETE') {
+        if (liveSessions.has(s.id)) return send(409, { error: t('session.busy') })
+        await db.deleteSession(s.id)
+        return send(200, { ok: true })
+      }
+    }
+
+    // Search what was said: ?q= plus ?kind=&id= for one conversation (all its sessions), or everywhere
+    if (url.pathname === '/api/search' && req.method === 'GET') {
+      const text = (url.searchParams.get('q') ?? '').trim()
+      if (!text) return send(200, [])
+      const kind = url.searchParams.get('kind'), id = url.searchParams.get('id')
+      const rows = await db.searchMessages(text.slice(0, 200), kind ? { scope: scopeOf(kind), scopeId: id } : {})
+      return send(200, rows.map(r => ({
+        id: Number(r.id), session: r.session_id, kind: r.scope === 'group' ? 'group' : 'agent', conv: r.scope_id,
+        role: r.role, speaker: r.speaker === USER_SPEAKER ? '' : r.speaker, at: r.at,
+        snippet: snippetAround(r.content, text),
+      })))
+    }
 
     if (url.pathname === '/api/bots' && req.method === 'GET') return send(200, await loadBots(lang))
 
@@ -1512,7 +1615,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       // target: {type:'agent'|'group', id}. botIds is the old field, kept for compatibility.
-      const { target, botIds = [], text = '' } = await readBody(req)
+      const { target, botIds = [], text = '', session = null } = await readBody(req)
       const all = await loadBots()
       let bots, groupId = null
       if (target?.type === 'group') {
@@ -1540,7 +1643,7 @@ const server = createServer(async (req, res) => {
       const ac = new AbortController()
       res.on('close', () => { if (!res.writableEnded) ac.abort() })
 
-      await converse(bots, groupId, providers, text, emit, ac.signal, lang)
+      await converse(bots, groupId, providers, text, emit, ac.signal, lang, { session: str(session) || null })
       emit('done', {})
       return res.end()
     }
@@ -1575,9 +1678,14 @@ const server = createServer(async (req, res) => {
       const conv = scope === 'dm' ? await db.getAgent(id) : (await db.listGroups()).find(g => g.id === id)
       if (!conv) return send(404, { error: t(scope === 'dm' ? 'err.noAgent' : 'err.noGroup') })
       if (op === 'export' && req.method === 'GET') {
-        const messages = await db.recent(scope, id, 1_000_000)
+        // One session — the one asked for, else the most recent. It is what's on screen when someone presses Export.
+        const want = url.searchParams.get('session')
+        const sess = want ? await db.getSession(want) : await db.latestSession(scope, id)
+        if (want && (!sess || sess.scope !== scope || sess.scope_id !== id)) return send(404, { error: t('session.none') })
+        const messages = sess ? await db.recent(scope, id, 1_000_000, { session: sess.id }) : []
+        const title = sess ? (await db.listSessions(scope, id)).find(x => x.id === sess.id)?.title ?? '' : ''
         return send(200, { format: 'multi-agent-chat', version: 1, kind: scope === 'dm' ? 'agent' : 'group',
-          id, name: conv.name, exported_at: new Date().toISOString(),
+          id, name: conv.name, session: title, exported_at: new Date().toISOString(),
           messages: messages.map(m => ({ role: m.role, speaker: m.speaker, content: m.content, at: new Date(m.at).toISOString() })) })
       }
       if (op === 'import' && req.method === 'POST') {
@@ -1594,16 +1702,18 @@ const server = createServer(async (req, res) => {
           rows.push({ role: m.role, speaker: str(m.speaker) || (m.role === 'user' ? USER_SPEAKER : conv.name),
             content: m.content, at })
         }
-        await db.importMessages(scope, id, rows, { replace: b.replace === true })
-        return send(200, { imported: rows.length })
+        // Always into a session of its own: appending someone else's history to the one on screen
+        // would make the model read two unrelated threads as one.
+        const title = str(doc.session).trim().slice(0, 80) || t('session.imported', { name: str(doc.name) || conv.name })
+        const session = await db.importMessages(scope, id, rows, title)
+        return send(200, { imported: rows.length, session })
       }
     }
 
     const gr = url.pathname.match(/^\/api\/groups\/([\w-]+)\/messages$/)
     if (gr && req.method === 'GET')
-      return send(200, (await db.recent('group', gr[1], FETCH_MAX, { tools: true }))
+      return send(200, (await historyOf('group', gr[1], url.searchParams.get('session')))
         .map(m => transcriptRow(m, { speaker: m.speaker, text: m.content })))
-    if (gr && req.method === 'DELETE') { await db.clearMessages('group', gr[1]); return send(200, { ok: true }) }
 
     // Static files
     const p = url.pathname === '/' ? '/index.html' : url.pathname

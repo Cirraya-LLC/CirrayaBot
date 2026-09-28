@@ -164,6 +164,24 @@ alter table agents add column if not exists approval text not null default '';
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
 alter table messages drop constraint if exists messages_role_check;
 alter table messages add constraint messages_role_check check (role in ('user','assistant','tool'));
+
+-- Sessions: one conversation (a DM with an agent, a group) can hold several separate threads,
+-- so unrelated work doesn't pile into one history. The model only ever sees the current
+-- session; memory, skills and group recall still span all of them. title '' = not named yet
+-- (the list derives one from the first thing the person said).
+create table if not exists sessions (
+  id         text primary key,
+  scope      text not null check (scope in ('dm','group')),
+  scope_id   text not null,
+  title      text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists sessions_conv_idx on sessions (scope, scope_id, updated_at desc);
+alter table messages add column if not exists session_id text;
+create index if not exists messages_session_idx on messages (session_id, id);
+-- A scheduled task writes into a session of its own, not into whatever the person has open.
+alter table routines add column if not exists session_id text;
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -181,7 +199,23 @@ export async function connect({ tries = 30, waitMs = 2000 } = {}) {
   }
 }
 
-export async function migrate() { await q(SCHEMA) }
+export async function migrate() {
+  await q(SCHEMA)
+  await adoptLooseMessages()
+}
+
+// History from before sessions existed: each conversation's messages become one session.
+// The id is derived from the conversation, so running this twice (or after the first-start seed
+// imports old files) lands in the same session instead of a new one.
+async function adoptLooseMessages() {
+  await q(`
+    insert into sessions (id, scope, scope_id, created_at, updated_at)
+    select 's' || substr(md5(scope || ':' || scope_id), 1, 12), scope, scope_id, min(at), max(at)
+    from messages where session_id is null group by scope, scope_id
+    on conflict (id) do nothing`)
+  await q(`update messages set session_id = 's' || substr(md5(scope || ':' || scope_id), 1, 12)
+           where session_id is null`)
+}
 
 // ---------- Agent ----------
 const COLORS = ['#4f8cff', '#3ecf8e', '#ffb454', '#c678dd', '#e06c75', '#56b6c2', '#d19a66']
@@ -222,6 +256,7 @@ export async function deleteAgent(id) {
   await q(`update groups set members = array_remove(members, $1)`, [id])
   await q(`update groups set lead = null where lead = $1`, [id])
   await q(`delete from messages where scope = 'dm' and scope_id = $1`, [id])
+  await q(`delete from sessions where scope = 'dm' and scope_id = $1`, [id])
   await q('delete from agents where id = $1', [id])
   await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id)]])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
@@ -246,58 +281,123 @@ export async function saveGroup(g) {
 
 export async function deleteGroup(id) {
   await q(`delete from messages where scope = 'group' and scope_id = $1`, [id])
+  await q(`delete from sessions where scope = 'group' and scope_id = $1`, [id])
   await q('delete from groups where id = $1', [id])
   await q('delete from settings where key = $1', [memKey('group', id)])
   await q(`delete from routines where target_kind = 'group' and target_id = $1`, [id])
 }
 
+// ---------- sessions ----------
+const newSessionId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+
+export async function createSession(scope, scopeId, title = '') {
+  const { rows } = await q(
+    'insert into sessions (id, scope, scope_id, title) values ($1,$2,$3,$4) returning *',
+    [newSessionId(), scope, scopeId, title])
+  return rows[0]
+}
+
+export async function getSession(id) {
+  return (await q('select * from sessions where id = $1', [id])).rows[0] ?? null
+}
+
+/** The session a conversation carries on in when nobody named one: the most recently active. */
+export async function latestSession(scope, scopeId) {
+  return (await q('select * from sessions where scope = $1 and scope_id = $2 order by updated_at desc, id desc limit 1',
+    [scope, scopeId])).rows[0] ?? null
+}
+
+/**
+ * A conversation's sessions, most recent first. `title` is the name given, or else the start of
+ * the first thing the person said; '' means neither exists yet and the UI says "New session".
+ */
+export async function listSessions(scope, scopeId) {
+  const { rows } = await q(`
+    select s.id, s.title as name, s.created_at, s.updated_at,
+      (select count(*)::int from messages m where m.session_id = s.id and m.role <> 'tool') as count,
+      (select content from messages m where m.session_id = s.id and m.role = 'user' order by m.id limit 1) as first
+    from sessions s where s.scope = $1 and s.scope_id = $2
+    order by s.updated_at desc, s.id desc`, [scope, scopeId])
+  return rows.map(({ name, first, ...r }) => ({
+    ...r, named: !!name, title: name || String(first ?? '').replace(/^\[Scheduled task[^\]]*\]\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 60),
+  }))
+}
+
+export async function renameSession(id, title) {
+  await q('update sessions set title = $2 where id = $1', [id, title])
+}
+
+export async function deleteSession(id) {
+  await q('delete from messages where session_id = $1', [id])
+  await q('delete from sessions where id = $1', [id])
+}
+
 // ---------- messages ----------
-export async function addMessage(scope, scopeId, { role, speaker = '', content }) {
-  await q('insert into messages (scope, scope_id, role, speaker, content) values ($1,$2,$3,$4,$5)',
-    [scope, scopeId, role, speaker, content])
+export async function addMessage(scope, scopeId, session, { role, speaker = '', content }) {
+  await q('insert into messages (scope, scope_id, session_id, role, speaker, content) values ($1,$2,$3,$4,$5,$6)',
+    [scope, scopeId, session, role, speaker, content])
+  await q('update sessions set updated_at = now() where id = $1', [session])
 }
 
 /** A finished tool call, kept so the transcript still shows the work after a reload. */
-export async function addTool(scope, scopeId, speaker, { name, args, output }) {
-  await q('insert into messages (scope, scope_id, role, speaker, content) values ($1,$2,$3,$4,$5)',
-    [scope, scopeId, 'tool', speaker, JSON.stringify({ name, args, output })])
+export async function addTool(scope, scopeId, session, speaker, { name, args, output }) {
+  await q('insert into messages (scope, scope_id, session_id, role, speaker, content) values ($1,$2,$3,$4,$5,$6)',
+    [scope, scopeId, session, 'tool', speaker, JSON.stringify({ name, args, output })])
 }
 
 /**
  * The latest `limit` messages, returned oldest first (the model wants old to new).
  * Tool rows are for the transcript only: the model builds its own tool messages inside a turn,
  * and feeding these back would hand it a second, malformed copy of its own work.
+ * With `session`, only that session; without, the whole conversation (group recall reads that way).
  */
-export async function recent(scope, scopeId, limit = 200, { tools = false } = {}) {
+export async function recent(scope, scopeId, limit = 200, { tools = false, session = null } = {}) {
   const { rows } = await q(
-    `select role, speaker, content, at from messages
+    `select id, role, speaker, content, at from messages
      where scope = $1 and scope_id = $2 ${tools ? '' : "and role <> 'tool'"}
+       ${session ? 'and session_id = $4' : ''}
      order by id desc limit $3`,
-    [scope, scopeId, limit])
+    session ? [scope, scopeId, limit, session] : [scope, scopeId, limit])
   return rows.reverse()
 }
 
-/** Import in one transaction: a failure halfway leaves no half-written history. */
-export async function importMessages(scope, scopeId, rows, { replace = false } = {}) {
+/** An imported history becomes a session of its own, in one transaction. */
+export async function importMessages(scope, scopeId, rows, title = '') {
   const c = await pool.connect()
   try {
     await c.query('begin')
-    if (replace) await c.query('delete from messages where scope = $1 and scope_id = $2', [scope, scopeId])
+    const id = newSessionId()
+    await c.query('insert into sessions (id, scope, scope_id, title) values ($1,$2,$3,$4)', [id, scope, scopeId, title])
     for (const m of rows)
-      await c.query(`insert into messages (scope, scope_id, role, speaker, content, at)
-                     values ($1,$2,$3,$4,$5, coalesce($6::timestamptz, now()))`,
-        [scope, scopeId, m.role, m.speaker, m.content, m.at])
+      await c.query(`insert into messages (scope, scope_id, session_id, role, speaker, content, at)
+                     values ($1,$2,$3,$4,$5,$6, coalesce($7::timestamptz, now()))`,
+        [scope, scopeId, id, m.role, m.speaker, m.content, m.at])
     await c.query('commit')
+    return id
   } catch (e) { await c.query('rollback'); throw e }
   finally { c.release() }
 }
 
-export async function agentsUsingProvider(id) {
-  return (await q('select name from agents where provider_id = $1', [id])).rows.map(r => r.name)
+/**
+ * Search what was said in a conversation (all its sessions), or everywhere without scope.
+ * A plain substring, case-insensitive: people search for a word they remember, not a pattern,
+ * so % and _ in the query are literal. Newest first.
+ */
+export async function searchMessages(text, { scope = null, scopeId = null, limit = 50 } = {}) {
+  const like = '%' + text.replace(/[\\%_]/g, c => '\\' + c) + '%'
+  const params = [like, limit]
+  let where = ''
+  if (scope) { params.push(scope, scopeId); where = 'and m.scope = $3 and m.scope_id = $4' }
+  const { rows } = await q(`
+    select m.id, m.session_id, m.scope, m.scope_id, m.role, m.speaker, m.content, m.at, s.title
+    from messages m left join sessions s on s.id = m.session_id
+    where m.role <> 'tool' and m.content ilike $1 ${where}
+    order by m.id desc limit $2`, params)
+  return rows
 }
 
-export async function clearMessages(scope, scopeId) {
-  await q('delete from messages where scope = $1 and scope_id = $2', [scope, scopeId])
+export async function agentsUsingProvider(id) {
+  return (await q('select name from agents where provider_id = $1', [id])).rows.map(r => r.name)
 }
 
 /** The last message of each conversation. The conversation list sorts by it, in one query. */
@@ -388,6 +488,10 @@ export async function saveRoutine(r) {
     on conflict (id) do update set ${cols.slice(1).map(c => `${c} = excluded.${c}`).join(', ')}
     returning *`, vals)
   return rows[0]
+}
+
+export async function setRoutineSession(id, session) {
+  await q('update routines set session_id = $2 where id = $1', [id, session])
 }
 
 export async function deleteRoutine(id) {
@@ -581,6 +685,7 @@ export async function seed(root) {
 
   const mem = await readFile(join(root, 'workspace', 'MEMORY.md'), 'utf8').catch(() => '')
   if (mem.trim()) await setSetting('memory', mem)
+  await adoptLooseMessages()
 
   return { seeded: true, ...imported }
 }

@@ -120,5 +120,9 @@ export const serverStrings = {
 
   // Chat history import
   'import.badFile': ['This is not a chat history file exported by this app', '不是本产品导出的聊天记录文件', '不是本產品匯出的聊天紀錄檔案'],
+  'session.none':     ['No such session', '没有这个会话', '沒有這個會話'],
+  'session.busy':     ['A reply is still being written in this session; delete it once it finishes', '这个会话里还有回复在进行，等它结束再删', '這個會話裡還有回覆在進行，等它結束再刪'],
+  'session.titleLong':['A session name can be at most 80 characters', '会话名最多 80 个字', '會話名稱最多 80 個字'],
+  'session.imported': ['Imported: {name}', '导入：{name}', '匯入：{name}'],
   'import.badRow':  ['Message {n} is malformed (it needs role and content)', '第 {n} 条格式不对（要有 role 和 content）', '第 {n} 則格式不對（需要 role 和 content）'],
 }
