@@ -122,14 +122,70 @@ class Message {
     required this.at,
     this.tool,
     this.args = const {},
+    this.id,
   });
 
+  /// The server's row id — a search hit names the message it found by this.
+  final int? id;
   final bool mine;
   final String speaker;
   final String text;
   final int at;
   final String? tool;
   final Map<Object?, Object?> args;
+}
+
+/// One thread of a conversation. A conversation (a DM, a group) holds several;
+/// the model only ever sees the one on screen.
+class Session {
+  const Session({required this.id, this.title = '', this.named = false, this.count = 0, this.updatedAt = 0});
+
+  factory Session.fromJson(Map<String, Object?> j) => Session(
+    id: (j['id'] as String?) ?? '',
+    title: (j['title'] as String?) ?? '',
+    named: j['named'] == true,
+    count: (j['count'] as num?)?.toInt() ?? 0,
+    updatedAt: (j['updated_at'] as num?)?.toInt() ?? 0,
+  );
+
+  final String id;
+
+  /// The name given, or the start of the first thing the person said. '' when
+  /// neither exists yet — the screen says "New session".
+  final String title;
+
+  /// Whether [title] was given by someone, rather than derived.
+  final bool named;
+  final int count;
+  final int updatedAt;
+}
+
+/// A message that matched a search, and where it lives.
+class SearchHit {
+  const SearchHit({
+    required this.id,
+    required this.session,
+    required this.mine,
+    required this.speaker,
+    required this.snippet,
+    required this.at,
+  });
+
+  factory SearchHit.fromJson(Map<String, Object?> j) => SearchHit(
+    id: (j['id'] as num?)?.toInt() ?? 0,
+    session: (j['session'] as String?) ?? '',
+    mine: j['role'] == 'user',
+    speaker: (j['speaker'] as String?) ?? '',
+    snippet: (j['snippet'] as String?) ?? '',
+    at: (j['at'] as num?)?.toInt() ?? 0,
+  );
+
+  final int id;
+  final String session;
+  final bool mine;
+  final String speaker;
+  final String snippet;
+  final int at;
 }
 
 /// The platform-wide answer to "when does an Agent have to ask first".
@@ -550,14 +606,16 @@ class Api {
   /// The transcript, in the shape the screen draws. The two endpoints answer
   /// different field names for the same thing — normalising here keeps that
   /// out of the widgets.
-  Future<List<Message>> history(Conversation c) async {
+  Future<List<Message>> history(Conversation c, String session) async {
+    final q = '?session=${Uri.encodeQueryComponent(session)}';
     if (c.isGroup) {
-      final j = await _list('/api/groups/${c.id}/messages');
+      final j = await _list('/api/groups/${c.id}/messages$q');
       return j.map((e) {
         final m = e as Map<String, Object?>;
         final speaker = (m['speaker'] as String?) ?? '';
         if (m['role'] == 'tool') return _toolMessage(m, speaker);
         return Message(
+          id: (m['id'] as num?)?.toInt(),
           mine: speaker == userSpeaker,
           speaker: speaker,
           text: (m['text'] as String?) ?? '',
@@ -565,11 +623,12 @@ class Api {
         );
       }).toList();
     }
-    final j = await _list('/api/dm/${c.id}');
+    final j = await _list('/api/dm/${c.id}$q');
     return j.map((e) {
       final m = e as Map<String, Object?>;
       if (m['role'] == 'tool') return _toolMessage(m, c.name);
       return Message(
+        id: (m['id'] as num?)?.toInt(),
         mine: m['role'] == 'user',
         speaker: m['role'] == 'user' ? userSpeaker : c.name,
         text: (m['content'] as String?) ?? '',
@@ -612,7 +671,27 @@ class Api {
 
   Future<void> updateAgent(String id, Map<String, Object?> body) => _json('PATCH', '/api/bots/$id', body);
 
+  // ---- Sessions & search ----
+
+  Future<List<Session>> sessions(Conversation c) async {
+    final j = await _list('/api/sessions?kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}');
+    return j.map((e) => Session.fromJson(e as Map<String, Object?>)).toList();
+  }
+
+  Future<void> renameSession(String id, String title) => _json('PATCH', '/api/sessions/$id', {'title': title});
+
+  Future<void> deleteSession(String id) => _json('DELETE', '/api/sessions/$id');
+
+  /// Everything said in [c], in any of its sessions, that contains [q]. Newest first.
+  Future<List<SearchHit>> search(Conversation c, String q) async {
+    final j = await _list(
+      '/api/search?q=${Uri.encodeQueryComponent(q)}&kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}',
+    );
+    return j.map((e) => SearchHit.fromJson(e as Map<String, Object?>)).toList();
+  }
+
   Message _toolMessage(Map<String, Object?> m, String speaker) => Message(
+    id: (m['id'] as num?)?.toInt(),
     mine: false,
     speaker: speaker.isEmpty ? '' : speaker,
     text: (m['output'] as String?) ?? '',
@@ -625,19 +704,21 @@ class Api {
   // The exported file is exactly what import takes back.
   static String _chatPath(String op, Conversation c) => '/api/$op/${c.isGroup ? 'group' : 'dm'}/${c.id}';
 
-  Future<String> exportChat(Conversation c) async =>
-      const JsonEncoder.withIndent('  ').convert(await _map('GET', _chatPath('export', c)));
+  /// One session — the one on screen.
+  Future<String> exportChat(Conversation c, String session) async => const JsonEncoder.withIndent(
+    '  ',
+  ).convert(await _map('GET', '${_chatPath('export', c)}?session=${Uri.encodeQueryComponent(session)}'));
 
-  /// Returns how many messages were imported.
-  Future<int> importChat(Conversation c, String fileText, {required bool replace}) async {
+  /// Imports into a session of its own. Returns how many messages, and that session's id.
+  Future<(int, String)> importChat(Conversation c, String fileText) async {
     final Object? doc;
     try {
       doc = jsonDecode(fileText);
     } on FormatException {
       throw ApiException(ApiFailure.server, tr('api.notJsonFile'));
     }
-    final j = await _map('POST', _chatPath('import', c), {'doc': doc, 'replace': replace});
-    return (j['imported'] as num?)?.toInt() ?? 0;
+    final j = await _map('POST', _chatPath('import', c), {'doc': doc});
+    return ((j['imported'] as num?)?.toInt() ?? 0, (j['session'] as String?) ?? '');
   }
 
   Future<void> deleteAgent(String id) => _json('DELETE', '/api/bots/$id');
@@ -789,10 +870,12 @@ class Api {
   /// The reply is streamed because the whole point is watching a colleague
   /// work — tool calls, handoffs and text land as they happen, not in one
   /// block at the end.
-  Stream<ChatEvent> chat(Conversation c, String text) async* {
+  /// [session] null starts a new one; the server says which with a `session` event.
+  Stream<ChatEvent> chat(Conversation c, String text, {String? session}) async* {
     final res = await _send('POST', '/api/chat', {
       'target': {'type': c.kind, 'id': c.id},
       'text': text,
+      'session': session ?? 'new',
     });
     if (res.statusCode >= 400) {
       final body = await res.transform(utf8.decoder).join();

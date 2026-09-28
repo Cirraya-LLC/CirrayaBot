@@ -1056,10 +1056,9 @@ per agent" (「还要支持导入导出聊天记录 / 还支持每个agent单独
   File format `{format:'multi-agent-chat', version:1, kind, id, name, exported_at, messages:[{role, speaker, content, at}]}`;
   **`at` is an ISO string and is kept as-is on import** (the first version exported milliseconds and
   imported with `Date.parse`, so every timestamp became now()).
-  The whole batch is one transaction; appended messages go after the existing ones (history is ordered
-  by id, not time). A wrong format is 400 and writes nothing.
-  The web UI asks two confirms: the first "OK" appends, the second "OK" replaces, cancelling both
-  cancels — each OK does only what its sentence says.
+  The whole batch is one transaction. A wrong format is 400 and writes nothing.
+  **Since 2.29 an import always becomes a session of its own and an export is one session** — the
+  append/replace choice is gone.
 - **Per-Agent upstream**: `agents.provider_id` (empty = use the default upstream) + `agents.model`
   (**required**, see 2.20.3).
   **Everyone's upstream is resolved at once before the SSE stream opens**, otherwise a group relay only
@@ -1656,6 +1655,64 @@ NoNewPrivs 1; `apt-get install` works; the browser tool works; agent→agent HTT
 agent reaches its own server and the internet; removing a member drops its container at once and its
 next turn has no `/groups`; a member of two groups sees both; cookie flags, `document.cookie` empty,
 the UI loads on the cookie alone; `ma_token=TOKENx` / `xma_token=` 401.
+
+## 2.29 Sessions, and searching what was said (2026-09-28)
+
+The boss: "还要支持搜索上下文 还有新建和管理删除session 比如一个agent对话 我觉得需要多个session才可以
+不然都混在一个里面" (search the context too; create / manage / delete sessions — one agent chat needs
+several sessions, otherwise everything is mixed into one).
+
+- **Table `sessions`** (`scope` + `scope_id` like `messages`, `title` '' = not named) and
+  `messages.session_id`. **A conversation = a DM or a group; a session = one thread inside it.**
+  Groups get sessions too — the same scope model, and a group thread about X shouldn't sit in
+  a group thread about Y either.
+- **The model only sees the current session** (`recent(..., {session})` in `askSolo` / `askInGroup`).
+  Memory, self-notes, skills and **group recall stay per conversation, across all sessions**
+  (`groupRecallFor` reads `recent` without a session on purpose). There is no DM-to-DM recall
+  between sessions — that mixing is exactly what the boss asked to stop.
+- **Old history migrates itself**: `adoptLooseMessages()` puts each conversation's session-less rows
+  into one session whose id is derived from the conversation (`'s' || md5(scope:scope_id)[..12]`),
+  so it is idempotent; it runs on every `migrate()` and again after the first-start seed.
+- **A new session is nothing until its first message.** The client sends `session: 'new'`, the
+  server creates it and emits `event: session {id}` before anything else, and the client switches
+  to that id. A POST with no session at all carries on in the most recent (what an old client,
+  which knows nothing of sessions, expects). An id from another conversation is refused (404) —
+  a session is not a way to read another agent's history.
+- **Title**: the given name, else the start of the first user message (the routine prefix
+  stripped). The UI shows "New session" when both are empty.
+- **Scheduled tasks write into a session of their own**, titled after the task
+  (`routines.session_id`, recreated if someone deleted it) — before this they landed in the middle
+  of whatever the person was talking about.
+- **Deleting a session while a turn is writing into it is 409** (`liveSessions`, counted, held for
+  the whole of `converse`): the turn would otherwise keep writing rows into a session that no longer
+  exists.
+- **Import always creates a new session** (the append/replace question is gone — nothing to
+  overwrite or mix); **export is one session** (`?session=`, default the most recent). The old
+  `DELETE /api/dm/:id` and `DELETE /api/groups/:id/messages` (clear everything) were unused and
+  are gone.
+- **Search** `GET /api/search?q=&kind=&id=`: plain case-insensitive substring over user/assistant
+  rows (tool rows are JSON and make useless snippets), `%` / `_` / `\` escaped so they are literal,
+  newest first, 50 hits, a ~140-char snippet around the first match. Without kind/id it searches
+  everything (not used by the UI yet).
+- **UI** (both clients): header = ⌕ · session chip ▾ · ＋. The chip opens one panel: a search box on
+  top; empty = the session list (new / switch / rename / delete), typed = hits grouped by session.
+  A hit opens its session and outlines the message (`data-mid` on the web; on the client the entry
+  with `id == _flashId` is wrapped in `_Flash` with a GlobalKey, and `_jumpTo` jumps near the index
+  first because the ListView is lazy, then `Scrollable.ensureVisible`). History rows carry `id` for
+  this. Only the latest 300 rows of a session load; a hit older than that says so instead of
+  jumping somewhere wrong.
+- ⚠️ Adding an API call to `open()` breaks every test fake server that doesn't answer it: the
+  sessions call 404'd, `session` stayed null, history was never fetched, and three unrelated tests
+  failed with "Expected 2, Actual 0". The fakes in `test/workbench_test.dart` now answer
+  `/api/sessions`.
+
+Verified: server with an echoing fake upstream (the reply says how many user turns the model saw):
+migration of old rows, continuing, a new session sees 1 turn, switching back sees the old ones,
+another conversation's id refused, group sessions, search (case, `%` literal, global), rename,
+the 80-char limit, per-session export, import into a new session, delete refused during a slow
+reply and allowed after, a routine's two runs in one "Daily digest" session. Web UI end to end in
+headless Chromium, zero page errors. Client: 42 tests (a new one for sessions), and on the Linux
+build: panel, search + jump + outline, new session named by its first message, rename, delete.
 
 ## 3. What runs now
 

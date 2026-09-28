@@ -128,8 +128,21 @@ const M = {
 
   // import / export
   'x.notJson': ['This file is not JSON', '这个文件不是 JSON', '這個檔案不是 JSON'],
-  'x.append': ['Append {n} messages after the existing history of “{where}”?', '把 {n} 条追加到「{where}」现有记录的后面？', '把 {n} 則追加到「{where}」現有紀錄的後面？'],
-  'x.replace': ['Replace instead: delete all current history of “{where}” and use these {n} messages?', '改成替换：删掉「{where}」现在的全部记录，换成这 {n} 条？', '改成取代：刪除「{where}」目前的全部紀錄，換成這 {n} 則？'],
+  'x.imported': ['Imported {n} messages into a new session', '已导入 {n} 条消息，放在一个新会话里', '已匯入 {n} 則訊息，放在一個新會話裡'],
+  'x.nothing': ['This session has nothing to export yet', '这个会话还没有可以导出的内容', '這個會話還沒有可以匯出的內容'],
+  // sessions + search
+  'ses.title': ['Sessions and search', '会话与搜索', '會話與搜尋'],
+  'ses.list': ['Sessions', '会话', '會話'],
+  'ses.new': ['New session', '新会话', '新會話'],
+  'ses.untitled': ['New session', '新会话', '新會話'],
+  'ses.search': ['Search this conversation', '搜索这个对话', '搜尋這個對話'],
+  'ses.count': ['{n} messages · {when}', '{n} 条 · {when}', '{n} 則 · {when}'],
+  'ses.rename': ['Rename', '重命名', '重新命名'],
+  'ses.delete': ['Delete', '删除', '刪除'],
+  'ses.confirmDelete': ['Delete “{name}” and its {n} messages? This can’t be undone.', '删除「{name}」和它的 {n} 条消息？删了就找不回来了。', '刪除「{name}」和它的 {n} 則訊息？刪除後無法復原。'],
+  'ses.noHits': ['Nothing in this conversation matches “{q}”', '这个对话里没有找到「{q}」', '這個對話裡找不到「{q}」'],
+  'ses.draft': ['A new session starts from a clean slate: nothing said in the other sessions is carried over. Memory and skills still apply.', '新会话从头开始：其他会话里说过的话不会带进来。记忆和技能照常生效。', '新會話從頭開始：其他會話裡說過的話不會帶進來。記憶與技能照常生效。'],
+  'ses.tooOld': ['That message is further back than this session shows (only the latest {n} are loaded)', '那条消息太早了，这个会话只加载最近的 {n} 条', '那則訊息太早了，這個會話只載入最近的 {n} 則'],
 
   // group dialog
   'g.new': ['New group', '新建群聊', '新增群組'],

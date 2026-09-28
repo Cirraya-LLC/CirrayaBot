@@ -46,7 +46,7 @@ void main() {
     server.listen((sock) => sock.listen((_) { sent++; sock.destroy(); }));
     final api = Api(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
     final c = Conversation.fromJson({'kind': 'agent', 'id': 'a', 'name': 'A'});
-    await expectLater(api.importChat(c, 'not json', replace: false), throwsA(isA<ApiException>()));
+    await expectLater(api.importChat(c, 'not json'), throwsA(isA<ApiException>()));
     expect(sent, 0);
     api.close();
     await server.close();

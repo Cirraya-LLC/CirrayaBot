@@ -276,6 +276,7 @@ let shown = 0
 async function openConv(c) {
   const ticket = ++shown
   cur = { kind: c.kind, id: c.id }
+  closeSessions()
   const log = $('#log'); log.innerHTML = ''
   $('#hav').outerHTML = avatar(c).replace('class="av', 'id="hav" class="av')
   $('#htitle').textContent = c.name
@@ -290,23 +291,37 @@ async function openConv(c) {
   loadBotSkills()
   loadBrowsers()
 
+  await loadSessions(c)
+  if (ticket !== shown) return
+  // Back to the session this conversation was last left on (a fresh "New session" included);
+  // otherwise the most recent one.
+  const key = convKey(c)
+  curSession = lastSession.has(key) && (lastSession.get(key) === null || SESSIONS.some(x => x.id === lastSession.get(key)))
+    ? lastSession.get(key) : SESSIONS[0]?.id ?? null
+  paintSession()
+
   if (!await drawHistory(c, ticket)) return
   renderConvs(); $('#in').focus(); $('#send').disabled = busy
 }
 
 /** Fetch history and redraw it all. Returns false if the user has switched away. */
 async function drawHistory(c, ticket) {
-  const hist = await (await fetch(api(c.kind === 'group' ? `/api/groups/${c.id}/messages` : `/api/dm/${c.id}`))).json()
+  // No session yet ("New session", or a conversation nobody has spoken in): nothing to fetch
+  const hist = curSession == null ? [] : await (await fetch(api(
+    `${c.kind === 'group' ? `/api/groups/${c.id}/messages` : `/api/dm/${c.id}`}?session=${encodeURIComponent(curSession)}`))).json()
   if (ticket !== shown) return false                  // two quick clicks: the earlier one arrived late, drop it
   const log = $('#log'); log.innerHTML = ''
   for (const e of hist) {
+    let el
     if (e.role === 'tool') {
-      finishTool(toolLine(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, toolLabel(e.name, e.args)), e.output)
-      continue
-    }
+      el = toolLine(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, toolLabel(e.name, e.args))
+      finishTool(el, e.output)
     // 'User' is the speaker the server stores for the person in group logs (data, not UI text)
-    if (c.kind === 'group') bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User').innerHTML = fmt(e.text)
-    else bubble(c.id, e.role === 'user').innerHTML = fmt(e.content)
+    } else if (c.kind === 'group') {
+      (el = bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User')).innerHTML = fmt(e.text)
+    } else (el = bubble(c.id, e.role === 'user')).innerHTML = fmt(e.content)
+    // A search hit jumps to its message by this id
+    ;(el.closest('.msg') ?? el).dataset.mid = e.id
   }
   if (!log.children.length) empty(c)
   log.scrollTop = log.scrollHeight
@@ -314,11 +329,181 @@ async function drawHistory(c, ticket) {
 }
 
 function empty(c) {
+  // A fresh session in a conversation that already has others: say plainly that it starts over
+  const fresh = curSession == null && SESSIONS.length ? `<p>${esc(t('ses.draft'))}</p>` : ''
   $('#log').innerHTML = c.kind === 'group'
     ? `<div class="empty"><h2>${esc(c.name)}</h2><p>${esc(t('empty.groupMembers', { members: listJoin(c.members.map(id => bot(id)?.name ?? id)) }))}</p>
-       <p>${esc(t('empty.groupHow'))}</p></div>`
+       <p>${esc(t('empty.groupHow'))}</p>${fresh}</div>`
     : `<div class="empty"><h2>${esc(c.name)}</h2><p>${esc(c.tag)}</p>
-       <p>${esc(t('empty.agentRecall'))}</p></div>`
+       <p>${esc(t('empty.agentRecall'))}</p>${fresh}</div>`
+}
+
+// ═══ Sessions ═══
+// A conversation holds several sessions; the model only sees the one on screen. null = a new
+// session that exists only here until its first message (so an unused one leaves nothing behind).
+let SESSIONS = [], curSession = null
+const lastSession = new Map()       // conversation → the session it was left on
+const convKey = c => `${c.kind}:${c.id}`
+const sesTitle = x => x?.title || t('ses.untitled')
+
+async function loadSessions(c) {
+  const r = await fetch(api(`/api/sessions?kind=${c.kind}&id=${encodeURIComponent(c.id)}`)).catch(() => null)
+  SESSIONS = r?.ok ? await r.json() : []
+}
+function paintSession() {
+  for (const id of ['#sesbtn', '#sesnew', '#sesfind']) $(id).hidden = !cur
+  $('#sesname').textContent = sesTitle(SESSIONS.find(x => x.id === curSession))
+  if (!$('#sespanel').hidden && !$('#sesq').value.trim()) renderSessions()
+}
+
+/** Show another session of the open conversation, optionally landing on one message. */
+async function switchSession(id, jumpTo = null) {
+  if (!cur) return
+  const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id); if (!c) return
+  const ticket = ++shown
+  curSession = id; lastSession.set(convKey(c), id)
+  paintSession()
+  if (!await drawHistory(c, ticket)) return
+  if (jumpTo == null) { $('#in').focus(); return }
+  const el = $('#log').querySelector(`[data-mid="${jumpTo}"]`)
+  if (!el) { note(t('ses.tooOld', { n: 300 })); return }
+  el.scrollIntoView({ block: 'center' })
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash')
+}
+
+function newSession() {
+  if (!cur || curSession === null) { $('#in').focus(); return }
+  switchSession(null)
+}
+
+// The panel: sessions when the box is empty, matching messages from every session when not.
+const panel = $('#sespanel')
+function openSessions(focusSearch = false) {
+  if (!cur) return
+  const r = $('#sesbtn').getBoundingClientRect()
+  panel.hidden = false
+  panel.style.top = `${r.bottom + 6}px`
+  panel.style.left = `${Math.max(8, Math.min(r.right - panel.offsetWidth, innerWidth - panel.offsetWidth - 8))}px`
+  $('#sesbtn').setAttribute('aria-expanded', 'true')
+  $('#sesq').value = ''; renderSessions()
+  ;(focusSearch ? $('#sesq') : panel.querySelector('.sprow.on') ?? $('#sesq')).focus()
+}
+function closeSessions() {
+  if (panel.hidden) return
+  panel.hidden = true; $('#sesbtn').setAttribute('aria-expanded', 'false')
+}
+$('#sesbtn').onclick = () => (panel.hidden ? openSessions() : closeSessions())
+$('#sesfind').onclick = () => openSessions(true)
+$('#sesnew').onclick = () => { closeSessions(); newSession() }
+document.addEventListener('mousedown', e => {
+  if (!panel.hidden && !panel.contains(e.target) && !e.target.closest('#sesbtn,#sesfind')) closeSessions()
+})
+panel.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !e.target.classList.contains('ren')) { e.preventDefault(); closeSessions(); $('#sesbtn').focus() }
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !e.target.classList.contains('ren')) {
+    const rows = [$('#sesq'), ...panel.querySelectorAll('.sprow,.hit')]
+    const i = rows.indexOf(document.activeElement)
+    rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]?.focus()
+    e.preventDefault()
+  }
+})
+addEventListener('resize', closeSessions)
+
+function renderSessions() {
+  const box = $('#seslist'); box.innerHTML = ''
+  const head = document.createElement('div'); head.className = 'sphead'; head.textContent = t('ses.list')
+  box.appendChild(head)
+  const add = document.createElement('div')
+  add.className = 'sprow newrow' + (curSession === null ? ' on' : ''); add.tabIndex = 0
+  add.innerHTML = `<span class="st"><b>＋ ${esc(t('ses.new'))}</b></span>`
+  add.onclick = () => { closeSessions(); newSession() }
+  add.onkeydown = e => { if (e.key === 'Enter') add.onclick() }
+  box.appendChild(add)
+  for (const x of SESSIONS) {
+    const row = document.createElement('div')
+    row.className = 'sprow' + (x.id === curSession ? ' on' : ''); row.tabIndex = 0
+    row.innerHTML = `<span class="st"><b></b><small>${esc(t('ses.count', { n: x.count, when: when(x.updated_at) }))}</small></span>
+      <button class="sb ren-b" title="${esc(t('ses.rename'))}" aria-label="${esc(t('ses.rename'))}">✎</button>
+      <button class="sb del" title="${esc(t('ses.delete'))}" aria-label="${esc(t('ses.delete'))}">🗑</button>`
+    row.querySelector('b').textContent = sesTitle(x)
+    const go = () => { closeSessions(); if (x.id !== curSession) switchSession(x.id); else $('#in').focus() }
+    row.onclick = e => { if (!e.target.closest('button,input')) go() }
+    row.onkeydown = e => { if (e.key === 'Enter' && e.target === row) go()
+      if (e.key === 'F2' && e.target === row) rename(row, x); if (e.key === 'Delete' && e.target === row) remove(x) }
+    row.querySelector('.ren-b').onclick = () => rename(row, x)
+    row.querySelector('.del').onclick = () => remove(x)
+    box.appendChild(row)
+  }
+}
+
+function rename(row, x) {
+  const st = row.querySelector('.st')
+  const inp = document.createElement('input'); inp.className = 'ren'; inp.maxLength = 80
+  inp.value = x.named ? x.title : ''; inp.placeholder = sesTitle(x)
+  st.replaceWith(inp); inp.focus(); inp.select()
+  let done = false
+  const finish = async save => {
+    if (done) return; done = true
+    if (save && inp.value.trim() !== (x.named ? x.title : '')) {
+      const r = await fetch(api(`/api/sessions/${x.id}`), { method:'PATCH', headers:{'content-type':'application/json'},
+        body: JSON.stringify({ title: inp.value }) })
+      if (!r.ok) alert(await errText(r))
+      if (cur) await loadSessions(cur)
+    }
+    paintSession(); renderSessions()
+    panel.querySelector(`.sprow:nth-child(${[...SESSIONS].findIndex(s => s.id === x.id) + 3})`)?.focus()
+  }
+  inp.onkeydown = e => { if (e.key === 'Enter') finish(true); if (e.key === 'Escape') { e.stopPropagation(); finish(false) } }
+  inp.onblur = () => finish(true)
+}
+
+async function remove(x) {
+  if (!confirm(t('ses.confirmDelete', { name: sesTitle(x), n: x.count }))) return
+  const r = await fetch(api(`/api/sessions/${x.id}`), { method:'DELETE' })
+  if (!r.ok) { alert(await errText(r)); return }
+  const c = cur
+  await loadSessions(c)
+  if (x.id === curSession) switchSession(SESSIONS[0]?.id ?? null)
+  else paintSession()
+  renderSessions()
+  CONVS = await (await fetch(api('/api/conversations'))).json(); renderConvs()
+}
+
+// Search every session of this conversation. Debounced; an answer to an older query is dropped.
+let sq = 0, sqTimer = null
+$('#sesq').oninput = () => {
+  clearTimeout(sqTimer)
+  const q = $('#sesq').value.trim()
+  if (!q) { sq++; renderSessions(); return }
+  sqTimer = setTimeout(async () => {
+    const mine = ++sq, c = cur
+    const r = await fetch(api(`/api/search?q=${encodeURIComponent(q)}&kind=${c.kind}&id=${encodeURIComponent(c.id)}`)).catch(() => null)
+    const hits = r?.ok ? await r.json() : []
+    if (mine !== sq || panel.hidden) return
+    renderHits(q, hits)
+  }, 180)
+}
+
+function renderHits(q, hits) {
+  const box = $('#seslist'); box.innerHTML = ''
+  if (!hits.length) { box.innerHTML = `<div class="spnone">${esc(t('ses.noHits', { q }))}</div>`; return }
+  const mark = s => {
+    const lo = s.toLowerCase(), k = q.toLowerCase(); let out = '', i = 0, j
+    while ((j = lo.indexOf(k, i)) >= 0) { out += esc(s.slice(i, j)) + `<mark>${esc(s.slice(j, j + k.length))}</mark>`; i = j + k.length }
+    return out + esc(s.slice(i))
+  }
+  let last = null
+  for (const h of hits) {
+    if (h.session !== last) {
+      last = h.session
+      const head = document.createElement('div'); head.className = 'sphead'
+      head.textContent = sesTitle(SESSIONS.find(x => x.id === h.session)); box.appendChild(head)
+    }
+    const el = document.createElement('button'); el.className = 'hit'
+    el.innerHTML = `<small>${esc(h.role === 'user' ? t('msg.you') : h.speaker || bot(h.conv)?.name || '')} · ${esc(when(h.at))}</small>${mark(h.snippet)}`
+    el.onclick = () => { closeSessions(); switchSession(h.session, h.id) }
+    box.appendChild(el)
+  }
 }
 
 // ═══ Right column: members ═══
@@ -485,7 +670,8 @@ async function send() {
   const bubs = new Map(), tools = new Map()
   try {
     const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text }) })
+      body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text,
+        session: curSession ?? 'new' }) })
     if (!res.ok) throw new Error((await errText(res)).slice(0, 300))
     const rd = res.body.getReader(), dec = new TextDecoder()
     let buf = ''
@@ -496,6 +682,13 @@ async function send() {
       for (const part of parts) {
         const ev = part.match(/^event: (.+)$/m)?.[1]
         const d = JSON.parse(part.match(/^data: (.+)$/m)?.[1] ?? '{}')
+        // The session this went into — a new one's id, the first time. Remembered even if the
+        // person switched away, so coming back lands on the conversation they just had.
+        if (ev === 'session') {
+          lastSession.set(convKey(target), d.id)
+          if (ticket === shown) { curSession = d.id; loadSessions(target).then(paintSession) }
+          continue
+        }
         // user switched away: keep reading (the server finishes the turn) but don't draw
         if (ticket !== shown) continue
         // Create the bubble on the first delta: tool calls often arrive right after start, and
@@ -538,6 +731,7 @@ async function send() {
   busy = false; $('#send').disabled = false; input.focus()
   CONVS = await (await fetch(api('/api/conversations'))).json(); renderConvs()
   loadUsage()                                         // the turn just cost something; show it
+  if (cur?.kind === target.kind && cur?.id === target.id) { await loadSessions(cur); paintSession() }
   // switched away and back mid-reply: the screen shows pre-reply history, reload it
   if (ticket !== shown && cur?.kind === target.kind && cur?.id === target.id) {
     const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id); if (c) openConv(c)
@@ -607,8 +801,8 @@ async function patchGroup(id, patch) {
 async function reloadAndReopen() {
   await reload()
   const c = (cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)) ?? CONVS[0]
-  if (c) openConv(c)
-  else { cur = null; $('#log').innerHTML = ''; $('#htitle').textContent = t('head.pick'); $('#hsub').textContent = '' }
+  if (c) await openConv(c)
+  else { cur = null; $('#log').innerHTML = ''; $('#htitle').textContent = t('head.pick'); $('#hsub').textContent = ''; paintSession() }
 }
 $('#addmem').onclick = () => {
   const c = CONVS.find(x => x.kind === 'group' && x.id === cur?.id)
@@ -915,7 +1109,8 @@ $('#smsave').onclick = () => cur && cur.kind !== 'group' && saveMem(selfPath(cur
 const xPath = (op, c) => `/api/${op}/${c.kind === 'group' ? 'group' : 'dm'}/${c.id}`
 $('#xexp').onclick = async () => {
   if (!cur) return
-  const r = await fetch(api(xPath('export', cur)))
+  if (curSession == null) { alert(t('x.nothing')); return }
+  const r = await fetch(api(`${xPath('export', cur)}?session=${encodeURIComponent(curSession)}`))
   if (!r.ok) { alert(await errText(r)); return }
   const doc = await r.json()
   const a = document.createElement('a')
@@ -929,17 +1124,14 @@ $('#xfile').onchange = async () => {
   if (!f || !cur) return
   let doc
   try { doc = JSON.parse(await f.text()) } catch { alert(t('x.notJson')); return }
-  const n = Array.isArray(doc.messages) ? doc.messages.length : 0
-  const where = $('#htitle').textContent
-  let replace = false
-  if (!confirm(t('x.append', { n, where }))) {
-    if (!confirm(t('x.replace', { n, where }))) return
-    replace = true
-  }
+  // Always into a session of its own, so there is nothing to ask: it can't overwrite or mix with anything
   const r = await fetch(api(xPath('import', cur)), { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ doc, replace }) })
+    body: JSON.stringify({ doc }) })
   if (!r.ok) { alert(await errText(r)); return }
+  const { imported, session } = await r.json()
+  lastSession.set(convKey(cur), session)
   await reloadAndReopen()
+  note(t('x.imported', { n: imported }))
 }
 
 // Browser actions in plain words: "Open example.com" reads better than {"action":"open",...}
@@ -1264,7 +1456,10 @@ setInterval(async () => {
   loadRoutines()
   loadUsage()
   const now = cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)
-  if (now && now.at !== before && !busy) drawHistory(now, shown)
+  if (now && now.at !== before && !busy) {
+    await loadSessions(now); paintSession()          // a scheduled task may have written into a session of its own
+    drawHistory(now, shown)
+  }
 }, 15_000)
 
 async function reload() {

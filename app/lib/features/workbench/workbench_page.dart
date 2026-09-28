@@ -23,6 +23,7 @@ import '../../theme/app_theme.dart';
 import '../settings/providers_page.dart';
 import '../settings/skills_page.dart';
 import 'message_view.dart';
+import 'session_panel.dart';
 
 /// Collapsed width of the conversation list. Expanded it is whatever the
 /// sidebar was dragged to ([_wide]).
@@ -130,18 +131,32 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   }
 
   String? _shownId;
+  String? _shownSession;
+
+  /// The message a search hit landed on: outlined for a moment, found by this key.
+  int? _flashId;
+  final _flashKey = GlobalKey();
+  final _sessionChip = GlobalKey();
 
   void _onChange() {
     if (!mounted) return;
     // One place decides scrolling, so every way a conversation gets opened —
     // a click, creating something, deleting the open one — lands at the bottom,
     // and a streaming reply is followed. Someone scrolled up to read history
-    // is left alone.
+    // is left alone. A search hit instead lands on its message.
     final id = bench.current?.id;
+    final ses = '$id/${bench.session}';
     final atBottom = !_scroll.hasClients || _scroll.position.maxScrollExtent - _scroll.position.pixels < 160;
-    if (id != _shownId || atBottom) _toBottom();
+    final jump = bench.jumpTo;
+    if (jump != null && bench.entries.isNotEmpty) {
+      bench.jumpTo = null;
+      _jumpTo(jump);
+    } else if (jump == null && (id != _shownId || ses != _shownSession || atBottom)) {
+      _toBottom();
+    }
     if (id != _shownId) _mentions = const [];
     _shownId = id;
+    _shownSession = ses;
     // Only when a different conversation's memory arrives — never over what
     // someone is typing into the box.
     if (bench.memoryFor != _memoryShownFor) {
@@ -155,6 +170,38 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       _selfMemoryStatus = '';
     }
     setState(() {});
+  }
+
+  /// Scroll to the entry with this id and outline it. The list is lazy, so the
+  /// entry may not be built yet: jump near where it should be, let a frame lay
+  /// it out, then bring it properly into view.
+  Future<void> _jumpTo(int id) async {
+    final i = bench.entries.indexWhere((e) => e.id == id);
+    if (i < 0) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(tr('ses.tooOld', {'n': 300}))));
+      return;
+    }
+    setState(() => _flashId = id);
+    final motion = _motion(context);
+    for (var tries = 0; tries < 6 && mounted; tries++) {
+      await WidgetsBinding.instance.endOfFrame;
+      final target = _flashKey.currentContext;
+      if (target != null && target.mounted) {
+        await Scrollable.ensureVisible(target, alignment: .4, duration: motion);
+        return;
+      }
+      if (!_scroll.hasClients) continue;
+      final n = bench.entries.length;
+      _scroll.jumpTo(_scroll.position.maxScrollExtent * (n <= 1 ? 1 : i / (n - 1)));
+    }
+  }
+
+  Future<void> _openSessions({bool focusSearch = false}) async {
+    final box = _sessionChip.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final rect = box.localToGlobal(Offset.zero) & box.size;
+    await showSessionPanel(context, bench, rect, focusSearch: focusSearch);
+    if (mounted) _inputFocus.requestFocus();
   }
 
   void _toBottom([int tries = 3]) {
@@ -224,8 +271,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   }
 
   Future<void> _exportChat(Conversation c) async {
+    final session = bench.session;
+    if (session == null) {
+      _say(tr('wb.nothingToExport'));
+      return;
+    }
     try {
-      final text = await bench.api.exportChat(c);
+      final text = await bench.api.exportChat(c, session);
       final day = DateTime.now().toIso8601String().substring(0, 10);
       final loc = await getSaveLocation(suggestedName: '${c.name}-$day.json', acceptedTypeGroups: const [_jsonType]);
       if (loc == null) return; // cancelled
@@ -241,26 +293,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   Future<void> _importChat(Conversation c) async {
     final file = await openFile(acceptedTypeGroups: const [_jsonType]);
     if (file == null || !mounted) return;
-    final replace = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: Text(tr('wb.importInto', {'name': c.name}), style: const TextStyle(fontSize: 15)),
-        content: Text(tr('wb.importHow'), style: TextStyle(fontSize: 13, color: C.dim)),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(d).pop(), child: Text(tr('common.cancel'))),
-          TextButton(
-            onPressed: () => Navigator.of(d).pop(true),
-            style: TextButton.styleFrom(foregroundColor: C.code),
-            child: Text(tr('wb.replace')),
-          ),
-          FilledButton(onPressed: () => Navigator.of(d).pop(false), child: Text(tr('wb.append'))),
-        ],
-      ),
-    );
-    if (replace == null) return;
+    // Always into a session of its own, so there is nothing to ask: it can't
+    // overwrite or mix with the session on screen.
     try {
-      final n = await bench.api.importChat(c, await file.readAsString(), replace: replace);
+      final (n, session) = await bench.api.importChat(c, await file.readAsString());
       await bench.reload(id: c.id);
+      await bench.openSession(session);
+      _say(tr('wb.imported', {'n': n}));      await bench.reload(id: c.id);
       _say(tr('wb.imported', {'n': n}));
     } on ApiException catch (e) {
       _say(tr('wb.importFailed', {'msg': e.message}));
@@ -852,6 +891,20 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   ],
                 ),
               ),
+              if (c != null) ...[
+                const SizedBox(width: 8),
+                IconButton(
+                  tooltip: tr('ses.search'),
+                  onPressed: () => _openSessions(focusSearch: true),
+                  icon: Icon(Icons.search, size: 18, color: C.dim),
+                ),
+                _sessionButton(),
+                IconButton(
+                  tooltip: tr('ses.new'),
+                  onPressed: bench.session == null ? null : bench.newSession,
+                  icon: Icon(Icons.add, size: 19, color: C.dim),
+                ),
+              ],
               IconButton(
                 tooltip: tr(_rightOpen ? 'wb.hideRight' : 'wb.showRight'),
                 onPressed: () => _narrow(context)
@@ -876,25 +929,87 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
         Expanded(
           child: bench.entries.isEmpty
               ? Center(
-                  child: Text(
-                    c == null ? '' : tr('wb.sayTo', {'name': c.name}),
-                    style: TextStyle(color: C.dim2, fontSize: 13),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 40),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          c == null ? '' : tr('wb.sayTo', {'name': c.name}),
+                          style: TextStyle(color: C.dim2, fontSize: 13),
+                        ),
+                        // A fresh session next to others: say plainly that it starts over
+                        if (c != null && bench.session == null && bench.sessions.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 420),
+                            child: Text(
+                              tr('ses.draft'),
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: C.dim2, fontSize: 12, height: 1.5),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 )
               : ListView.builder(
                   controller: _scroll,
                   padding: const EdgeInsets.fromLTRB(26, 16, 26, 16),
                   itemCount: bench.entries.length,
-                  itemBuilder: (_, i) => EntryView(
-                    entry: bench.entries[i],
-                    names: bench.agentNames,
-                    colorOf: (n) => C.parse(bench.agentByName(n)?.color ?? ''),
-                    onApprove: bench.answer,
-                  ),
+                  itemBuilder: (_, i) {
+                    final e = bench.entries[i];
+                    final view = EntryView(
+                      entry: e,
+                      names: bench.agentNames,
+                      colorOf: (n) => C.parse(bench.agentByName(n)?.color ?? ''),
+                      onApprove: bench.answer,
+                    );
+                    return e.id != null && e.id == _flashId
+                        ? _Flash(key: _flashKey, motion: _motion(context), child: view)
+                        : view;
+                  },
                 ),
         ),
         _composer(),
       ],
+    );
+  }
+
+  /// The session on screen. Also the way in to the others and to search.
+  Widget _sessionButton() {
+    final title = bench.currentSession?.title ?? '';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: OutlinedButton(
+        key: _sessionChip,
+        onPressed: () => _openSessions(),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: C.ink,
+          side: BorderSide(color: C.line),
+          padding: const EdgeInsets.fromLTRB(11, 0, 7, 0),
+          minimumSize: const Size(0, 32),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 200),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  title.isEmpty ? tr('ses.untitled') : title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w400),
+                ),
+              ),
+              Icon(Icons.expand_more, size: 16, color: C.dim2),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1399,6 +1514,41 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 }
 
 Widget _heading(String text) => Text(text, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600));
+
+/// A search hit's message, outlined in the accent colour that then fades — the
+/// eye finds it without the outline staying around. Reduced motion: no fade.
+class _Flash extends StatefulWidget {
+  const _Flash({super.key, required this.motion, required this.child});
+  final Duration motion;
+  final Widget child;
+  @override
+  State<_Flash> createState() => _FlashState();
+}
+
+class _FlashState extends State<_Flash> {
+  bool _on = true;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.motion != Duration.zero) {
+      Future.delayed(const Duration(milliseconds: 900), () {
+        if (mounted) setState(() => _on = false);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedContainer(
+    duration: const Duration(milliseconds: 900),
+    curve: Curves.easeOut,
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: _on ? C.accent : C.accent.withValues(alpha: 0), width: 2),
+    ),
+    child: widget.child,
+  );
+}
 
 /// The visible part of a resize handle: nothing until hovered or dragged,
 /// then a 2px accent line down the border.

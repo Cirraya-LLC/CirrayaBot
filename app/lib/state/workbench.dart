@@ -19,6 +19,10 @@ import '../l10n.dart';
 /// the point of the product, so the work has to be visible as work.
 sealed class Entry {
   Entry();
+
+  /// The stored row this came from, when it came from history. A search hit
+  /// scrolls to the entry with its id; live entries have none until reloaded.
+  int? id;
 }
 
 class Said extends Entry {
@@ -81,6 +85,23 @@ class Workbench extends ChangeNotifier {
   List<Agent> agents = const [];
   Conversation? current;
   final List<Entry> entries = [];
+
+  /// The open conversation's sessions, most recent first.
+  List<Session> sessions = const [];
+
+  /// The session on screen. null = a new one that only exists here until its
+  /// first message, so an unused "New session" leaves nothing behind.
+  String? session;
+
+  /// Which session each conversation was left on, so coming back lands there.
+  final Map<String, String?> _lastSession = {};
+  static String _key(Conversation c) => '${c.kind}:${c.id}';
+
+  /// A message to scroll to and outline, set by [openSession] from a search
+  /// hit. The page consumes it once the transcript is drawn.
+  int? jumpTo;
+
+  Session? get currentSession => sessions.where((x) => x.id == session).firstOrNull;
 
   /// The open conversation's memory, and which conversation it belongs to —
   /// the page copies it into its text box only when that id changes.
@@ -172,17 +193,90 @@ class Workbench extends ChangeNotifier {
     selfMemoryFor = null;
     routines = const [];
     skills = const [];
+    sessions = const [];
+    session = null;
+    jumpTo = null;
     notifyListeners();
     unawaited(_loadMemory(c, ticket));
     unawaited(loadRoutines());
     unawaited(loadSkills());
+    await _loadSessions(c);
+    if (ticket != _shown) return;
+    // Back to the session this conversation was last left on (a fresh "New
+    // session" included); otherwise the most recent one.
+    final key = _key(c);
+    final last = _lastSession[key];
+    session = _lastSession.containsKey(key) && (last == null || sessions.any((x) => x.id == last))
+        ? last
+        : sessions.firstOrNull?.id;
     await _drawHistory(c, ticket);
+  }
+
+  Future<void> _loadSessions(Conversation c) async {
+    try {
+      final list = await api.sessions(c);
+      if (current?.id != c.id || current?.kind != c.kind) return;
+      sessions = list;
+    } on ApiException catch (e) {
+      error = e.message;
+    }
+    notifyListeners();
+  }
+
+  /// Show another session of the open conversation, optionally landing on one message.
+  Future<void> openSession(String? id, {int? jumpTo}) async {
+    final c = current;
+    if (c == null) return;
+    final ticket = ++_shown;
+    session = id;
+    _lastSession[_key(c)] = id;
+    this.jumpTo = jumpTo;
+    entries.clear();
+    notifyListeners();
+    await _drawHistory(c, ticket);
+  }
+
+  /// Start a new session. Nothing is created until the first message is sent.
+  Future<void> newSession() async {
+    if (current == null || session == null) return;
+    await openSession(null);
+  }
+
+  Future<void> renameSession(Session x, String title) async {
+    final c = current;
+    if (c == null) return;
+    await api.renameSession(x.id, title);
+    await _loadSessions(c);
+  }
+
+  /// Delete a session and everything said in it. The open one gives way to the
+  /// most recent that is left, or to a new one.
+  Future<void> deleteSession(Session x) async {
+    final c = current;
+    if (c == null) return;
+    await api.deleteSession(x.id);
+    await _loadSessions(c);
+    if (x.id == session) await openSession(sessions.firstOrNull?.id);
+    await refresh();
+  }
+
+  Future<List<SearchHit>> search(String q) async {
+    final c = current;
+    if (c == null || q.trim().isEmpty) return const [];
+    return api.search(c, q.trim());
   }
 
   /// Replace [entries] with [c]'s stored history, unless the user has moved on.
   Future<void> _drawHistory(Conversation c, int ticket) async {
+    final s = session;
+    if (s == null) {
+      // A new session: nothing to fetch, and nothing from the others carries over.
+      entries.clear();
+      notifyListeners();
+      return;
+    }
     try {
-      final history = await api.history(c);
+      final history = await api.history(c, s);
       if (ticket != _shown) return; // two quick clicks: the older answer loses
       entries
         ..clear()
@@ -230,7 +324,11 @@ class Workbench extends ChangeNotifier {
     final c = current;
     if (c == null || busy || ticket != _shown) return;
     unawaited(loadRoutines());
-    if (c.at != before) await _drawHistory(c, ticket);
+    if (c.at != before) {
+      // A scheduled task may have written into a session of its own
+      await _loadSessions(c);
+      if (ticket == _shown) await _drawHistory(c, ticket);
+    }
   }
 
   Future<void> _loadMemory(Conversation c, int ticket) async {
@@ -293,7 +391,19 @@ class Workbench extends ChangeNotifier {
     Said? live;
 
     try {
-      await for (final ev in api.chat(c, text.trim())) {
+      await for (final ev in api.chat(c, text.trim(), session: session)) {
+        if (ev.name == 'session') {
+          // Which session this went into — a new one's id, the first time.
+          // Remembered even if the person switched away, so coming back lands
+          // on the conversation they just had.
+          final id = (ev.data['id'] as String?) ?? '';
+          _lastSession[_key(c)] = id;
+          if (ticket == _shown) {
+            session = id;
+            unawaited(_loadSessions(c));
+          }
+          continue;
+        }
         final agent = agentById(ev.botId);
         final name = agent?.name ?? c.name;
         final colour = agent?.color ?? c.color;
@@ -384,6 +494,7 @@ class Workbench extends ChangeNotifier {
     busy = false;
     notifyListeners();
     await refresh();
+    if (current?.id == c.id && current?.kind == c.kind) await _loadSessions(c);
     // Left and came back while it was answering: what's on screen is the
     // history from before the reply landed. Read it again.
     if (ticket != _shown && current?.id == c.id) await open(current!);
@@ -410,9 +521,10 @@ class Workbench extends ChangeNotifier {
   Entry _entryOf(Message m, Conversation c) {
     final colour = m.mine ? '' : (agentByName(m.speaker)?.color ?? c.color);
     if (m.tool == null) {
-      return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text);
+      return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text)..id = m.id;
     }
     return Ran(speaker: m.speaker, color: colour, label: _label(m.tool, m.args))
+      ..id = m.id
       ..running = false
       ..output = m.text;
   }

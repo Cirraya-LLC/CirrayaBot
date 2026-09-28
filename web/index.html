@@ -189,6 +189,49 @@
   header .av.stack i{width:18px;height:18px}
   .htitle{font-weight:600;font-size:14px}
   .hsub{color:var(--dim2);font-size:12px}
+  .hmain{min-width:0;flex:1}
+  .hmain>div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* The session this conversation is showing. It is also the way in to the others and to search. */
+  .hact .sesbtn{width:auto;max-width:220px;display:flex;align-items:center;gap:6px;padding:0 9px 0 11px;
+                border:1px solid var(--line);font-size:12.5px;color:var(--ink)}
+  .sesbtn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sesbtn i{font-style:normal;color:var(--dim2);font-size:10px}
+  .hact .sesbtn[aria-expanded="true"]{background:var(--raise)}
+
+  /* ═══ Sessions + search panel ═══ */
+  #sespanel{position:fixed;z-index:65;width:380px;max-width:calc(100vw - 16px);max-height:min(70vh,560px);
+            background:var(--panel);border:1px solid var(--line);border-radius:12px;
+            box-shadow:0 12px 32px var(--shadow);display:flex;flex-direction:column;overflow:hidden}
+  #sespanel[hidden]{display:none}
+  .spq{padding:10px;border-bottom:1px solid var(--line);flex:none}
+  .spq input{width:100%;background:var(--field);border:1px solid var(--line);border-radius:8px;padding:7px 10px;
+             color:var(--ink);font:inherit;font-size:13px;outline:none}
+  .spq input:focus{border-color:var(--accent)}
+  .splist{overflow-y:auto;padding:6px;flex:1 1 auto}
+  .sphead{font-size:11.5px;color:var(--dim2);padding:8px 9px 4px;font-weight:600;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sprow{display:flex;align-items:center;gap:6px;padding:6px 6px 6px 10px;border-radius:8px;cursor:pointer;min-height:44px}
+  .sprow:hover,.sprow:focus-visible{background:var(--hover);outline:none}
+  .sprow.on{background:var(--on)}
+  .sprow .st{flex:1;min-width:0}
+  .sprow .st b{display:block;font-weight:500;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sprow .st small{color:var(--dim2);font-size:11.5px}
+  .sprow .sb{width:26px;height:26px;flex:none;border-radius:6px;color:var(--dim);font-size:13px;visibility:hidden}
+  .sprow:hover .sb,.sprow:focus-within .sb,.sprow.on .sb{visibility:visible}
+  .sprow .sb:hover{background:var(--raise);color:var(--ink)}
+  .sprow .sb.del:hover{color:var(--bad)}
+  .sprow input.ren{flex:1;min-width:0;background:var(--field);border:1px solid var(--accent);border-radius:6px;
+                   padding:4px 7px;color:var(--ink);font:inherit;font-size:13px;outline:none}
+  .sprow.newrow{color:var(--accent);font-size:13px}
+  .hit{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12.5px;line-height:1.5}
+  .hit:hover,.hit:focus-visible{background:var(--hover);outline:none}
+  .hit small{display:block;color:var(--dim2);font-size:11px}
+  .hit mark{background:var(--warnbg);color:var(--ink);border-radius:3px;padding:0 1px}
+  .spnone{color:var(--dim2);font-size:12.5px;padding:14px 10px;text-align:center}
+  /* A search hit lands here: the message is outlined for a moment so the eye can find it. */
+  .msg.flash .bub,.tool.flash{animation:flash 1.8s var(--ease)}
+  @keyframes flash{0%,45%{box-shadow:0 0 0 2px var(--accent)}100%{box-shadow:0 0 0 2px transparent}}
+  @media (prefers-reduced-motion:reduce){ .msg.flash .bub,.tool.flash{animation:none;box-shadow:0 0 0 2px var(--accent)} }
   .hact{margin-left:auto;display:flex;gap:4px;color:var(--dim)}
   .hact button{width:30px;height:30px;border-radius:7px;font-size:15px}
   .hact button:hover{background:var(--raise);color:var(--ink)}
@@ -406,11 +449,14 @@
 <main>
   <header>
     <div class="av" id="hav" style="background:var(--chip)"></div>
-    <div>
+    <div class="hmain">
       <div class="htitle" id="htitle" data-i18n="head.pick"></div>
       <div class="hsub" id="hsub" data-i18n="head.pickSub"></div>
     </div>
     <div class="hact">
+      <button id="sesfind" data-i18n-title="ses.search" hidden>⌕</button>
+      <button class="sesbtn" id="sesbtn" aria-haspopup="dialog" aria-expanded="false" data-i18n-title="ses.title" hidden><span id="sesname"></span><i>▾</i></button>
+      <button id="sesnew" data-i18n-title="ses.new" hidden>＋</button>
       <button id="hedit" data-i18n-title="common.edit">⚙</button>
       <button id="htoggle" data-i18n-title="head.toggle">»</button>
     </div>
@@ -426,6 +472,10 @@
   </div>
 </main>
 
+<div id="sespanel" role="dialog" data-i18n-aria-label="ses.title" hidden>
+  <div class="spq"><input id="sesq" type="search" autocomplete="off" data-i18n-placeholder="ses.search"></div>
+  <div class="splist" id="seslist"></div>
+</div>
 <div class="grip" id="gripR" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-title="side.resize"></div>
 <div class="side2" id="side2">
   <div class="s2h" data-i18n="s2.members"></div>
