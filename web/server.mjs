@@ -12,7 +12,9 @@ import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
-import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor, nextSpeaker } from './autonomy.mjs'
+import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
+import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
+  taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText } from './tasks.mjs'
 import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT } from './sandbox.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
@@ -92,6 +94,11 @@ async function listConversations(lang) {
  */
 function transcriptRow(m, text) {
   // id: a search hit jumps to its message, so the transcript has to say which row is which.
+  if (m.role === 'event') {
+    // Something that happened to a background task: the clients draw it as a card, not as speech.
+    try { return { id: Number(m.id), role: 'event', speaker: m.speaker, at: m.at, event: JSON.parse(m.content) } }
+    catch { return { id: Number(m.id), role: 'assistant', at: m.at, ...text } }
+  }
   if (m.role !== 'tool') return { id: Number(m.id), role: m.role, at: m.at, ...text }
   try {
     const { name, args, output } = JSON.parse(m.content)
@@ -172,16 +179,19 @@ const pendingApprovals = new Map()
  * refused straight away rather than stalling a task nobody is watching.
  */
 function askApproval(ctx, onTool, name, args) {
-  // Nobody to ask: a scheduled task, or an auto-mode run whose page was closed.
-  if (ctx.unattended || ctx.run?.detached) return Promise.resolve(false)
+  // Nobody to ask: a scheduled task, or an auto-mode run whose page was closed. A background task is
+  // different: nobody watches it either, but its card waits in the conversation for whenever they look.
+  if (!ctx.task && (ctx.unattended || ctx.run?.detached)) return Promise.resolve(false)
   const id = randomUUID()
   onTool?.({ phase: 'ask', id, name, args })
+  if (ctx.task) taskWaitsForApproval(ctx.task, { id, name, args }).catch(e => console.error('[task] approval card:', e.message))
   return new Promise(resolve => {
     const answer = ok => {
       if (!pendingApprovals.delete(id)) return
       ctx.run?.asking.delete(id)
       ctx.signal?.removeEventListener('abort', onAbort)
       onTool?.({ phase: 'answered', id, name, args, ok })
+      if (ctx.task) db.updateTask(ctx.task.id, { status: 'running', approval: null }, { from: ['waiting'] }).catch(() => {})
       resolve(ok)
     }
     const onAbort = () => answer(false)
@@ -199,13 +209,20 @@ async function groupRecallFor(bot) {
   const groups = (await db.listGroups()).filter(g => g.members.includes(bot.id))
   const chunks = []
   for (const g of groups) {
-    const log = await db.recent('group', g.id, 30)
+    const log = await db.recent('group', g.id, 30, { events: false })
     if (log.length) chunks.push(`[Group: ${g.name}]\n` + log.map(e => `[${modelSpeaker(e.speaker)}] ${e.content}`).join('\n'))
   }
   return chunks.join('\n\n')
 }
 
-function systemFor(bot, memory, peers, box, recall, skills = [], lead = null, auto = false, relayAuto = auto) {
+/**
+ * The system prompt. Three kinds of turn get one:
+ *   the front of a conversation (a DM, or whoever speaks in a group) — talks to the person, hands work out as tasks;
+ *   a background task (`task`) — works on its own until done, asks the person through ask_user;
+ *   tools off — no machine, no tasks.
+ */
+function systemFor(bot, memory, { peers = null, box = null, recall = '', skills = [], lead = null, auto = false,
+  groupId = null, task = null, byName = '', open = [], nameOf = id => id } = {}) {
   const parts = [bot.persona]
   parts.push(`
 
@@ -215,58 +232,49 @@ Reply in the language the user writes in.`)
 
 --- Your work environment ---
 You have your own machine (a container) with working directory /work; only you can get in.
-You are root — install and write whatever you like; it stays on your own machine.${peers?.length ? `
-In group chats there is a ./group directory: the group's shared drive, visible to everyone in the group —
-to hand something to a colleague, \`cp x group/\`; what colleagues give you is there too.` : ''}
+You are root — install and write whatever you like; it stays on your own machine.${groupId ? `
+This group's shared drive is /groups/${groupId}: everyone in the group sees it. To hand a colleague a file,
+put it there; what colleagues give you is there too. (Other directories under /groups belong to your other groups.)` : ''}
 Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).
 You also have your own browser (the browser tool): open pages, click buttons, fill forms, take screenshots to see the page.`)
-  if (auto && box) parts.push(`
+  if (task) parts.push(taskSection({ t: task, byName, groupDir: groupId && box ? `/groups/${groupId}` : '' }))
+  else {
+    if (auto && box) parts.push(`
 
 --- How you work: on your own, until it's done ---
-Nobody is going to push you along. Take the task all the way to done yourself.
+Nobody is going to push you along. Take the task all the way to done.
 - Don't stop to ask whether to continue, and don't end with offers like "Shall I …?" — if the next step is clear, take it.
 - For routine choices, make a sensible assumption and mention it in your report instead of asking.
 - Anything with more than a couple of steps: write a plan with update_plan first and keep it current as you go.
-  You are not finished while a step in it is still open.
+  You are not finished while a step in it is still open — but a step handed out as a background task is in hand:
+  mark it in_progress and end your turn; you'll hear back when it reports.
 - Check your own work — run it, test it, look at the result. "It should work" is not done.
 - Stop only when it is done, or when you are truly blocked on something only the user can give you (a password,
   a login, a decision about what they want). Then mark that step blocked and say exactly what you need.
 - What your role says to ask a person about first (irreversible actions and the like) you still ask about — that is the right kind of stop.
 - If a command is refused, don't retry it: find another way, or say why it can't be done.`)
+    // Tasks need something to run on: a machine, or colleagues. A DM with tools off has neither.
+    if (box || peers?.length) parts.push(frontSection({ group: !!peers?.length, open, nameOf }))
+  }
   if (peers?.length) {
+    const coordinating = lead?.id === bot.id
     parts.push(`
 
 --- This is a group chat ---
 These colleagues are also in the group:
 ${peers.map(p => `- ${p.name}: ${p.description}`).join('\n')}
 
-Messages show who said them: "[name] content"; "[User]" is the human.
-${!lead ? '' : lead.id === bot.id ? `
-**You are this group's lead.** When the user hasn't named anyone, you speak first: think the matter through, break it into
-pieces that can be handed out, @ the right colleague to do each, keep track of progress, and finally summarize the result for the user.
-Don't grind away alone on work you could hand out.` : `
-**This group's lead is ${lead.name}.** When your part is done, when you're stuck, or when you're unsure who should pick it up next, @${lead.name}.${relayAuto ? `
-If you don't @ anyone, your reply goes back to ${lead.name} automatically.` : ''}`}${relayAuto && lead?.id === bot.id ? `
-The group keeps going until you end it: when a colleague reports back, check the result, then @ whoever should do the next piece.
-Only when the whole goal is met, write the summary for the user without @-ing anyone — that ends it.` : ''}
+Messages show who said them: "[name] content"; "[User]" is the human; "[Platform]" lines are news about background tasks.
+${!lead ? '' : coordinating ? `**You coordinate this group.** When the user hasn't named anyone, it is you who answers.
+Think the request through, and hand the pieces to the right colleagues as background tasks (start_task with their name) —
+they work in parallel, each on their own machine, and report back here. Then check what came back and tell the user.
+Don't grind away alone on work you could hand out.` : `**${lead.name} coordinates this group.** The user addressed you directly, so answer for your part.`}
 
-**This group is turn-based — this rule matters most:**
-Only one person talks at a time. After you finish, the person you @ starts working; when they finish,
-it comes back around to you. You are not processes running concurrently.
-
-Two consequences:
-- **Hand off only with @name.** Don't use the shell to write files, send messages or leave notes for colleagues — they don't read those,
-  and doing so just wastes your own turn.
-- **Never wait for a colleague.** Don't sleep, don't poll group/ for a file to appear, don't write loops like
-  "for i in $(seq ...); do test -f ...". You can't wait for them — they only start once you've finished.
-  @ the work out, and then your turn is over.
-
-Other rules:
+- Only one of you speaks per message. Writing @name in a reply is only a mention — it doesn't make anyone speak.
+  To get a colleague working, give them a task with start_task.
 - Speak only for your own part. Don't speak for colleagues, and don't make up things they said.
-- Don't repeat what's already been said; if a colleague got it right, build on it instead of restating it.
-- @ only one person at a time, on its own line at the end of your reply.
-- ${relayAuto && lead ? `The group stops when ${lead.id === bot.id ? 'you reply' : `${lead.name} replies`} without @-ing anyone.` : `When the matter is done and nobody needs to follow up, don't @ anyone — that is what stops the group chat.`}
-- People are watching you, so don't treat "I've done X" as a figure of speech: if you didn't do it, say so.`)
+- Don't repeat what's already been said; build on it.
+- People are watching, so don't treat "I've done X" as a figure of speech: if you didn't do it, say so.`)
   }
   if (skills.length) parts.push(box ? `
 
@@ -301,7 +309,7 @@ ${recall.trim()}`)
 // (web pages, logs, colleagues' messages) may be a prompt injection.
 //
 // What a container sees and may do is decided in sandbox.mjs: its own desk at /work, one mount per
-// group it belongs to at /groups/<gid> (in a group chat /work/group points at the current one), a
+// group it belongs to at /groups/<gid>, a
 // network of ours with container-to-container traffic off, and a short capability list.
 // The platform's code and .env aren't in there; it can't reach them.
 const CLI = env.CONTAINER_CLI || 'docker'
@@ -384,22 +392,26 @@ function ensureNetwork() {
 const containerReady = new Map()
 
 /**
- * One agent does one thing at a time.
- *
- * ⚠️ The /work/group symlink is shared by the WHOLE container: while he runs tools in group A,
- * if group B (or a direct chat) also reaches him, ensureContainer repoints the symlink to B — and his later
- * `cp x group/` in A lands in B's shared drive (the cross-group leak from 2.14, triggered by concurrency).
- * Two conversations calling him for the first time would also each run `docker run --name` and collide. One lock stops both.
+ * Promise-chain locks by key: what is queued behind a key runs in order, one at a time.
+ *   agent:<id>    an agent's front turns — it answers one conversation at a time
+ *   task:<id>     an agent's background tasks — one at a time, they share its machine
+ *   session:<id>  turns in one session — a second message waits for the first instead of racing it
+ *   box:<id>      creating an agent's container — two first calls would both `docker run --name`
+ * An agent's front turn and its current task do run side by side: like a person with two windows
+ * open, they share the files and the browser. Nothing is shared that one of them changes under the
+ * other's feet — there used to be a /work/group symlink repointed on every turn (CLAUDE.md 2.14),
+ * and it is gone for exactly that reason: group drives are reached by their own path, /groups/<gid>.
  */
-const agentLocks = new Map()
-function withAgent(id, fn) {
-  const prev = agentLocks.get(id) ?? Promise.resolve()
+const locks = new Map()
+function withLock(key, fn) {
+  const prev = locks.get(key) ?? Promise.resolve()
   const run = prev.catch(() => {}).then(fn)
   const tail = run.catch(() => {})
-  agentLocks.set(id, tail)
-  tail.then(() => { if (agentLocks.get(id) === tail) agentLocks.delete(id) })
+  locks.set(key, tail)
+  tail.then(() => { if (locks.get(key) === tail) locks.delete(key) })
   return run
 }
+const withAgent = (id, fn) => withLock(`agent:${id}`, fn)
 
 /** Run a command in a container. If someone deleted the container from outside, drop the "ready" cache so the next round recreates it. */
 async function execIn(c, argv, input) {
@@ -408,8 +420,11 @@ async function execIn(c, argv, input) {
   return r
 }
 
-/** Make sure this agent's container is running with the right mounts, and point /work/group at the current group. */
-async function ensureContainer(botId, groupId) {
+/** Make sure this agent's container is running with the right mounts (and that it is in `groupId`, if given). */
+function ensureContainer(botId, groupId) {
+  return withLock(`box:${botId}`, () => ensureContainerNow(botId, groupId))
+}
+async function ensureContainerNow(botId, groupId) {
   await ensureImage()
   const name = cname(botId)
   // Only the groups it is in right now. A group it isn't in has no mount, so it doesn't exist in there.
@@ -438,12 +453,11 @@ async function ensureContainer(botId, groupId) {
         memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2' }), null, 120_000)
       if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
     }
+    // Containers from before group drives were reached by path still have the old symlink. It would
+    // point at whichever group used it last, so it goes.
+    await cliRun(['exec', name, 'rm', '-f', '/work/group'], null, 30_000)
     containerReady.set(name, sig)
   }
-  // Reset the group symlink every time — otherwise it keeps pointing at the previous group (CLAUDE.md 2.14)
-  await cliRun(['exec', name, 'bash', '-lc',
-    groupId ? `rm -f /work/group && ln -s /groups/${groupId} /work/group` : 'rm -f /work/group'],
-    null, 30_000)
   return name
 }
 
@@ -453,7 +467,7 @@ async function ensureContainer(botId, groupId) {
  * turn in progress, if any — the next one recreates it with the mounts it should have.
  */
 function dropContainersOf(botIds) {
-  for (const id of new Set(botIds)) withAgent(id, () => removeContainer(id)).catch(e =>
+  for (const id of new Set(botIds)) withAgent(id, () => withLock(`task:${id}`, () => removeContainer(id))).catch(e =>
     console.warn(`[sandbox] could not remove ${cname(id)}: ${e.message}`))
 }
 
@@ -528,6 +542,40 @@ const TOOL_SPECS = [
       path: { type: 'string' }, content: { type: 'string' } } } } },
 ]
 
+// The front of a conversation hands work out with these. In a DM a task is always the agent itself,
+// so `agent` only exists in a group.
+const fn = (name, description, properties = {}, required = []) =>
+  ({ type: 'function', function: { name, description, parameters: { type: 'object', required, properties } } })
+const taskRef = { task: { type: 'integer', description: 'The task number, e.g. 3 for #3' } }
+const frontSpecs = group => [
+  fn('start_task', 'Hand a piece of work to a background task. It runs on its own — same machine, same tools — while you stay free to talk, ' +
+    'and reports back in this conversation when it finishes, fails, or needs something only the user can give. ' +
+    (group ? 'Give it to a colleague by name and they work on it in parallel with the others; leave agent empty to take it yourself. ' : '') +
+    'Write the brief for someone who has not read this conversation: the goal, what you already know, constraints, what to hand back.',
+  { title: { type: 'string', description: 'A few words: what the task is' },
+    brief: { type: 'string', description: 'Everything needed to do it without this conversation' },
+    ...group ? { agent: { type: 'string', description: 'The colleague to give it to, by name. Empty = yourself' } } : {} },
+  ['title', 'brief']),
+  fn('list_tasks', 'Where this conversation\'s background tasks stand: number, who, status, and what a waiting one is asking.'),
+  fn('answer_task', 'Pass the user\'s answer on to a task that is waiting for one (it asked a question). The task picks up from there.',
+    { ...taskRef, answer: { type: 'string', description: 'The answer, as complete as the user gave it' } }, ['task', 'answer']),
+  fn('cancel_task', 'Stop a background task that is no longer wanted.', taskRef, ['task']),
+]
+// A background task reports with these. It cannot start tasks of its own: one level is enough to keep track of.
+const TASK_TOOLS = [
+  fn('ask_user', 'Ask the user something only they can answer — a password, a login, a decision about what they want. ' +
+    'Your work pauses here and their answer comes back as the next message. One clear question; say why you need it.',
+    { question: { type: 'string' } }, ['question']),
+  fn('finish_task', 'Report back and end the task: what you did, where the results are, what the user should check. ' +
+    'If you could not do it, say exactly why.',
+    { result: { type: 'string', description: 'Your report' } }, ['result']),
+]
+// What each kind of turn may call. Tools off means no machine: only the task tools, which need none.
+const specsFor = ({ task = false, group = false, dispatch = true } = {}) => [
+  ...CFG.tools ? TOOL_SPECS : [],
+  ...task ? TASK_TOOLS : dispatch ? frontSpecs(group) : [],
+]
+
 const clip = (t, max = OUT_MAX) => t.length > max ? `${t.slice(0, max)}\n… (truncated, ${t.length} characters in total)` : t
 
 // The browser daemon (deploy/browserd.py) isn't in the image: it's pushed into the container before each use and
@@ -571,7 +619,7 @@ async function humanBrowserAct(botId, args, lang) {
   if (!HUMAN_ACTIONS.includes(args.action)) throw new Say('browser.badAction', { action: args.action })
   const c = cname(botId)
   if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
-    await withAgent(botId, () => ensureContainer(botId, null))
+    await ensureContainer(botId, null)
   // Always go through BROWSERD_UP: start it if it isn't running, swap in new daemon code if it changed (the human actions were added later)
   const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
   if (up.code !== 0) return { ok: false, error: tr(lang, 'browser.cantStart', { detail: (up.out + up.err).trim().slice(-300) }) }
@@ -601,6 +649,9 @@ async function runBrowser(c, args, ctx) {
 // write_file goes over stdin instead of building a command line — quotes, newlines and $ in the content can't break anything.
 async function runTool(name, args, ctx) {
   const c = ctx.container
+  // Only what this turn was offered: a model that names a tool it wasn't given doesn't get to use it.
+  if (ctx.specs && !ctx.specs.some(s => s.function.name === name)) return `You have no tool called ${name}.`
+  if (TASK_TOOL_NAMES.has(name)) return runTaskTool(name, args, ctx)
   if (name === 'browser') return runBrowser(c, args, ctx)
   if (name === 'read_skill') {
     const mine = await db.skillsFor(ctx.bot.id)
@@ -682,9 +733,10 @@ function noteUsage(ctx, p, usage) {
   }).catch(e => console.error(`usage row lost for ${ctx.bot.id}:`, e.message))
 }
 
-/** Call the model once. Protocol translation and stream parsing live in protocols.mjs; here we only decide whether to send tools. */
-function callModel(p, messages, onDelta, { bare = false, signal } = {}) {
-  return callUpstream(p, messages, CFG.tools && !bare ? TOOL_SPECS : null, onDelta, signal)
+/** Call the model once. Protocol translation and stream parsing live in protocols.mjs; here we only decide which tools to send. */
+function callModel(p, messages, onDelta, { bare = false, signal, specs = null } = {}) {
+  const tools = bare ? null : specs ?? (CFG.tools ? TOOL_SPECS : null)
+  return callUpstream(p, messages, tools?.length ? tools : null, onDelta, signal)
 }
 
 // Upstream failures come from protocols.mjs flagged with `upstream` / `upstreamStatus`.
@@ -714,7 +766,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     let r
     for (const wait of [0, 2000, 6000]) {
       if (wait) await new Promise(t => setTimeout(t, wait))
-      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal }); break }
+      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal, specs: ctx.specs }); break }
       catch (e) {
         // Rejected with a 4xx while carrying a screenshot: most likely this model doesn't accept images. Drop them and carry on,
         // and stop sending screenshots afterwards — otherwise a model that can't see images fails the whole turn on the browser
@@ -736,7 +788,10 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     if (!calls.length) {
       // Stopped with its own plan unfinished: in auto mode that is a pause, not the end. Send it back,
       // a few times at most — an agent that keeps stopping has a reason, and it should say it.
-      const nudge = nudgeFor(ctx.plan, nudged, limits)
+      // A front thread with work out in background tasks is waiting for news, not stopped: sending it
+      // back to its plan would only make it poll.
+      const waiting = ctx.dispatched || (ctx.front && await db.openTaskCount(ctx.scope, ctx.scopeId) > 0)
+      const nudge = waiting ? null : nudgeFor(ctx.plan, nudged, limits)
       if (!nudge) return text
       nudged++
       if (content) messages.push({ role: 'assistant', content })
@@ -765,7 +820,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       // only thing it will ever see about this call.
       const res = allowed
         ? await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
-        : `Refused${ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)'
+        : `Refused${ctx.task ? ' by the user' : ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)'
           : ctx.run?.detached ? ' (the user closed the page, so nobody was there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
 Do not try this again. Do it another way, or say why you cannot.`
       const out = typeof res === 'string' ? res : res.text
@@ -774,8 +829,10 @@ Do not try this again. Do it another way, or say why you cannot.`
       onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {} })
       // Keep the call in the transcript, cut to the same length the live stream shows — reopening a
       // conversation should show the same cards, not more and not fewer.
-      if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.session, ctx.bot?.name ?? '',
-        { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE) })
+      // A background task keeps its own trace instead: its commands aren't part of the conversation.
+      const step = { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE) }
+      if (ctx.task) await db.traceTask(ctx.task.id, { ...step, at: Date.now() })
+      else if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.session, ctx.bot?.name ?? '', step)
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
     }
     // A screenshot can't go into a tool result (Chat protocol tool messages only take text), so it follows as a user message.
@@ -784,6 +841,10 @@ Do not try this again. Do it another way, or say why you cannot.`
       dropImages(messages, '(a screenshot was here; it has been replaced by a newer one)')
       messages.push({ role: 'user', content: '(this is the page captured by the browser screenshot just now)', images: [shot] })
     }
+    // Every tool call has its result now: a consistent point to save a background task at.
+    await ctx.onStep?.(messages)
+    // ask_user / finish_task end the run here; the task's runner takes it from there.
+    if (ctx.halt) return text
   }
   if (text) return text
   // Said nothing at all before the limit: say that, live as well as in the stored transcript
@@ -848,47 +909,82 @@ async function stopNoted(write, signal, fn) {
   }
 }
 
-// One-on-one
-function askSolo(p, bot, text, memory, onDelta, onTool, signal, lang, gate, session) {
+/**
+ * A conversation's stored history as the model reads it. Task news ("[Platform] …") reads as a user
+ * message: it is something the front thread is being told, not something it said. In a group (`self`
+ * given) everyone else's words come prefixed with their name.
+ */
+function forModel(rows, self = null) {
+  return rows.map(m => {
+    if (m.role === 'event') {
+      try { return { role: 'user', content: eventForModel(JSON.parse(m.content)) } } catch { return null }
+    }
+    if (!self) return { role: m.role, content: m.content }                 // a DM: the agent is the only one answering
+    return m.speaker === self.name && m.role === 'assistant'
+      ? { role: 'assistant', content: m.content }                           // what he said himself
+      : { role: 'user', content: `[${modelSpeaker(m.speaker)}] ${m.content}` }
+  }).filter(Boolean)
+}
+
+// session -> the newest message id its last front turn read. News that lands mid-turn (a quick task
+// can finish before the turn that started it has replied) is newer than that, so it still wakes it.
+const frontRead = new Map()
+function readHistory(rows, session) {
+  if (rows.length) frontRead.set(session, Number(rows.at(-1).id))
+  return rows
+}
+
+/** The open tasks a front thread is told about: this session's, since that's where their news arrives. */
+async function openTasksIn(scope, scopeId, session) {
+  const all = await db.listAgents()
+  const names = new Map(all.map(a => [a.id, a.name]))
+  const open = (await db.listTasks(scope, scopeId, 100)).filter(t => t.session_id === session && isOpen(t)).reverse()
+  return { open, nameOf: id => names.get(id) ?? id }
+}
+
+// One-on-one. The user's message is already stored (converse does that before waiting its turn).
+function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session) {
   return withAgent(bot.id, async () => {
     // Only this session's history: a new session is a clean slate for the model, not a new view of the old one
-    const prior = (await db.recent('dm', bot.id, FETCH_MAX, { session }))
-      .map(m => ({ role: m.role, content: m.content }))
-    // Store first, then start the container: if the container won't start, what the user said shouldn't vanish with it
-    await db.addMessage('dm', bot.id, session, { role: 'user', speaker: USER_SPEAKER, content: text })
+    const history = forModel(readHistory(await db.recent('dm', bot.id, FETCH_MAX, { session }), session))
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
-    const full = await stopNoted(ctx => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content: ctx }), signal, async () => runAgent(p,
-      [{ role: 'system', content: systemFor(bot, memory, null, CFG.tools ? '/work' : null, await groupRecallFor(bot), await db.skillsFor(bot.id), null, gate.autonomy === 'auto') },
-       ...prior, { role: 'user', content: text }],
-      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, ...gate }))
-    await db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content: full })
+    const { open, nameOf } = await openTasksIn('dm', bot.id, session)
+    const system = systemFor(bot, memory, { box: CFG.tools ? '/work' : null, recall: await groupRecallFor(bot),
+      skills: await db.skillsFor(bot.id), auto: gate.autonomy === 'auto', open, nameOf })
+    const write = content => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content })
+    const full = await stopNoted(write, signal, () => runAgent(p, [{ role: 'system', content: system }, ...history],
+      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, front: true,
+        specs: specsFor({ dispatch: CFG.tools }), ...gate }))
+    await write(full)
     return full
   })
 }
 
-// One person speaking once in a group chat: he sees the WHOLE group log, with other people's words prefixed by name
+// One person speaking once in a group chat: he sees the session's whole log, other people's words prefixed by name
 function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate, session) {
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
-    const messages = [{ role: 'system', content: systemFor(bot, memory, peers, CFG.tools ? '/work' : null, '', await db.skillsFor(bot.id), lead, gate.autonomy === 'auto', gate.relayAuto) }]
-    for (const e of await db.recent('group', groupId, FETCH_MAX, { session })) {
-      messages.push(e.speaker === bot.name
-        ? { role: 'assistant', content: e.content }                                   // what he said himself
-        : { role: 'user', content: `[${modelSpeaker(e.speaker)}] ${e.content}` })     // what others and the user said
-    }
-    return stopNoted(note => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content: note }), signal,
-      async () => runAgent(p, messages, onDelta, onTool, { container, signal, bot, lang, scope: 'group', scopeId: groupId, session, ...gate }))
+    const { open, nameOf } = await openTasksIn('group', groupId, session)
+    const system = systemFor(bot, memory, { peers, box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id),
+      lead, auto: gate.autonomy === 'auto', groupId, open, nameOf })
+    const messages = [{ role: 'system', content: system },
+      ...forModel(readHistory(await db.recent('group', groupId, FETCH_MAX, { session }), session), bot)]
+    const write = content => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content })
+    const reply = await stopNoted(write, signal, () => runAgent(p, messages, onDelta, onTool,
+      { container, signal, bot, peers, lang, scope: 'group', scopeId: groupId, session, front: true,
+        specs: specsFor({ group: true }), ...gate }))
+    await write(reply)
+    return reply
   })
 }
 
 /**
- * Find the colleague @-mentioned in a reply. Only the last @ counts, because the rule is one @ at a time.
+ * Find the colleague @-mentioned in a message. Only the last @ counts.
  *
  * ⚠️ Do NOT add `\b` after the name. `\b` judges word boundaries by [A-Za-z0-9_];
  * CJK characters aren't \w, so after "@<Chinese name>" there is never a word boundary and it never matches —
- * and Chinese names are this product's main use case. It bit us for real: Chief wrote @<name>,
- * the group chat just stopped, which looked like "he didn't want to hand off" but was really the regex not matching.
+ * and Chinese names are this product's main use case.
  *
  * Longer names are tried first so that a longer name isn't stolen by a shorter one that is its prefix.
  */
@@ -904,97 +1000,297 @@ function findMention(text, peers) {
   return hit?.bot
 }
 
+// Messages waiting for their session's previous turn to end. Stop reaches these too.
+const waitingRuns = new Set()
+
 /**
- * One conversation: a message comes in; in a direct chat that person replies, in a group the relay runs until nobody is @-ed.
- * Sending from the UI and a scheduled task firing both go through this one function — two implementations would drift apart.
+ * One turn of a conversation: a message comes in, and one agent answers it — in a DM that agent, in a
+ * group whoever the user @-ed, else the coordinator (the lead, else the first by order). Colleagues
+ * work through background tasks the answering agent starts; they no longer take turns speaking.
+ *
+ * `text` null = no new message: the front thread was woken because a task reported back (wakeFront).
+ * Sending from the UI, a scheduled task firing and a wake-up all go through this one function.
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
 async function converse(bots, groupId, providers, text, emit, controller, lang = 'en',
-  { unattended = false, session: want = null, run = newRun() } = {}) {
+  { unattended = false, session: want = null, run = newRun(), wake = null } = {}) {
   const signal = controller.signal
+  const scope = groupId || bots.length > 1 ? 'group' : 'dm'
+  const scopeId = groupId ?? (bots.length > 1 ? 'main' : bots[0].id)
   let session = null
+  const waiting = { abort: () => controller.abort() }
   try {
     // Which session this goes into, said first: a client that asked for a new one learns its id
     // before the first word arrives, and switches its session list over to it.
-    session = groupId || bots.length > 1
-      ? await sessionFor('group', groupId ?? 'main', want)
-      : await sessionFor('dm', bots[0].id, want)
+    session = await sessionFor(scope, scopeId, want)
     holdSession(session)
-    Object.assign(run, { session, scope: groupId || bots.length > 1 ? 'group' : 'dm',
-      scopeId: groupId ?? (bots.length > 1 ? 'main' : bots[0].id), abort: () => controller.abort(), startedAt: Date.now() })
-    runs.set(session, run)
     emit('session', { id: session })
-    const policy = await approvalPolicy()
-    const platform = await db.defaultAutonomy()
-    const autonomyOf = b => resolveAutonomy(b.autonomy, platform)
-    // Per agent: its own setting wins, otherwise the platform's. Resolved here so one turn can't
-    // change its mind halfway through because someone saved the settings dialog.
-    const gateFor = (b, relayAuto = false) => ({ unattended, run, autonomy: autonomyOf(b), relayAuto,
-      approval: { ...policy, mode: b.approval || policy.mode } })
-    if (!groupId && bots.length === 1) {
-      const bot = bots[0]
-      run.speaker = bot.id
-      emit('start', { botId: bot.id })
-      await askSolo(providers.get(bot.id), bot, text,
-        { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
-        d => emit('delta', { botId: bot.id, text: d }),
-        t => emit('tool', { botId: bot.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }), signal, lang, gateFor(bot), session)
-      emit('end', { botId: bot.id })
-    } else {
-      // Group chat: colleagues relay. Who speaks first — whoever the user @-ed; if nobody, the group's lead;
-      // if no lead is set, whoever sorts first (the old behavior; Chief of Staff is 0).
-      const gid = groupId ?? 'main'
-      await db.addMessage('group', gid, session, { role: 'user', speaker: USER_SPEAKER, content: text })
-      const g = (await db.listGroups()).find(x => x.id === gid)
-      const lead = bots.find(b => b.id === g?.lead) ?? null
-      // How the relay runs follows whoever coordinates it: the lead, else the first by order. In auto mode
-      // that person is the coordinator even when no lead was chosen — someone has to decide when it's done.
-      const coordinator = lead ?? bots[0]
-      const relayAuto = autonomyOf(coordinator) === 'auto'
-      const limits = limitsFor(relayAuto ? 'auto' : 'manual')
-      const shownLead = relayAuto ? coordinator : lead
-      let speaker = findMention(text, bots) ?? coordinator
-      const spoken = new Map()
-      for (let turn = 0; turn <= limits.handoffs && !signal.aborted; turn++) {
-        const peers = bots.filter(b => b.id !== speaker.id)
-        run.speaker = speaker.id
-        emit('start', { botId: speaker.id, turn })
-        let reply = ''
-        try {
-          reply = await askInGroup(providers.get(speaker.id), speaker, peers, shownLead,
-            { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
-              group: await db.getMemory('group', gid) },
-            d => emit('delta', { botId: speaker.id, text: d }),
-            t => emit('tool', { botId: speaker.id, ...t, output: t.output?.slice(0, TOOL_TRACE) }),
-            gid, signal, lang, gateFor(speaker, relayAuto), session)
-        } catch (e) {
-          emit('error', { botId: speaker.id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
-          break
-        }
-        await db.addMessage('group', gid, session, { role: 'assistant', speaker: speaker.name, content: reply })
-        emit('end', { botId: speaker.id })
-
-        // An @ wins; with none, a manual group stops and an auto one goes back to its coordinator
-        const hop = nextSpeaker({ mention: findMention(reply, peers), speaker, coordinator, auto: relayAuto })
-        if (!hop) break
-        const next = hop.bot
-        const count = (spoken.get(next.id) ?? 0) + 1
-        spoken.set(next.id, count)
-        if (count > limits.perPerson) { emit('note', { text: tr(lang, 'chat.spokenEnough', { name: next.name, n: count - 1 }) }); break }
-        // The last turn still @-ed someone: the relay limit is reached. Without saying so the UI shows "A → @B" and B never speaks
-        if (turn === limits.handoffs) { emit('note', { text: tr(lang, 'chat.relayLimit', { max: limits.handoffs, name: next.name }) }); break }
-        emit('handoff', { from: speaker.id, to: next.id, ...hop.auto ? { auto: true } : {} })
-        speaker = next
-      }
-    }
+    // Stored before waiting its turn: the message was sent now, even if the agent is still on the last one.
+    if (text != null) await db.addMessage(scope, scopeId, session, { role: 'user', speaker: USER_SPEAKER, content: text })
+    const key = `session:${session}`
+    // One turn per session at a time — a second message would race the first for the same history. It waits instead.
+    if (locks.has(key) && text != null) emit('note', { text: tr(lang, 'run.queued') })
+    Object.assign(waiting, { session, scope, scopeId })
+    waitingRuns.add(waiting)
+    await withLock(key, async () => {
+      waitingRuns.delete(waiting)
+      wake?.started()
+      if (signal.aborted) throw new Say('chat.aborted')
+      // Woken for news a turn in between has already read: nothing to say.
+      if (wake && !await db.unseenTaskNews(session, frontRead.get(session) ?? null)) return
+      Object.assign(run, { session, scope, scopeId, abort: () => controller.abort(), startedAt: Date.now() })
+      runs.set(session, run)
+      try { await turn() } finally { if (runs.get(session) === run) runs.delete(session) }
+    })
   } catch (e) {
     emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
   } finally {
-    if (session) {
-      releaseSession(session)
-      if (runs.get(session) === run) runs.delete(session)
-    }
+    waitingRuns.delete(waiting)
+    if (session) releaseSession(session)
   }
+
+  async function turn() {
+    const policy = await approvalPolicy()
+    const platform = await db.defaultAutonomy()
+    // Per agent: its own setting wins, otherwise the platform's. Resolved here so one turn can't
+    // change its mind halfway through because someone saved the settings dialog.
+    const gateFor = b => ({ unattended, run, autonomy: resolveAutonomy(b.autonomy, platform),
+      approval: { ...policy, mode: b.approval || policy.mode } })
+    const tool = id => t => emit('tool', { botId: id, ...t, output: t.output?.slice(0, TOOL_TRACE) })
+    if (scope === 'dm') {
+      const bot = bots[0]
+      run.speaker = bot.id
+      emit('start', { botId: bot.id })
+      await askSolo(providers.get(bot.id), bot,
+        { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
+        d => emit('delta', { botId: bot.id, text: d }), tool(bot.id), signal, lang, gateFor(bot), session)
+      emit('end', { botId: bot.id })
+      return
+    }
+    const g = (await db.listGroups()).find(x => x.id === scopeId)
+    // Someone always coordinates a group: the lead, else whoever sorts first (Chief of Staff is 0).
+    const coordinator = bots.find(b => b.id === g?.lead) ?? bots[0]
+    // Woken by a task: whoever started it hears the news, if they're still here.
+    const speaker = (wake && bots.find(b => b.id === wake.speaker)) || (text != null && findMention(text, bots)) || coordinator
+    run.speaker = speaker.id
+    emit('start', { botId: speaker.id })
+    await askInGroup(providers.get(speaker.id), speaker, bots.filter(b => b.id !== speaker.id), coordinator,
+      { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
+        group: await db.getMemory('group', scopeId) },
+      d => emit('delta', { botId: speaker.id, text: d }), tool(speaker.id),
+      scopeId, signal, lang, gateFor(speaker), session)
+    emit('end', { botId: speaker.id })
+  }
+}
+
+// ---------- Background tasks ----------
+// The rules are in tasks.mjs. A task runs as its agent, on its machine, one at a time per agent
+// (lock task:<agent>), side by side with other agents' tasks and with the agent's own front turns.
+// It never holds the process while it waits for a person: ask_user ends the run with the task at
+// 'waiting', and the answer queues it again with its saved transcript. An approval is the exception —
+// the card waits in memory, holding that agent's queue (a restart turns it into "it was not run").
+
+const TASK_TOOL_NAMES = new Set(['start_task', 'list_tasks', 'answer_task', 'cancel_task', 'ask_user', 'finish_task'])
+const taskAborts = new Map()      // task id -> its AbortController, while it runs
+const taskQueued = new Set()      // ids queued in this process, so one isn't queued twice
+
+/** What the clients see of a task. The approval's arguments stay on the server; its one-line subject is enough. */
+const taskView = t => ({
+  id: Number(t.id), session: t.session_id, agent_id: t.agent_id, by_agent: t.by_agent, title: t.title, brief: t.brief,
+  status: t.status, question: t.question,
+  approval: t.approval ? { id: t.approval.id, name: t.approval.name, subject: toolSubject(t.approval.name, t.approval.args ?? {}) } : null,
+  result: t.result, created_at: t.created_at, updated_at: t.updated_at, finished_at: t.finished_at,
+})
+
+function enqueueTask(t) {
+  const id = String(t.id)
+  if (taskQueued.has(id)) return
+  taskQueued.add(id)
+  withLock(`task:${t.agent_id}`, () => { taskQueued.delete(id); return runTask(id) })
+    .catch(e => console.error(`[task #${id}]`, e))
+}
+
+/** Something happened to a task: a card in its conversation, and — for news — a turn for the front thread. */
+async function taskEvent(t, kind, text = '', extra = {}) {
+  const agent = (await db.getAgent(t.agent_id))?.name ?? t.agent_id
+  await db.addEvent(t.scope, t.scope_id, t.session_id, agent,
+    { task: Number(t.id), kind, agent, agent_id: t.agent_id, title: t.title, text: clipText(text, RESULT_MAX), ...extra })
+  if (wakes(kind)) wakeFront(t)
+}
+
+/**
+ * Stop a task. Whichever lands first — this or the runner finishing — wins; the other changes nothing.
+ * `quiet`: no card (the conversation it would go into is being deleted).
+ */
+async function stopTask(t, by = '', { quiet = false } = {}) {
+  if (!await db.updateTask(t.id, { status: 'stopped', approval: null, finished_at: new Date() }, { from: OPEN })) return false
+  taskAborts.get(String(t.id))?.abort()
+  if (!quiet) await taskEvent(t, 'stopped', '', by ? { by } : {})
+  return true
+}
+
+/** The person's answer to a task's question: it queues again and carries on from where it asked. */
+async function resumeTask(t, answer) {
+  if (!await db.updateTask(t.id, { status: 'queued', question: '', pending: answer }, { from: ['waiting'] })) return false
+  enqueueTask(t)
+  return true
+}
+
+async function taskWaitsForApproval(t, approval) {
+  await db.updateTask(t.id, { status: 'waiting', approval }, { from: ['running'] })
+  await taskEvent(t, 'approval', toolSubject(approval.name, approval.args), { approval: approval.id })
+}
+
+/** A task's model conversation as stored: no system prompt (rebuilt every run), no screenshots. */
+const forStorage = messages => messages.slice(1).map(({ images, ...m }) =>
+  images ? { ...m, content: `${m.content ?? ''}\n(a screenshot was here)` } : m)
+
+async function runTask(id) {
+  const t = await db.getTask(id, { full: true })
+  if (!t || t.status !== 'queued') return
+  const ac = new AbortController()
+  taskAborts.set(id, ac)
+  try {
+    const all = await loadBots()
+    const bot = all.find(b => b.id === t.agent_id)
+    if (!bot) throw new Say('err.noAgent')
+    const groupId = t.scope === 'group' ? t.scope_id : null
+    const p = await providerFor(bot)
+    const byName = t.by_agent && t.by_agent !== bot.id ? all.find(b => b.id === t.by_agent)?.name ?? '' : ''
+    const convo = Array.isArray(t.transcript) && t.transcript.length ? t.transcript : [{ role: 'user', content: taskOpening(t, byName) }]
+    if (t.pending) convo.push({ role: 'user', content: `[The user's answer] ${t.pending}` })
+    if (!await db.updateTask(id, { status: 'running', pending: null, transcript: convo }, { from: ['queued'] })) return
+    const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
+    const system = systemFor(bot, {
+      own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id),
+      group: groupId ? await db.getMemory('group', groupId) : '',
+    }, { box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id), groupId, task: t, byName })
+    const policy = await approvalPolicy()
+    // Always the auto limits: a background task has nobody to push it along by definition.
+    const ctx = { container, signal: ac.signal, bot, lang: 'en', scope: t.scope, scopeId: t.scope_id, session: t.session_id,
+      task: t, specs: specsFor({ task: true }), autonomy: 'auto', approval: { ...policy, mode: bot.approval || policy.mode },
+      onStep: messages => db.updateTask(id, { transcript: forStorage(messages) }) }
+    const text = await runAgent(p, [{ role: 'system', content: system }, ...convo], null, null, ctx)
+    if (ctx.question) {
+      if (await db.updateTask(id, { status: 'waiting', question: ctx.question }, { from: ['running', 'waiting'] }))
+        await taskEvent(t, 'asked', ctx.question)
+    } else {
+      // Ended without finish_task: what it said last is the report.
+      const result = ctx.result ?? clipText(text || '(finished without a report)', RESULT_MAX)
+      if (await db.updateTask(id, { status: 'done', result, approval: null, finished_at: new Date() }, { from: ['running', 'waiting'] }))
+        await taskEvent(t, 'done', result)
+    }
+  } catch (e) {
+    if (ac.signal.aborted) return     // stopped: stopTask already wrote the status and the card
+    const message = errorText(e, 'en').slice(0, 500)
+    if (await db.updateTask(id, { status: 'failed', result: message, approval: null, finished_at: new Date() }, { from: OPEN }))
+      await taskEvent(t, 'failed', message)
+  } finally {
+    taskAborts.delete(id)
+  }
+}
+
+// A session's front thread waking up to tell the person what a task reported. Several pieces of news
+// arriving while it is busy make one wake-up, not several: the flag clears when the turn actually starts.
+const wakeQueued = new Set()
+async function wakeFront(t) {
+  const session = t.session_id
+  if (!session || wakeQueued.has(session)) return
+  wakeQueued.add(session)
+  let started = false
+  try {
+    const { bots, groupId } = await resolveTarget(t.scope === 'group' ? 'group' : 'agent', t.scope_id)
+    const providers = new Map()
+    for (const b of bots) providers.set(b.id, await providerFor(b))
+    // Nobody is necessarily watching: like a page that was closed. The run shows up as "working", with Stop.
+    const run = newRun()
+    run.detached = true
+    await converse(bots, groupId, providers, null,
+      (ev, d) => { if (ev === 'error') console.warn(`[task] waking the front of ${t.scope}:${t.scope_id} failed: ${d.message}`) },
+      new AbortController(), 'en',
+      { session, run, wake: { speaker: t.by_agent, started: () => { started = true; wakeQueued.delete(session) } } })
+  } catch (e) {
+    console.warn(`[task] could not wake ${t.scope}:${t.scope_id}: ${errorText(e, 'en')}`)
+  } finally {
+    if (!started) wakeQueued.delete(session)
+  }
+}
+
+/** The task tools: the front thread's four, and the two a task reports with. */
+async function runTaskTool(name, args, ctx) {
+  if (name === 'ask_user') {
+    const question = String(args.question ?? '').trim()
+    if (!question) return 'The question was empty; nothing was sent.'
+    ctx.question = clipText(question, QUESTION_MAX)
+    ctx.halt = true
+    return 'Question sent to the user. Your work pauses here; their answer will come back as the next message.'
+  }
+  if (name === 'finish_task') {
+    ctx.result = clipText(String(args.result ?? '').trim() || '(no report)', RESULT_MAX)
+    ctx.halt = true
+    return 'Reported. The task is done.'
+  }
+  const { nameOf } = await openTasksIn(ctx.scope, ctx.scopeId, ctx.session)
+  if (name === 'list_tasks') {
+    const rows = (await db.listTasks(ctx.scope, ctx.scopeId, 20)).filter(t => t.session_id === ctx.session)
+    return rows.length ? rows.map(t => taskLine(t, nameOf) +
+      (t.status === 'done' || t.status === 'failed' ? `\n  report: ${clipText(t.result, 300)}` : '')).join('\n')
+      : 'No tasks in this conversation yet.'
+  }
+  if (name === 'start_task') return startTaskFrom(ctx, args)
+  const t = await db.getTask(args.task)
+  if (!t || t.scope !== ctx.scope || t.scope_id !== ctx.scopeId) return `There is no task #${args.task} in this conversation.`
+  if (name === 'cancel_task')
+    return await stopTask(t, ctx.bot.name) ? `Stopped task #${t.id}.` : `Task #${t.id} is already ${t.status}.`
+  if (name === 'answer_task') {
+    const answer = String(args.answer ?? '').trim()
+    if (!answer) return 'The answer was empty; nothing was sent.'
+    if (t.status !== 'waiting') return `Task #${t.id} isn't waiting for an answer (it is ${t.status}).`
+    if (t.approval) return `Task #${t.id} is waiting for the user to approve a command — only they can, on the card in this conversation.`
+    return await resumeTask(t, answer) ? `Passed on to task #${t.id}; it carries on from here.`
+      : `Task #${t.id} moved on in the meantime; nothing was sent.`
+  }
+  return `Unknown tool ${name}`
+}
+
+async function startTaskFrom(ctx, args) {
+  const input = checkTaskInput(args)
+  if (typeof input === 'string') return `Not started: ${input}.`
+  const who = ctx.peers?.length ? pickAssignee(args.agent, ctx.bot, ctx.peers) : ctx.bot
+  if (!who) return `Not started: nobody in this group is called "${args.agent}". Members: ${[ctx.bot, ...ctx.peers].map(b => b.name).join(', ')}.`
+  if (await db.openTaskCount(ctx.scope, ctx.scopeId) >= MAX_OPEN_PER_CONVERSATION)
+    return `Not started: ${MAX_OPEN_PER_CONVERSATION} tasks are already open in this conversation. Wait for one to report back, or cancel one.`
+  if (await db.sessionTaskCount(ctx.session) >= MAX_PER_SESSION)
+    return `Not started: this session has already started ${MAX_PER_SESSION} tasks, which looks like a loop. Tell the user where things stand instead.`
+  const ahead = (await db.tasksWithStatus(['queued', 'running'])).filter(x => x.agent_id === who.id).length
+  const t = await db.createTask({ scope: ctx.scope, scope_id: ctx.scopeId, session_id: ctx.session,
+    agent_id: who.id, by_agent: ctx.bot.id, ...input })
+  ctx.dispatched = true
+  enqueueTask(t)
+  const self = who.id === ctx.bot.id
+  return `Started task #${t.id}${self ? '' : ` for ${who.name}`}: "${t.title}"` +
+    (ahead ? ` — queued behind ${ahead} other task${ahead > 1 ? 's' : ''} of ${self ? 'yours' : 'theirs'}` : '') +
+    '. It reports back here when it is done or needs something; don\'t wait for it.'
+}
+
+/**
+ * After a restart: a task that was running carries on from its last saved step, and one that was
+ * waiting for an approval learns it was not run (that card's answer lived in memory). Queued ones queue.
+ */
+async function recoverTasks() {
+  let n = 0
+  for (const t of await db.tasksWithStatus(OPEN)) {
+    if (t.status === 'running' || (t.status === 'waiting' && t.approval)) {
+      const full = await db.getTask(t.id, { full: true })
+      const why = t.status === 'running' ? 'while this task was running'
+        : `while this task was waiting for approval of: ${toolSubject(t.approval.name, t.approval.args ?? {})} — that was not run`
+      await db.updateTask(t.id, { status: 'queued', approval: null, transcript: [...full.transcript ?? [],
+        { role: 'user', content: `[Platform] The server restarted ${why}. Check where things stand before redoing anything.` }] })
+      t.status = 'queued'
+    }
+    if (t.status === 'queued') { enqueueTask(t); n++ }
+  }
+  if (n) console.log(`Picked up ${n} background task(s) after the restart`)
 }
 
 // ---------- Runs ----------
@@ -1397,7 +1693,11 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === 'DELETE') {
         if (liveSessions.has(s.id)) return send(409, { error: t('session.busy') })
+        // Its tasks go with it; stop the ones still going first, or they'd report into a session that's gone.
+        for (const x of await db.listTasks(s.scope, s.scope_id, 1000))
+          if (x.session_id === s.id && isOpen(x)) await stopTask(x, '', { quiet: true })
         await db.deleteSession(s.id)
+        frontRead.delete(s.id)
         return send(200, { ok: true })
       }
     }
@@ -1446,6 +1746,8 @@ const server = createServer(async (req, res) => {
     }
     if (bm && req.method === 'DELETE') {
       if (!await db.getAgent(bm[1])) return send(404, { error: t('err.noAgent') })
+      for (const x of await db.tasksWithStatus(OPEN))
+        if (x.agent_id === bm[1] || (x.scope === 'dm' && x.scope_id === bm[1])) await stopTask(x, '', { quiet: true })
       await db.deleteAgent(bm[1])
       // Delete the container too — an ownerless container only wastes memory,
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
@@ -1637,10 +1939,37 @@ const server = createServer(async (req, res) => {
       // By session, or every run in one conversation ({kind, id}) — the Stop button knows the conversation for sure.
       const b = await readBody(req)
       const scope = b.kind === 'group' ? 'group' : 'dm'
-      const hit = [...runs.values()].filter(r => b.session ? r.session === str(b.session) : r.scope === scope && r.scopeId === str(b.id))
+      // Messages still waiting behind the one running go too: Stop means stop, not "next".
+      const hit = [...runs.values(), ...waitingRuns].filter(r => b.session ? r.session === str(b.session) : r.scope === scope && r.scopeId === str(b.id))
       if (!hit.length) return send(404, { error: t('run.none') })
       for (const r of hit) r.abort()
       return send(200, { stopped: hit.length })
+    }
+
+    // ---- Background tasks ----
+    // A conversation's tasks, newest first: ?kind=agent|group&id=
+    if (url.pathname === '/api/tasks' && req.method === 'GET') {
+      const kind = url.searchParams.get('kind'), id = url.searchParams.get('id') ?? ''
+      return send(200, (await db.listTasks(scopeOf(kind), id, 100)).map(taskView))
+    }
+    const tk = url.pathname.match(/^\/api\/tasks\/(\d+)(?:\/(answer|stop))?$/)
+    if (tk) {
+      const task = await db.getTask(tk[1])
+      if (!task) return send(404, { error: t('task.none') })
+      // One task with what it ran, for the expanded card.
+      if (!tk[2] && req.method === 'GET') return send(200, { ...taskView(task), trace: task.trace ?? [] })
+      if (tk[2] === 'stop' && req.method === 'POST')
+        return await stopTask(task) ? send(200, { ok: true }) : send(409, { error: t('task.notOpen') })
+      // The person answering a task's question straight from its card. The answer goes to the task only:
+      // the card in the conversation says it was answered, not what — it may be a password.
+      if (tk[2] === 'answer' && req.method === 'POST') {
+        const text = str((await readBody(req)).text).trim()
+        if (!text) return send(400, { error: t('task.answerEmpty') })
+        if (task.status !== 'waiting' || task.approval || !await resumeTask(task, text))
+          return send(409, { error: t('task.notAsking') })
+        await taskEvent(task, 'answered')
+        return send(200, { ok: true })
+      }
     }
 
     // ---- Approvals ----
@@ -1784,14 +2113,8 @@ const server = createServer(async (req, res) => {
       try { for (const b of bots) providers.set(b.id, await providerFor(b)) }
       catch (e) { return send(400, { error: errorText(e, lang) }) }
 
-      // One run per session at a time: a second message would race the first for the same history.
-      // (Stop it, or wait — the Stop button is on the conversation.) 'new' can't collide with anything.
+      // A second message to a session still working on the first waits its turn inside converse.
       const want = str(session) || null
-      if (want !== 'new') {
-        const target = want ?? (await db.latestSession(groupId || bots.length > 1 ? 'group' : 'dm',
-          groupId ?? (bots.length > 1 ? 'main' : bots[0].id)))?.id
-        if (target && runs.has(target)) return send(409, { error: t('run.busy') })
-      }
       const auto = await runsAuto(bots, groupId)
 
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
@@ -1827,11 +2150,18 @@ const server = createServer(async (req, res) => {
       if (!g) return send(404, { error: t('err.noGroup') })
       const patch = await checkGroup(await readBody(req), g)
       const saved = await db.saveGroup({ ...g, ...patch })
-      if (patch.members) dropContainersOf(g.members.filter(id => !patch.members.includes(id)))
+      if (patch.members) {
+        const gone = g.members.filter(id => !patch.members.includes(id))
+        // Someone who left the group stops working for it: their open tasks here are stopped (with a card saying so).
+        for (const x of await db.listTasks('group', g.id, 1000))
+          if (gone.includes(x.agent_id) && isOpen(x)) await stopTask(x)
+        dropContainersOf(gone)
+      }
       return send(200, saved)
     }
     if (gm && req.method === 'DELETE') {         // disband; files in the shared drive are left alone
       const g = (await db.listGroups()).find(x => x.id === gm[1])
+      for (const x of await db.listTasks('group', gm[1], 1000)) if (isOpen(x)) await stopTask(x, '', { quiet: true })
       await db.deleteGroup(gm[1])
       if (g) dropContainersOf(g.members)
       return send(200, { ok: true })
@@ -1847,7 +2177,7 @@ const server = createServer(async (req, res) => {
         const want = url.searchParams.get('session')
         const sess = want ? await db.getSession(want) : await db.latestSession(scope, id)
         if (want && (!sess || sess.scope !== scope || sess.scope_id !== id)) return send(404, { error: t('session.none') })
-        const messages = sess ? await db.recent(scope, id, 1_000_000, { session: sess.id }) : []
+        const messages = sess ? await db.recent(scope, id, 1_000_000, { session: sess.id, events: false }) : []
         const title = sess ? (await db.listSessions(scope, id)).find(x => x.id === sess.id)?.title ?? '' : ''
         return send(200, { format: 'multi-agent-chat', version: 1, kind: scope === 'dm' ? 'agent' : 'group',
           id, name: conv.name, session: title, exported_at: new Date().toISOString(),
@@ -1921,6 +2251,7 @@ if (await db.seedProviderFromEnv(env)) console.log('Created the default upstream
 
 await mkdir(join(WORKROOT, 'agents'), { recursive: true })
 await mkdir(join(WORKROOT, 'groups'), { recursive: true })
+await recoverTasks()
 
 // Keep idle keep-alive connections for 65 seconds (Node's default is 5). Connections in a client's pool
 // outlive the server's, so the next request lands on a socket that's already been closed.
@@ -1981,7 +2312,7 @@ server.on('upgrade', async (req, socket) => {
   }
   ;(async () => {
     if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
-      await withAgent(m[1], () => ensureContainer(m[1], null))
+      await ensureContainer(m[1], null)
     const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
     if (up.code !== 0 || closed) return close()
     // After exec, cat keeps bash's pid, so $$ is the one to kill

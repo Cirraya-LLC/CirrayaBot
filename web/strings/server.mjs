@@ -41,15 +41,17 @@ export const serverStrings = {
   'chat.needTarget':  ['Pick an agent or a group, and do not send an empty message', '要选一个 Agent 或一个群，并且不能发空消息', '請選一個 Agent 或一個群組，而且不能傳送空白訊息'],
   'chat.noImages':    ['This model does not accept images; screenshots are now sent as text', '这个模型不收图片，截图改成文字', '這個模型不接受圖片，截圖改成文字'],
   'chat.aborted':     ['Stopped', '已停止', '已停止'],
-  'run.busy':         ['Still working on the previous message in this session — wait for it, or press Stop', '这个会话还在处理上一条消息 —— 等它做完，或者按「停止」', '這個會話還在處理上一則訊息 —— 等它做完，或按「停止」'],
+  'run.queued':       ['Still working on the previous message in this session — this one is next', '这个会话还在处理上一条消息 —— 这条排在它后面', '這個會話還在處理上一則訊息 —— 這則排在它後面'],
   'run.none':         ['Nothing is running there', '那里没有正在进行的任务', '那裡沒有正在進行的任務'],
-  'chat.spokenEnough': ['{name} has already spoken {n} times; stopping here', '{name} 已经说了 {n} 轮，停在这里', '{name} 已經說了 {n} 輪，停在這裡'],
-  'chat.relayLimit':  ['Reached the limit of {max} handoffs; {name} will not pick this one up — you can keep going in the group',
-    '接力到 {max} 次上限，{name} 这轮先不接，你可以在群里接着说',
-    '接力達到 {max} 次上限，{name} 這輪先不接，你可以在群組裡接著說'],
   'group.tooSmall':   ['"{name}" has only {n} member(s) left — add people in the group settings first (at least two)',
     '「{name}」只剩 {n} 个成员了，先在群设置里加人（至少两个）',
     '「{name}」只剩 {n} 位成員了，請先在群組設定裡加人（至少兩位）'],
+
+  // Background tasks
+  'task.none':        ['There is no such task', '没有这个任务', '沒有這個任務'],
+  'task.notOpen':     ['That task has already ended', '这个任务已经结束了', '這個任務已經結束了'],
+  'task.answerEmpty': ['Write an answer first', '先写下回答', '請先寫下回答'],
+  'task.notAsking':   ['That task is not waiting for an answer any more', '这个任务已经不在等回答了', '這個任務已經不在等回答了'],
 
   // Agents
   'agent.nameEmpty':    ['Name cannot be empty', '名字不能为空', '名稱不能為空'],

@@ -84,6 +84,7 @@ class EntryView extends StatelessWidget {
     required this.names,
     required this.colorOf,
     this.onApprove,
+    this.news,
   });
 
   final Entry entry;
@@ -94,6 +95,9 @@ class EntryView extends StatelessWidget {
 
   /// Agent name → colour, for the `@name` pills.
   final Color Function(String name) colorOf;
+
+  /// Draws task news. It needs the workbench (to answer a task), which this file doesn't.
+  final Widget Function(News n)? news;
 
   @override
   Widget build(BuildContext context) => switch (entry) {
@@ -108,6 +112,7 @@ class EntryView extends StatelessWidget {
       ),
     ),
     Ran r => _ToolCard(r, onApprove),
+    News n => news?.call(n) ?? const SizedBox.shrink(),
     Said s => _Bubble(said: s, names: names, colorOf: colorOf),
   };
 }

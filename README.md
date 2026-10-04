@@ -1,16 +1,24 @@
 # CirrayaBot
 
 An open-source "AI coworker": a column of Agents and group chats on the left. Each Agent has
-its own persona, its own container and its own memory; put them in a group and they
-**hand the work to each other with @mentions** until a job is done, instead of each
-answering on their own.
+its own persona, its own container and its own memory; put them in a group and the lead
+**hands pieces of the work to colleagues, who do them in parallel** and report back, instead
+of each answering on their own.
 
 - **One container per Agent** — he is root on his own machine and can install or write
   whatever he likes, but he can't see the platform's code or anyone else's desktop. This is
   where Grok Bot's biggest design flaw (every Bot shares one cloud computer) gets fixed.
-- **Group chat is collaboration, not broadcast** — everyone shares one group log, and
-  whoever should take over gets @mentioned. Each group has its own shared drive;
-  `cp report.md group/` is how you hand something to a coworker.
+- **Group chat is collaboration, not broadcast** — one Agent answers each message (the one you
+  @mention, else the group's lead) and hands work to colleagues as background tasks. Each group
+  has its own shared drive at `/groups/<id>` in every member's container; copying a file there is
+  how you hand something to a coworker.
+- **Background tasks: the conversation stays free** — anything that takes a while runs as a
+  task in the background (in a DM, the Agent itself; in a group, whichever colleague it went to),
+  while the conversation goes on. One Agent's tasks queue; different Agents' run side by side.
+  When a task needs something only you can give, it pauses and asks: the Agent you're talking to
+  tells you, or you answer on the task's card (that answer goes to the task alone — handy for a
+  password). Finished work comes back into the conversation and gets summarized. Every task is in
+  the right panel, with what it ran and a Stop button.
 - **Memory carries across contexts** — what was discussed in a group, he still remembers
   in a direct chat.
 - **Sessions, and search across them** — a DM or a group holds as many separate sessions as you
@@ -20,8 +28,7 @@ answering on their own.
   session of their own, and an imported history becomes a new session.
 - **Works on its own until the job is done (auto mode, the default)** — an Agent writes a plan
   and works through it without waiting for you to say "continue", checks its own work, and only
-  stops when it's done or needs something only you can give. In a group, whoever finishes hands
-  back to the lead until the lead wraps up. Closing the page doesn't stop it: a dot marks the
+  stops when it's done or needs something only you can give. Closing the page doesn't stop it: a dot marks the
   conversations still being worked on, and **Stop** is on the conversation. Switch an Agent (or
   the whole platform, in ⚙) to *manual* to go back to a few steps per message. Approvals and the
   daily cap apply either way.

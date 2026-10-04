@@ -24,6 +24,7 @@ import '../settings/providers_page.dart';
 import '../settings/skills_page.dart';
 import 'message_view.dart';
 import 'session_panel.dart';
+import 'task_view.dart';
 
 /// Collapsed width of the conversation list. Expanded it is whatever the
 /// sidebar was dragged to ([_wide]).
@@ -970,6 +971,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       names: bench.agentNames,
                       colorOf: (n) => C.parse(bench.agentByName(n)?.color ?? ''),
                       onApprove: bench.answer,
+                      news: (n) => NewsCard(bench: bench, news: n),
                     );
                     return e.id != null && e.id == _flashId
                         ? _Flash(key: _flashKey, motion: _motion(context), child: view)
@@ -1353,6 +1355,9 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     ),
                   ),
                 if (c != null) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('tk.heading'))),
+                  TaskList(key: ValueKey('tasks-${c.kind}:${c.id}'), bench: bench),
                   const Divider(height: 22),
                   Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.spend'))),
                   for (final id in ids) _spendTile(id, group: c.isGroup),

@@ -292,6 +292,7 @@ async function openConv(c) {
   loadRoutines()
   loadBotSkills()
   loadBrowsers()
+  TASKS = []; taskSig = ''; openTask = null; renderTasks()
 
   await loadSessions(c)
   if (ticket !== shown) return
@@ -302,6 +303,8 @@ async function openConv(c) {
     ? lastSession.get(key) : SESSIONS[0]?.id ?? null
   paintSession()
 
+  // Tasks before history: an event card needs to know whether its task is still waiting on a reply
+  await loadTasks()
   if (!await drawHistory(c, ticket)) return
   renderConvs(); $('#in').focus(); sendMode(); paintRun()
 }
@@ -315,7 +318,8 @@ async function drawHistory(c, ticket) {
   const log = $('#log'); log.innerHTML = ''
   for (const e of hist) {
     let el
-    if (e.role === 'tool') {
+    if (e.role === 'event') el = eventCard(e.event ?? {})
+    else if (e.role === 'tool') {
       el = toolLine(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, toolLabel(e.name, e.args))
       finishTool(el, e.output)
     // 'User' is the speaker the server stores for the person in group logs (data, not UI text)
@@ -761,7 +765,6 @@ async function send() {
         }
         else if (ev === 'error') { (bubs.get(d.botId)?.el ?? bubble(d.botId, false)).textContent = '⚠ ' + d.message }
         else if (ev === 'note') note(d.text)
-        else if (ev === 'handoff') note(`${bot(d.from)?.name ?? d.from} → @${bot(d.to)?.name ?? d.to}${d.auto ? ' · ' + t('note.backToLead') : ''}`)
         else if (ev === 'tool') {
           if (d.phase === 'retry') {
             // the failed attempt may have streamed half a sentence; the retry repeats it all
@@ -790,7 +793,7 @@ async function send() {
     }
   } catch (e) { if (ticket === shown) note('⚠ ' + (e.message ?? e)) }
   busy = false; streaming = null; sendMode(); input.focus()
-  loadRuns()
+  loadRuns(); loadTasks()
   CONVS = await (await fetch(api('/api/conversations'))).json(); renderConvs()
   loadUsage()                                         // the turn just cost something; show it
   if (cur?.kind === target.kind && cur?.id === target.id) { await loadSessions(cur); paintSession() }
@@ -1437,6 +1440,136 @@ $('#addsk').onclick = () => openSkills(null, cur ? [cur.id] : [])
 
 // ═══ Scheduled tasks ═══
 // Weekday names from Intl; 2024-01-07 was a Sunday, so index 0 = Sunday
+// ═══ Background tasks ═══
+// Work a conversation handed out. They run on their own and report back into the conversation as
+// event cards; this list is where to see them all, answer one, approve one, or stop one.
+let TASKS = [], taskSig = '', openTask = null, taskTimer = null
+const OPEN_ST = ['queued', 'running', 'waiting']
+const taskOf = id => TASKS.find(x => x.id === Number(id))
+
+async function loadTasks() {
+  const c = cur; if (!c) return
+  const list = await fetch(api(`/api/tasks?kind=${c.kind}&id=${c.id}`)).then(r => r.ok ? r.json() : null).catch(() => null)
+  if (cur !== c || !list) return
+  const sig = convKey(c) + '|' + list.map(x => `${x.id}:${x.status}:${x.updated_at}`).join()
+  const moved = taskSig && sig !== taskSig && taskSig.startsWith(convKey(c) + '|')
+  TASKS = list; taskSig = sig
+  renderTasks()
+  // A task moved: its card may have landed in the transcript, and the front thread may be waking
+  // to tell about it. Redraw unless a reply is streaming here or the person has scrolled up to read.
+  if (moved && !busy) {
+    const log = $('#log'), reading = log.scrollHeight - log.scrollTop - log.clientHeight > 80
+    const conv = CONVS.find(x => x.kind === c.kind && x.id === c.id)
+    if (conv && !reading) drawHistory(conv, shown)
+    loadRuns()
+  }
+  clearTimeout(taskTimer)
+  if (list.some(x => OPEN_ST.includes(x.status))) taskTimer = setTimeout(loadTasks, 4000)
+}
+
+const stPill = s => `<span class="st ${s === 'waiting' ? 'warn' : s === 'failed' ? 'bad' : OPEN_ST.includes(s) ? 'run' : ''}">${esc(t('tk.st.' + s))}</span>`
+
+function renderTasks() {
+  const box = $('#tasks'); if (!box) return
+  if (!TASKS.length) { box.innerHTML = `<small class="tknone">${esc(t('tk.none'))}</small>`; return }
+  box.innerHTML = ''
+  for (const x of TASKS) {
+    const el = document.createElement('div')
+    el.className = 'tk' + (openTask === x.id ? ' on' : '')
+    const who = bot(x.agent_id)?.name ?? x.agent_id
+    el.innerHTML = `<div class="tkh" tabindex="0" role="button"><b>${stPill(x.status)} <span>#${x.id}</span> ${esc(x.title)}</b>
+      <small>${esc(who)} · ${esc(when(x.created_at))}</small></div>`
+    const head = el.querySelector('.tkh')
+    head.onclick = () => { openTask = openTask === x.id ? null : x.id; renderTasks() }
+    head.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); head.click() } }
+    if (openTask === x.id) el.appendChild(taskDetail(x))
+    box.appendChild(el)
+  }
+}
+
+function taskDetail(x) {
+  const d = document.createElement('div'); d.className = 'tkd'
+  const by = x.by_agent && x.by_agent !== x.agent_id ? bot(x.by_agent)?.name : ''
+  if (by) d.insertAdjacentHTML('beforeend', `<small>${esc(t('tk.by', { name: by }))}</small>`)
+  if (x.brief) d.insertAdjacentHTML('beforeend', `<small class="lbl">${esc(t('tk.brief'))}</small><pre>${esc(x.brief)}</pre>`)
+  if (x.status === 'waiting' && x.question) d.appendChild(replyBox(x))
+  if (x.status === 'waiting' && x.approval) {
+    const a = document.createElement('div')
+    a.innerHTML = `<small class="lbl">${esc(t('tk.wantsRun', { name: bot(x.agent_id)?.name ?? '' }))}</small><code></code>`
+    a.querySelector('code').textContent = x.approval.subject
+    d.appendChild(a); askOn(a, x.approval.id)
+  }
+  if (x.result) d.insertAdjacentHTML('beforeend', `<small class="lbl">${esc(t('tk.result'))}</small><pre>${esc(x.result)}</pre>`)
+  // What it ran: fetched only when someone opens it
+  const tr = document.createElement('details')
+  tr.innerHTML = `<summary>${esc(t('tk.trace', { n: '…' }))}</summary><div class="trc"></div>`
+  tr.ontoggle = async () => {
+    if (!tr.open) return
+    const full = await fetch(api(`/api/tasks/${x.id}`)).then(r => r.json()).catch(() => null)
+    const steps = full?.trace ?? []
+    tr.querySelector('summary').textContent = t('tk.trace', { n: steps.length })
+    tr.querySelector('.trc').innerHTML = steps.map(st => `<div><code></code><pre></pre></div>`).join('')
+    tr.querySelectorAll('.trc>div').forEach((el, i) => {
+      el.querySelector('code').textContent = toolLabel(steps[i].name, steps[i].args)
+      el.querySelector('pre').textContent = steps[i].output ?? ''
+    })
+  }
+  d.appendChild(tr)
+  if (OPEN_ST.includes(x.status)) {
+    const b = document.createElement('button'); b.className = 'btn'; b.textContent = t('tk.stop')
+    b.onclick = async () => { b.disabled = true; await fetch(api(`/api/tasks/${x.id}/stop`), { method:'POST' }); loadTasks() }
+    d.appendChild(b)
+  }
+  return d
+}
+
+/** Answer a task's question. The answer goes to the task only — not into the conversation, so a password stays out of it. */
+function replyBox(x) {
+  const f = document.createElement('form'); f.className = 'tkr'
+  f.innerHTML = `<small class="lbl"></small><div class="q"></div><div class="row"><input autocomplete="off"><button class="btn pri"></button></div>`
+  f.querySelector('.lbl').textContent = t('tk.asks', { name: bot(x.agent_id)?.name ?? '' })
+  f.querySelector('.q').textContent = x.question
+  f.querySelector('input').placeholder = t('tk.replyPh')
+  f.querySelector('button').textContent = t('tk.send')
+  f.onsubmit = async e => {
+    e.preventDefault()
+    const text = f.querySelector('input').value.trim(); if (!text) return
+    f.querySelectorAll('input,button').forEach(el => el.disabled = true)
+    const r = await fetch(api(`/api/tasks/${x.id}/answer`), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text }) })
+    f.innerHTML = `<small>${esc(r.ok ? t('tk.sent') : await errText(r))}</small>`
+    loadTasks()
+  }
+  return f
+}
+
+/** One piece of task news in the transcript. A question or an approval still open is answerable right here. */
+function eventCard(e) {
+  const log = $('#log')
+  if (log.querySelector('.empty')) log.innerHTML = ''
+  const b = bot(e.agent_id), name = b?.name ?? e.agent ?? ''
+  const v = { id: e.task, name, title: e.title ?? '', by: e.by ?? '' }
+  const head = e.kind === 'stopped' ? t(e.by ? 'ev.stoppedBy' : 'ev.stopped', v)
+    : ['asked', 'approval', 'done', 'failed', 'answered'].includes(e.kind) ? t('ev.' + e.kind, v) : `#${e.task}`
+  const el = document.createElement('div')
+  el.className = 'tev ' + (e.kind ?? '')
+  el.innerHTML = `<div class="th"><i style="background:${col(b?.color)}"></i><span></span></div>`
+  el.querySelector('span').textContent = head
+  const x = taskOf(e.task)
+  if (e.kind === 'asked') {
+    // Only the newest question of a task still waiting gets a reply box; older ones just say what was asked
+    if (x?.status === 'waiting' && x.question === e.text) el.appendChild(replyBox(x))
+    else el.insertAdjacentHTML('beforeend', `<div class="q"></div><small>${esc(t('ev.over'))}</small>`), el.querySelector('.q').textContent = e.text
+  } else if (e.kind === 'approval') {
+    el.insertAdjacentHTML('beforeend', '<code></code>'); el.querySelector('code').textContent = e.text
+    if (x?.status === 'waiting' && x.approval?.id === e.approval) askOn(el, e.approval)
+  } else if (e.kind === 'done' || e.kind === 'failed') {
+    el.insertAdjacentHTML('beforeend', '<pre></pre>'); el.querySelector('pre').textContent = e.text
+  }
+  el.onclick = ev => { if (ev.target.closest('form,button,input')) return; openTask = Number(e.task); renderTasks(); $('#tasks').scrollIntoView({ block: 'nearest' }) }
+  log.appendChild(el)
+  return el
+}
+
 const WD = [0, 1, 2, 3, 4, 5, 6].map(d => new Date(2024, 0, 7 + d).toLocaleDateString(lang, { weekday:'short' }))
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone
 let RTS = []

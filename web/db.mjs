@@ -48,7 +48,7 @@ create table if not exists messages (
   id       bigserial primary key,
   scope    text not null check (scope in ('dm','group')),
   scope_id text not null,
-  role     text not null check (role in ('user','assistant','tool')),
+  role     text not null check (role in ('user','assistant','tool','event')),
   speaker  text not null default '',
   content  text not null,
   at       timestamptz not null default now()
@@ -166,7 +166,7 @@ alter table agents add column if not exists autonomy text not null default '';
 -- A tool call is a message too, so reopening a conversation still shows which commands ran.
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
 alter table messages drop constraint if exists messages_role_check;
-alter table messages add constraint messages_role_check check (role in ('user','assistant','tool'));
+alter table messages add constraint messages_role_check check (role in ('user','assistant','tool','event'));
 
 -- Sessions: one conversation (a DM with an agent, a group) can hold several separate threads,
 -- so unrelated work doesn't pile into one history. The model only ever sees the current
@@ -185,6 +185,33 @@ alter table messages add column if not exists session_id text;
 create index if not exists messages_session_idx on messages (session_id, id);
 -- A scheduled task writes into a session of its own, not into whatever the person has open.
 alter table routines add column if not exists session_id text;
+
+-- Background tasks. The conversation is the front thread that talks to the person; work that takes
+-- a while goes out as a task, run by an agent on its own, one at a time per agent. A task that needs
+-- something only the person can give stops at 'waiting' with its question; the answer resumes it.
+-- transcript is the task's own model conversation (saved at consistent points, so a restart can pick
+-- it up); trace is what it ran, for the person to look at.
+create table if not exists tasks (
+  id          bigserial primary key,
+  scope       text not null check (scope in ('dm','group')),
+  scope_id    text not null,
+  session_id  text,
+  agent_id    text not null,
+  by_agent    text not null default '',
+  title       text not null,
+  brief       text not null default '',
+  status      text not null default 'queued' check (status in ('queued','running','waiting','done','failed','stopped')),
+  question    text not null default '',
+  approval    jsonb,
+  pending     text,
+  result      text not null default '',
+  transcript  jsonb not null default '[]',
+  trace       jsonb not null default '[]',
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  finished_at timestamptz
+);
+create index if not exists tasks_conv_idx on tasks (scope, scope_id, id desc);
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -260,6 +287,7 @@ export async function deleteAgent(id) {
   await q(`update groups set lead = null where lead = $1`, [id])
   await q(`delete from messages where scope = 'dm' and scope_id = $1`, [id])
   await q(`delete from sessions where scope = 'dm' and scope_id = $1`, [id])
+  await q(`delete from tasks where (scope = 'dm' and scope_id = $1) or agent_id = $1`, [id])
   await q('delete from agents where id = $1', [id])
   await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id)]])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
@@ -285,6 +313,7 @@ export async function saveGroup(g) {
 export async function deleteGroup(id) {
   await q(`delete from messages where scope = 'group' and scope_id = $1`, [id])
   await q(`delete from sessions where scope = 'group' and scope_id = $1`, [id])
+  await q(`delete from tasks where scope = 'group' and scope_id = $1`, [id])
   await q('delete from groups where id = $1', [id])
   await q('delete from settings where key = $1', [memKey('group', id)])
   await q(`delete from routines where target_kind = 'group' and target_id = $1`, [id])
@@ -317,7 +346,7 @@ export async function latestSession(scope, scopeId) {
 export async function listSessions(scope, scopeId) {
   const { rows } = await q(`
     select s.id, s.title as name, s.created_at, s.updated_at,
-      (select count(*)::int from messages m where m.session_id = s.id and m.role <> 'tool') as count,
+      (select count(*)::int from messages m where m.session_id = s.id and m.role in ('user','assistant')) as count,
       (select content from messages m where m.session_id = s.id and m.role = 'user' order by m.id limit 1) as first
     from sessions s where s.scope = $1 and s.scope_id = $2
     order by s.updated_at desc, s.id desc`, [scope, scopeId])
@@ -332,6 +361,7 @@ export async function renameSession(id, title) {
 
 export async function deleteSession(id) {
   await q('delete from messages where session_id = $1', [id])
+  await q('delete from tasks where session_id = $1', [id])
   await q('delete from sessions where id = $1', [id])
 }
 
@@ -340,6 +370,13 @@ export async function addMessage(scope, scopeId, session, { role, speaker = '', 
   await q('insert into messages (scope, scope_id, session_id, role, speaker, content) values ($1,$2,$3,$4,$5,$6)',
     [scope, scopeId, session, role, speaker, content])
   await q('update sessions set updated_at = now() where id = $1', [session])
+}
+
+/** Something that happened to a task (asked, done, failed…), shown in the conversation and told to the front thread. */
+export async function addEvent(scope, scopeId, session, speaker, event) {
+  await q('insert into messages (scope, scope_id, session_id, role, speaker, content) values ($1,$2,$3,$4,$5,$6)',
+    [scope, scopeId, session, 'event', speaker, JSON.stringify(event)])
+  if (session) await q('update sessions set updated_at = now() where id = $1', [session])
 }
 
 /** A finished tool call, kept so the transcript still shows the work after a reload. */
@@ -354,10 +391,11 @@ export async function addTool(scope, scopeId, session, speaker, { name, args, ou
  * and feeding these back would hand it a second, malformed copy of its own work.
  * With `session`, only that session; without, the whole conversation (group recall reads that way).
  */
-export async function recent(scope, scopeId, limit = 200, { tools = false, session = null } = {}) {
+export async function recent(scope, scopeId, limit = 200, { tools = false, events = true, session = null } = {}) {
+  const skip = [...tools ? [] : ["'tool'"], ...events ? [] : ["'event'"]]
   const { rows } = await q(
     `select id, role, speaker, content, at from messages
-     where scope = $1 and scope_id = $2 ${tools ? '' : "and role <> 'tool'"}
+     where scope = $1 and scope_id = $2 ${skip.length ? `and role not in (${skip.join(',')})` : ''}
        ${session ? 'and session_id = $4' : ''}
      order by id desc limit $3`,
     session ? [scope, scopeId, limit, session] : [scope, scopeId, limit])
@@ -394,7 +432,7 @@ export async function searchMessages(text, { scope = null, scopeId = null, limit
   const { rows } = await q(`
     select m.id, m.session_id, m.scope, m.scope_id, m.role, m.speaker, m.content, m.at, s.title
     from messages m left join sessions s on s.id = m.session_id
-    where m.role <> 'tool' and m.content ilike $1 ${where}
+    where m.role in ('user','assistant') and m.content ilike $1 ${where}
     order by m.id desc limit $2`, params)
   return rows
 }
@@ -407,7 +445,7 @@ export async function agentsUsingProvider(id) {
 export async function lastMessages() {
   const { rows } = await q(`
     select distinct on (scope, scope_id) scope, scope_id, role, speaker, content, at
-    from messages where role <> 'tool' order by scope, scope_id, id desc`)
+    from messages where role in ('user','assistant') order by scope, scope_id, id desc`)
   return new Map(rows.map(r => [`${r.scope}:${r.scope_id}`, r]))
 }
 
@@ -727,4 +765,76 @@ export async function seedProviderFromEnv(env) {
     is_default: true,
   })
   return true
+}
+
+// ---------- tasks ----------
+const TASK_COLS = `id, scope, scope_id, session_id, agent_id, by_agent, title, brief, status, question, approval,
+  result, created_at, updated_at, finished_at`
+
+export async function createTask(t) {
+  const { rows } = await q(`insert into tasks (scope, scope_id, session_id, agent_id, by_agent, title, brief)
+    values ($1,$2,$3,$4,$5,$6,$7) returning ${TASK_COLS}`,
+    [t.scope, t.scope_id, t.session_id, t.agent_id, t.by_agent ?? '', t.title, t.brief ?? ''])
+  return rows[0]
+}
+
+/** With the transcript: only the runner needs it. */
+export async function getTask(id, { full = false } = {}) {
+  if (!/^\d+$/.test(String(id))) return null
+  return (await q(`select ${full ? '*' : TASK_COLS + ', trace'} from tasks where id = $1`, [id])).rows[0] ?? null
+}
+
+export async function listTasks(scope, scopeId, limit = 50) {
+  return (await q(`select ${TASK_COLS} from tasks where scope = $1 and scope_id = $2 order by id desc limit $3`,
+    [scope, scopeId, limit])).rows
+}
+
+export async function tasksWithStatus(statuses) {
+  return (await q(`select ${TASK_COLS} from tasks where status = any($1) order by id`, [statuses])).rows
+}
+
+/** Not finished: queued, running or waiting. The cap on a conversation counts these. */
+export async function openTaskCount(scope, scopeId) {
+  return (await q(`select count(*)::int as n from tasks where scope = $1 and scope_id = $2
+    and status in ('queued','running','waiting')`, [scope, scopeId])).rows[0].n
+}
+
+/** Tasks one session has ever started — a front thread that keeps spawning them is looping. */
+export async function sessionTaskCount(session) {
+  return (await q('select count(*)::int as n from tasks where session_id = $1', [session])).rows[0].n
+}
+
+const TASK_FIELDS = ['status', 'question', 'approval', 'pending', 'result', 'transcript', 'trace', 'finished_at']
+/**
+ * Change a task. With `from`, only while its status is one of those — the runner finishing and
+ * someone pressing Stop can land at the same moment, and whichever is second must not overwrite
+ * the first. Returns whether the row changed.
+ */
+export async function updateTask(id, patch, { from = null } = {}) {
+  const keys = Object.keys(patch).filter(k => TASK_FIELDS.includes(k))
+  if (!keys.length) return false
+  const json = new Set(['approval', 'transcript', 'trace'])
+  const vals = keys.map(k => json.has(k) && patch[k] != null ? JSON.stringify(patch[k]) : patch[k])
+  const r = await q(`update tasks set ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now()
+    where id = $1 ${from ? `and status = any($${keys.length + 2})` : ''}`, from ? [id, ...vals, from] : [id, ...vals])
+  return r.rowCount > 0
+}
+
+/**
+ * Whether a session has task news its front thread hasn't read: a task asked, finished or failed after
+ * message `after` (the newest the last front turn read). A wake-up queued behind a turn that already
+ * saw the news is skipped. Without `after` (a restart forgot it), after the last reply.
+ */
+export async function unseenTaskNews(session, after = null) {
+  const { rows } = await q(`select exists (select 1 from messages where session_id = $1 and role = 'event'
+      and (content::jsonb ->> 'kind') in ('asked','done','failed')
+      and id > coalesce($2, (select max(id) from messages where session_id = $1 and role = 'assistant'), 0)) as yes`,
+    [session, after])
+  return rows[0].yes
+}
+
+/** One step the task ran, appended for the person to see. Kept to the last 200. */
+export async function traceTask(id, step) {
+  await q(`update tasks set trace = (case when jsonb_array_length(trace) >= 200 then trace - 0 else trace end) || $2::jsonb,
+    updated_at = now() where id = $1`, [id, JSON.stringify([step])])
 }
