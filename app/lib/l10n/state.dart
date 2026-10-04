@@ -69,7 +69,6 @@ const Map<String, List<String>> stateStrings = {
     '计划还没做完（剩 {n} 步）—— 继续',
     '計畫還沒做完（剩 {n} 步）—— 繼續',
   ],
-  'state.backToLead': ['back to the lead', '交回统筹', '交回統籌'],
   'tool.write': ['write {path}', '写 {path}', '寫 {path}'],
   'tool.browser': ['Browser · {what}', '浏览器 · {what}', '瀏覽器 · {what}'],
   'tool.b.open': ['open {url}', '打开 {url}', '開啟 {url}'],

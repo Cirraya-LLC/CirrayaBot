@@ -14,7 +14,7 @@ import '../data/api.dart';
 import '../data/settings.dart';
 import '../l10n.dart';
 
-/// One item in the transcript. Tool calls and handoffs are entries in their
+/// One item in the transcript. Tool calls and task news are entries in their
 /// own right rather than text inside a bubble — watching a colleague work is
 /// the point of the product, so the work has to be visible as work.
 sealed class Entry {
@@ -61,6 +61,22 @@ class Note extends Entry {
   final String text;
 }
 
+/// News about a background task: it asked something, finished, failed, was
+/// stopped. Whether it can still be answered is read from [Workbench.tasks].
+class News extends Entry {
+  News(this.event);
+  final Map<String, Object?> event;
+
+  int get task => (event['task'] as num?)?.toInt() ?? 0;
+  String get kind => (event['kind'] as String?) ?? '';
+  String get agentId => (event['agent_id'] as String?) ?? '';
+  String get agent => (event['agent'] as String?) ?? '';
+  String get title => (event['title'] as String?) ?? '';
+  String get text => (event['text'] as String?) ?? '';
+  String get by => (event['by'] as String?) ?? '';
+  String? get approval => event['approval'] as String?;
+}
+
 class Workbench extends ChangeNotifier {
   Workbench(Settings settings) : api = Api(settings) {
     // Scheduled tasks write into conversations while nobody is typing, so look
@@ -71,6 +87,13 @@ class Workbench extends ChangeNotifier {
 
   late final Timer _poller;
   List<Routine> routines = const [];
+
+  /// The open conversation's background tasks, newest first.
+  List<Task> tasks = const [];
+  String _taskSig = '';
+  Timer? _taskTimer;
+
+  Task? taskById(int id) => tasks.where((x) => x.id == id).firstOrNull;
 
   /// What everyone has spent. Reloaded with the conversation list, so the
   /// sidebar total and the panel never disagree about which moment they show.
@@ -238,6 +261,8 @@ class Workbench extends ChangeNotifier {
     selfMemoryFor = null;
     routines = const [];
     skills = const [];
+    tasks = const [];
+    _taskSig = '';
     sessions = const [];
     session = null;
     jumpTo = null;
@@ -245,6 +270,7 @@ class Workbench extends ChangeNotifier {
     unawaited(_loadMemory(c, ticket));
     unawaited(loadRoutines());
     unawaited(loadSkills());
+    unawaited(loadTasks());
     await _loadSessions(c);
     if (ticket != _shown) return;
     // Back to the session this conversation was last left on (a fresh "New
@@ -332,6 +358,67 @@ class Workbench extends ChangeNotifier {
       error = e.message;
     }
     notifyListeners();
+  }
+
+  /// Look at the open conversation's tasks, and keep looking while any is open.
+  /// When one moves, its news may have landed in the transcript (and the front
+  /// thread may be waking up to tell about it), so the history is redrawn —
+  /// unless a reply is streaming here.
+  Future<void> loadTasks() async {
+    final c = current;
+    if (c == null) return;
+    final List<Task> list;
+    try {
+      list = await api.tasks(c);
+    } on ApiException catch (_) {
+      return; // best effort, like routines
+    }
+    if (current?.id != c.id || current?.kind != c.kind) return;
+    final sig = '${_key(c)}|${list.map((x) => '${x.id}:${x.status}:${x.updatedAt}').join(',')}';
+    final moved = _taskSig.startsWith('${_key(c)}|') && sig != _taskSig;
+    tasks = list;
+    _taskSig = sig;
+    notifyListeners();
+    if (moved && !busy) {
+      final ticket = _shown;
+      await _drawHistory(c, ticket);
+      unawaited(loadRuns());
+    }
+    _taskTimer?.cancel();
+    if (list.any((x) => x.open)) _taskTimer = Timer(const Duration(seconds: 4), () => unawaited(loadTasks()));
+  }
+
+  /// Answer a task's question straight from its card or row.
+  Future<String?> answerTask(Task x, String text) async {
+    try {
+      await api.answerTask(x.id, text);
+      return null;
+    } on ApiException catch (e) {
+      return e.message;
+    } finally {
+      unawaited(loadTasks());
+    }
+  }
+
+  Future<void> stopTask(Task x) async {
+    try {
+      await api.stopTask(x.id);
+    } on ApiException catch (_) {
+      // Already over: the reload shows how it ended.
+    }
+    await loadTasks();
+  }
+
+  /// Allow or refuse the command a task is waiting on.
+  Future<void> answerTaskApproval(Task x, bool ok) async {
+    final id = x.approvalId;
+    if (id == null) return;
+    try {
+      await api.answerApproval(id, ok);
+    } on ApiException catch (e) {
+      error = e.message;
+    }
+    await loadTasks();
   }
 
   Future<void> loadRoutines() async {
@@ -473,10 +560,6 @@ class Workbench extends ChangeNotifier {
             live = null;
           case 'note':
             add(Note(ev.text));
-          case 'handoff':
-            final from = agentById((ev.data['from'] as String?) ?? '')?.name ?? '';
-            final to = agentById((ev.data['to'] as String?) ?? '')?.name ?? '';
-            add(Note(ev.data['auto'] == true ? '$from → @$to · ${tr('state.backToLead')}' : '$from → @$to'));
           case 'error':
             add(Note('⚠ ${ev.data['message'] ?? ''}'));
             live?.streaming = false;
@@ -551,6 +634,7 @@ class Workbench extends ChangeNotifier {
     _streaming = null;
     notifyListeners();
     unawaited(loadRuns());
+    unawaited(loadTasks());
     await refresh();
     if (current?.id == c.id && current?.kind == c.kind) await _loadSessions(c);
     // Left and came back while it was answering: what's on screen is the
@@ -577,6 +661,7 @@ class Workbench extends ChangeNotifier {
   /// A stored line becomes a bubble or a finished tool card. A card from history
   /// has no screenshot: only text is stored.
   Entry _entryOf(Message m, Conversation c) {
+    if (m.event != null) return News(m.event!)..id = m.id;
     final colour = m.mine ? '' : (agentByName(m.speaker)?.color ?? c.color);
     if (m.tool == null) {
       return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text)..id = m.id;
@@ -637,6 +722,7 @@ class Workbench extends ChangeNotifier {
   void dispose() {
     _poller.cancel();
     _runTimer?.cancel();
+    _taskTimer?.cancel();
     api.close();
     super.dispose();
   }

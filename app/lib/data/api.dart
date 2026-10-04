@@ -128,6 +128,7 @@ class Message {
     this.tool,
     this.args = const {},
     this.id,
+    this.event,
   });
 
   /// The server's row id — a search hit names the message it found by this.
@@ -138,6 +139,80 @@ class Message {
   final int at;
   final String? tool;
   final Map<Object?, Object?> args;
+
+  /// Set for news about a background task (it asked, finished, failed…):
+  /// `{task, kind, agent, agent_id, title, text, by?, approval?}`.
+  final Map<String, Object?>? event;
+}
+
+/// Work a conversation handed out to run in the background. It reports back
+/// into the conversation; this is the row the right panel lists.
+class Task {
+  const Task({
+    required this.id,
+    required this.session,
+    required this.agentId,
+    required this.byAgent,
+    required this.title,
+    required this.brief,
+    required this.status,
+    required this.question,
+    required this.approvalId,
+    required this.approvalSubject,
+    required this.result,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  factory Task.fromJson(Map<String, Object?> j) {
+    final a = j['approval'] as Map?;
+    return Task(
+      id: (j['id'] as num?)?.toInt() ?? 0,
+      session: (j['session'] as String?) ?? '',
+      agentId: (j['agent_id'] as String?) ?? '',
+      byAgent: (j['by_agent'] as String?) ?? '',
+      title: (j['title'] as String?) ?? '',
+      brief: (j['brief'] as String?) ?? '',
+      status: (j['status'] as String?) ?? 'queued',
+      question: (j['question'] as String?) ?? '',
+      approvalId: a?['id'] as String?,
+      approvalSubject: (a?['subject'] as String?) ?? '',
+      result: (j['result'] as String?) ?? '',
+      createdAt: (j['created_at'] as num?)?.toInt() ?? 0,
+      updatedAt: (j['updated_at'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final int id;
+  final String session;
+  final String agentId;
+  final String byAgent;
+  final String title;
+  final String brief;
+
+  /// queued / running / waiting / done / failed / stopped.
+  final String status;
+
+  /// What it asked, while it waits for an answer.
+  final String question;
+
+  /// Set while it waits for a command to be allowed.
+  final String? approvalId;
+  final String approvalSubject;
+  final String result;
+  final int createdAt;
+  final int updatedAt;
+
+  bool get open => status == 'queued' || status == 'running' || status == 'waiting';
+  bool get asking => status == 'waiting' && question.isNotEmpty;
+}
+
+/// One thing a task ran, for the expanded row.
+class TaskStep {
+  const TaskStep({required this.name, required this.args, required this.output});
+  final String name;
+  final Map<Object?, Object?> args;
+  final String output;
 }
 
 /// One thread of a conversation. A conversation (a DM, a group) holds several;
@@ -643,6 +718,7 @@ class Api {
         final m = e as Map<String, Object?>;
         final speaker = (m['speaker'] as String?) ?? '';
         if (m['role'] == 'tool') return _toolMessage(m, speaker);
+        if (m['role'] == 'event') return _eventMessage(m);
         return Message(
           id: (m['id'] as num?)?.toInt(),
           mine: speaker == userSpeaker,
@@ -656,6 +732,7 @@ class Api {
     return j.map((e) {
       final m = e as Map<String, Object?>;
       if (m['role'] == 'tool') return _toolMessage(m, c.name);
+      if (m['role'] == 'event') return _eventMessage(m);
       return Message(
         id: (m['id'] as num?)?.toInt(),
         mine: m['role'] == 'user',
@@ -728,6 +805,34 @@ class Api {
     tool: (m['name'] as String?) ?? '',
     args: (m['args'] as Map?) ?? const {},
   );
+
+  Message _eventMessage(Map<String, Object?> m) => Message(
+    id: (m['id'] as num?)?.toInt(),
+    mine: false,
+    speaker: (m['speaker'] as String?) ?? '',
+    text: '',
+    at: (m['at'] as num?)?.toInt() ?? 0,
+    event: (m['event'] as Map?)?.cast<String, Object?>() ?? const {},
+  );
+
+  // ---- Background tasks ----
+  Future<List<Task>> tasks(Conversation c) async {
+    final j = await _list('/api/tasks?kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}');
+    return j.map((e) => Task.fromJson(e as Map<String, Object?>)).toList();
+  }
+
+  Future<List<TaskStep>> taskTrace(int id) async {
+    final j = await _map('GET', '/api/tasks/$id');
+    return [
+      for (final s in (j['trace'] as List?) ?? const [])
+        if (s is Map)
+          TaskStep(name: '${s['name'] ?? ''}', args: (s['args'] as Map?) ?? const {}, output: '${s['output'] ?? ''}'),
+    ];
+  }
+
+  /// The answer goes to the task only, not into the conversation — it may be a password.
+  Future<void> answerTask(int id, String text) => _json('POST', '/api/tasks/$id/answer', {'text': text});
+  Future<void> stopTask(int id) => _json('POST', '/api/tasks/$id/stop');
 
   // ---- Chat history export / import ----
   // The exported file is exactly what import takes back.

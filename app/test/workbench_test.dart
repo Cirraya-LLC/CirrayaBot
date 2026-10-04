@@ -59,6 +59,8 @@ Future<(HttpServer, Completer<void>)> fakeServer({String historyB = 'B history',
 }
 
 void main() {
+  tasksTest();
+
   // Reopening a conversation used to show only the final text: which commands ran was
   // lost with the stream. A stored tool row has to come back as a finished card.
   test('a stored tool call comes back as a finished card', () async {
@@ -251,6 +253,81 @@ void main() {
     await bench.stop();
     expect(stopped, {'kind': 'agent', 'id': 'a'});
     expect(bench.backgroundRun(bench.current), isNull);
+    bench.dispose();
+    await server.close(force: true);
+  });
+}
+
+/// Background tasks: a stored event row comes back as task news, the panel's
+/// list loads beside it, and a reply from the card goes to the task's own
+/// endpoint — not into the conversation — after which the history is redrawn.
+void tasksTest() {
+  test('task news, the task list, and answering a task from its card', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var status = 'waiting';
+    String? answered;
+    var historyReads = 0;
+    server.listen((req) async {
+      final res = req.response..headers.contentType = ContentType.json;
+      switch (req.uri.path) {
+        case '/api/conversations':
+          res.write(jsonEncode([{'kind': 'agent', 'id': 'a', 'name': 'A', 'members': ['a']}]));
+        case '/api/bots':
+          res.write(jsonEncode([{'id': 'a', 'name': 'A', 'persona': 'x'}]));
+        case '/api/sessions':
+          res.write(jsonEncode([{'id': 's1', 'title': 'only'}]));
+        case '/api/runs':
+          res.write('[]');
+        case '/api/dm/a':
+          historyReads++;
+          res.write(jsonEncode([
+            {'id': 1, 'role': 'user', 'content': 'count the files'},
+            {
+              'id': 2,
+              'role': 'event',
+              'speaker': 'A',
+              'event': {'task': 7, 'kind': 'asked', 'agent': 'A', 'agent_id': 'a', 'title': 'Count', 'text': 'Which folder?'},
+            },
+          ]));
+        case '/api/tasks':
+          res.write(jsonEncode([
+            {
+              'id': 7, 'session': 's1', 'agent_id': 'a', 'by_agent': 'a', 'title': 'Count', 'brief': 'count them',
+              'status': status, 'question': status == 'waiting' ? 'Which folder?' : '', 'approval': null,
+              'result': '', 'created_at': 1, 'updated_at': status == 'waiting' ? 1 : 2,
+            },
+          ]));
+        case '/api/tasks/7/answer':
+          answered = (jsonDecode(await utf8.decoder.bind(req).join()) as Map)['text'] as String?;
+          status = 'queued';
+          res.write('{"ok":true}');
+        default:
+          res.write('[]');
+      }
+      await res.close();
+    });
+    final bench = Workbench(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    await bench.refresh();
+    await bench.open(bench.conversations.first);
+    await bench.loadTasks();
+
+    final news = bench.entries[1] as News;
+    expect(news.kind, 'asked');
+    expect(news.task, 7);
+    expect(news.text, 'Which folder?');
+    final task = bench.taskById(7)!;
+    expect(task.asking, isTrue, reason: 'a waiting task with a question can be answered');
+    expect(task.open, isTrue);
+
+    final reads = historyReads;
+    expect(await bench.answerTask(task, '/srv'), isNull);
+    expect(answered, '/srv');
+    // answerTask reloads the list without waiting; give it a moment
+    for (var i = 0; i < 50 && bench.taskById(7)!.status != 'queued'; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(bench.taskById(7)!.status, 'queued');
+    expect(historyReads, greaterThan(reads), reason: 'a task that moved redraws the transcript');
     bench.dispose();
     await server.close(force: true);
   });

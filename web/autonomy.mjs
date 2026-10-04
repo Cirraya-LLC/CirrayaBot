@@ -1,7 +1,7 @@
 // How far an agent goes on its own. Pure, so the rules can be checked without a model:
 //   node web/autonomy.mjs
 //
-// "manual" is how this product started: a dozen tool calls per turn, a short relay, and the
+// "manual" is how this product started: a dozen tool calls per turn, and the
 // person pushes it on with "continue". "auto" is what people asked for instead — the Claude Code
 // / Codex way of working: take the task to done, keep a plan, don't stop to ask whether to go on,
 // and keep going when the page is closed. The approval gate (approve.mjs) and the daily spending
@@ -15,14 +15,14 @@ export const normAutonomy = v => AUTONOMY_MODES.includes(String(v ?? '').trim())
 /** The agent's own setting wins, then the platform's; a platform never set means auto. */
 export const resolveAutonomy = (own, platform) => normAutonomy(own) || normAutonomy(platform) || 'auto'
 
-// steps     model calls in one agent's turn. In auto mode this is a runaway guard, not a budget —
-//           the daily cap is the budget.
-// handoffs  handoffs in one group message.
-// perPerson how many times the relay may come back to the same colleague.
-// nudges    how many times an agent that stops with its plan unfinished is sent back to it.
+// steps   model calls in one agent's turn. In auto mode this is a runaway guard, not a budget —
+//         the daily cap is the budget.
+// nudges  how many times an agent that stops with its plan unfinished is sent back to it.
+// (A group used to relay turn by turn, with limits on handoffs; work now goes out as background
+// tasks — tasks.mjs — which run side by side instead.)
 const LIMITS = {
-  manual: { steps: 12, handoffs: 5, perPerson: 2, nudges: 0 },
-  auto: { steps: 150, handoffs: 40, perPerson: 12, nudges: 3 },
+  manual: { steps: 12, nudges: 0 },
+  auto: { steps: 150, nudges: 3 },
 }
 export const limitsFor = mode => LIMITS[mode === 'manual' ? 'manual' : 'auto']
 
@@ -69,19 +69,6 @@ export function nudgeFor(plan, used, limits) {
     'mark it completed and say so; if you truly cannot do it without the user, mark it blocked and say exactly what you need.'
 }
 
-// ---------- the group relay ----------
-
-/**
- * Who speaks next after `speaker` replied. An @ always wins. With nobody @-ed, a manual group
- * stops; an auto group hands the reply back to its coordinator, who decides what comes next —
- * the coordinator not @-ing anyone is what ends it.
- */
-export function nextSpeaker({ mention, speaker, coordinator, auto }) {
-  if (mention) return { bot: mention, auto: false }
-  if (auto && coordinator && coordinator.id !== speaker.id) return { bot: coordinator, auto: true }
-  return null
-}
-
 // ---------- self-test ----------
 if (import.meta.url === `file://${process.argv[1]}`) {
   const assert = (await import('node:assert/strict')).default
@@ -109,10 +96,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   assert.equal(nudgeFor(null, 0, auto), null, 'no plan, nothing to hold it to')
   assert.equal(nudgeFor(checkPlan([{ step: 'x', status: 'completed' }]), 0, auto), null)
 
-  const a = { id: 'a' }, b = { id: 'b' }, lead = { id: 'lead' }
-  assert.deepEqual(nextSpeaker({ mention: b, speaker: a, coordinator: lead, auto: true }), { bot: b, auto: false })
-  assert.deepEqual(nextSpeaker({ mention: null, speaker: a, coordinator: lead, auto: true }), { bot: lead, auto: true })
-  assert.equal(nextSpeaker({ mention: null, speaker: lead, coordinator: lead, auto: true }), null, 'the coordinator ends it')
-  assert.equal(nextSpeaker({ mention: null, speaker: a, coordinator: lead, auto: false }), null, 'manual stops on no @')
   console.log('autonomy: all checks pass')
 }

@@ -35,7 +35,7 @@ the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
 2.6–2.11 are kept because the dsh source-code findings in them still hold and will be needed the day
 we plug in the runtime.
 
-**For the current shape see 2.12 and 2.18**: PostgreSQL + one container per Agent + one-command
+**For the current shape see 2.12, 2.18 and 2.31** (background tasks): PostgreSQL + one container per Agent + one-command
 compose deployment.
 
 **Branch `feat/studio` (2026-09-25, not merged by the boss's decision)** turns the product into an AI
@@ -442,8 +442,8 @@ web/model.mjs      context budget + model window detection (2.18), with a self-t
 web/index.html     conversations on the left / chat in the middle / members + shared memory on the right
 
 Sandbox  data/workspace/agents/<id>/     one container per person mounted here, invisible to each other
-         data/workspace/groups/<gid>/    the group's shared drive
-         /work/group inside the container ->  symlinked to /groups/<gid> during a group chat
+         data/workspace/groups/<gid>/    the group's shared drive, /groups/<gid> inside each member's container
+                                         (there used to be a /work/group symlink; gone since 2.31)
 Memory   messages table (scope='dm')     DM history
          messages table (scope='group')  group log, shared by everyone
          groupRecallFor(bot)             also fed to him in DMs — if he was there he shouldn't forget
@@ -451,11 +451,13 @@ Memory   messages table (scope='dm')     DM history
 (Since 2026-09-16 all state is in PostgreSQL, no longer files. bots/ is only a seed, see 2.18.)
 ```
 
-**"Sharing with a coworker" needs no invented tool**: the group sandbox is mounted as `./group` inside
-each person's sandbox, so `cp report.md group/` is sharing, just like real people using a shared drive.
-In a DM the symlink is removed, which isolates naturally.
+**"Sharing with a coworker" needs no invented tool**: the group's drive is mounted in each member's
+container, so `cp report.md /groups/<gid>/` is sharing, just like real people using a shared drive.
 
 ### What makes a group chat "like real people"
+
+**⚠️ Overturned by 2.31**: a group no longer relays turn by turn. One agent answers each message and
+hands work to colleagues as background tasks, which run in parallel. What follows is how it used to work.
 
 Not parallel broadcast, but **relay**:
 
@@ -499,7 +501,7 @@ directories:
 
 ```
 /work    ← workspace/agents/<id>    his own desktop
-/groups  ← workspace/groups         group shared drives (in a group chat /work/group symlinks to /groups/<gid>)
+/groups  ← workspace/groups         group shared drives, one mount per group it is in (2.28; the old /work/group symlink is gone, 2.31)
 ```
 
 Platform code and `.env` aren't mounted, out of reach. Containers are long-lived (`sleep infinity`),
@@ -989,9 +991,11 @@ back into the input box", which only appear when really typing.
   method is composing** (`composing.isValid`), otherwise a Chinese user pressing Enter to commit text
   sends half-typed pinyin — hence `Focus.onKeyEvent` rather than `CallbackShortcuts` (the latter swallows
   that Enter). **The composing case can't be verified headless** (xdotool has no input method)
-- **The same Agent does only one thing at a time** (`withAgent`): the `/work/group` symlink is shared by
-  the whole container; while he's running tools in group A and it's his turn in group B, the symlink is
-  repointed to B, and group A's artifacts land in group B's shared drive (the concurrent version of 2.14)
+- **The same Agent answers one conversation at a time** (`withAgent`). It used to be for the `/work/group`
+  symlink, shared by the whole container: while he ran tools in group A and it was his turn in group B, the
+  symlink was repointed to B and group A's artifacts landed in B's drive (the concurrent version of 2.14).
+  **Since 2.31 the symlink is gone** (an agent's background task runs beside its front turns, so a shared
+  mutable link could not be made safe) — group drives are reached by their own path, `/groups/<gid>`
 - **Abort when the client disconnects** (`res.on('close')` + an AbortController passed all the way down
   to fetch): otherwise closing the page lets the group relay run all the way through, 6 people × 12
   steps. Measured: after disconnecting, no replies were stored for 90 seconds. **Manual mode only since
@@ -1018,7 +1022,7 @@ when nobody was @-mentioned, whoever sorted first spoke first (Chief of Staff's 
 broke down the work only because his persona said so. Now `groups.lead`:
 
 - Who takes it first: **whoever the user @-mentioned → the lead → the first by order** (`converse`).
-  After that, relay by @ as before
+  Since 2.31 that one agent is the only one who speaks; colleagues get background tasks
 - Written in the prompts: the lead is told "when nobody is named, you speak first, break down the work,
   @ people, track progress, and summarise at the end"; everyone else is told "when you're done / stuck /
   don't know who should take it, @ the lead". If only the lead's side said it, the others wouldn't know
@@ -1729,7 +1733,7 @@ aborted the run** (2.20).
 - **`autonomy`: `auto` (default) / `manual`**, per agent (`agents.autonomy`, '' = follow) over a
   platform setting (settings key `autonomy`, never set = auto). Rules and limits are pure in
   `web/autonomy.mjs` (`node web/autonomy.mjs`). manual = exactly the old behaviour.
-- **Limits** (auto / manual): steps per turn 150 / 12, handoffs 40 / 5, turns per colleague 12 / 2.
+- **Limits** (auto / manual): steps per turn 150 / 12. (The handoff limits went with the relay in 2.31.)
   In auto the step count is a runaway guard; **the daily cap is the budget** — an unpriced upstream
   has no budget at all (2.25), so auto on an unpriced upstream is only held by the step guard.
 - **The plan is how "done" is told from "stopped"**: tool `update_plan` (the whole list each time,
@@ -1742,7 +1746,7 @@ aborted the run** (2.20).
 - **Prompt**: an auto agent gets a "work on your own until it's done" section — no "shall I…?",
   assumptions stated instead of asked, verify your work, stop only when done or blocked. **Its
   persona's "ask a person first about irreversible actions" still stands** — that stop is right.
-- **Group relay in auto**: an @ still wins; a reply with **no @ goes back to the coordinator**
+- ~~**Group relay in auto**~~ **(gone in 2.31)**: an @ still wins; a reply with **no @ goes back to the coordinator**
   (the lead, else the first by order — in auto a group always has one), and **only the coordinator
   replying without @ ends it**. `nextSpeaker()` in autonomy.mjs; the handoff event carries
   `auto: true` ("back to the lead"). The relay's mode follows the coordinator's autonomy; each
@@ -1752,8 +1756,9 @@ aborted the run** (2.20).
   detached run are refused at once, and later gated calls refuse immediately, with the tool result
   saying the page was closed (nobody is there to answer; same rule as scheduled tasks). Scheduled
   tasks register as runs too, so they show up and can be stopped.
-- `GET /api/runs`, `POST /api/runs/stop` `{kind,id}` or `{session}`. **A second message to a session
-  that is still running is 409** `run.busy` (it would race the first for the same history). Stopping
+- `GET /api/runs`, `POST /api/runs/stop` `{kind,id}` or `{session}`. ~~A second message to a session
+  that is still running is 409 `run.busy`~~ — **since 2.31 it waits its turn** (lock `session:<id>`),
+  with a `run.queued` note; Stop stops the waiting ones too. Stopping
   maps the fetch AbortError to `chat.aborted` ("Stopped") and **writes "(Stopped before finishing.)"
   into the transcript** (`stopNoted`) — otherwise a reopened conversation shows a question and some
   tool cards and then nothing, which reads as "still thinking".
@@ -1775,6 +1780,73 @@ runs/Stop/plan label); Linux build: Stop while streaming, app killed mid-run →
 app shows the run bar, Stop from it, settings row. **Not verified with a real model** — whether a given
 model actually keeps its plan current is up to the model; the nudge only holds it to one it wrote.
 
+## 2.31 Background tasks: a front thread that talks, workers that work (2026-10-04)
+
+The boss: "一条线程处理消息 然后派其他的线程去处理事务 这样的话就可以管理好每个进程和队列了 比如B线程需要什么材料
+A线程可以和用户说需要什么 然后再传给B" (one thread handles messages and dispatches other threads to do the
+work, so every process and queue is manageable; e.g. when B needs material, A tells the user what's needed and
+passes it on to B), then on the proposed design: "所有的都按照你说的做" (do all of it the way you said).
+
+- **The conversation is the front thread (A)**: it talks to the person and stays free. Work that takes a while
+  goes out with `start_task` as a **task** (table `tasks`), run by an agent on its own (B). In a DM, A and B are
+  the same agent; in a group the one answering hands pieces to colleagues by name. Front tools: `start_task`,
+  `list_tasks`, `answer_task`, `cancel_task`. Task tools: `ask_user`, `finish_task` (a task can't start tasks).
+  A turn only gets the tools it was offered (`specsFor`); a model naming another one is refused in `runTool`.
+- **The group relay is gone.** One agent speaks per message (the @-ed one, else the coordinator = lead, else
+  first by order). `@name` in a reply is only a mention. `nextSpeaker`, handoff limits and the `handoff`
+  event were deleted.
+- **Queueing**: lock `task:<agent>` — one agent's tasks run one at a time (they share its machine); different
+  agents' tasks run side by side; an agent's front turn (`agent:<id>`) runs beside its current task. **That is
+  why the `/work/group` symlink went** (`ensureContainer` deletes it once from old containers): two activities in
+  one container can't share a link that each repoints. Prompts name `/groups/<gid>` instead. Container creation
+  has its own short lock `box:<id>`.
+- **Waiting never holds the process**: `ask_user` ends the run with the task at `waiting` and the question
+  stored; its model conversation is saved after every step (`onStep` → `tasks.transcript`, no system prompt, no
+  screenshots). An answer — from A's `answer_task` or the card's reply box (`POST /api/tasks/:id/answer`) —
+  sets `pending`, queues it, and the next run appends `[The user's answer] …`. **The card's answer goes to the
+  task only**: the conversation gets an `answered` event without the text (it may be a password). That is the
+  "sensitive values" half-step; a real secret channel that never enters any model context is not built.
+- **An approval is the one wait that does hold**: a task's gated call puts a card in the conversation (event
+  `approval`) and waits in memory (`pendingApprovals`), blocking that agent's queue. A task is never refused for
+  "nobody is watching" — the card waits for whenever they look. After a restart it can't be answered: the task is
+  re-queued with a `[Platform]` note saying the command was not run.
+- **News flows back as `event` rows in `messages`** (`{task, kind, agent, agent_id, title, text, by?, approval?}`).
+  The model reads them as `[Platform] …` user messages (`eventForModel`); clients draw cards; export, search,
+  previews and group recall skip them. `asked` / `done` / `failed` **wake the front thread**: `wakeFront` runs
+  `converse` with no new message, as a detached run (shows "still working", Stop works), speaker = whoever
+  started the task. Several pieces of news make one wake-up.
+  ⚠️ **A wake-up can't be skipped by "is there an assistant reply after the news"**: a quick task finished before
+  the turn that started it had replied, so the news sat *before* that reply, unread, and was never relayed
+  (caught in testing). Now `frontRead` remembers the newest row each front turn actually read.
+- **A second message to a busy session waits** instead of 409 (lock `session:<id>`, `run.queued` note). The
+  user's message is stored before waiting, so it shows at once; Stop aborts the waiting ones too.
+- **Limits** (`tasks.mjs`): 8 open per conversation, 40 ever per session (a front thread looping on start_task).
+  A task always runs with auto limits; the daily cap still applies. A front thread with tasks out is not nudged
+  back to its plan (it would poll); its plan step for handed-out work counts as in hand.
+- **Restart**: running → queued with a note, continuing from the last saved step; approval-waiting → queued with
+  "not run"; queued → queued. Deleting a session / agent / group stops its open tasks first; removing a member
+  stops their tasks in that group (with a `stopped` card).
+- **API**: `GET /api/tasks?kind=&id=`, `GET /api/tasks/:id` (with `trace`, the last 200 tool calls),
+  `POST /api/tasks/:id/answer {text}`, `POST /api/tasks/:id/stop`. Approvals still go to `/api/approvals/:id`.
+- **UI** (both): "Background tasks" in the right panel (status pill, expand for brief, question + reply box,
+  approval buttons, report, what it ran, Stop); event cards in the transcript, with a reply box / approval
+  buttons while that task still waits. Polled every 4s while any task is open; a task that moved redraws the
+  transcript. **In the UI they're "Background tasks / 后台任务"** — scheduled tasks (routines) are "定时任务".
+  ⚠️ Flutter: a label + two buttons in one Row overflows the 290px panel by 118px — the widget test
+  (`test/task_view_test.dart`) caught it; the approve row is a Column + Wrap.
+
+Verified with a scripted fake upstream (`AGENT_TOOLS` off, and on with a fake container CLI that answers every
+exec): DM dispatch → task → report → front woken and told; group: coordinator handed two tasks to two members
+in one step, they ran in parallel (the slow one didn't hold the quick one), an unknown name refused; ask_user →
+waiting → relayed by the front (also when the task finished before the front's own reply) → `answer_task` →
+done; answered from the card, the answer only in the task's model calls; cancel_task; upstream 500 → failed
+card + wake; Stop on a finished task 409; restart mid-task → resumed from its saved step; restart while waiting
+for approval → re-queued with the note, asked again; approval allow/deny inside a task; session delete with a
+running task; two messages into one busy session queued, and Stop stopping both. Web in headless Chromium:
+cards, reply box, panel, trace, zero errors. Client: 45 tests (+ tasks, + panel layout). **Not verified**: real
+containers (no docker on the Mac this ran on), a real model actually choosing to delegate well, the Flutter
+build run as an app.
+
 ## 3. What runs now
 
 ```bash
@@ -1784,9 +1856,10 @@ node web/model.mjs         # self-test for context budgeting / window inference
 node web/schedule.mjs      # self-test for scheduled-task time computation
 node web/skill.mjs         # self-test for SKILL.md read/write
 node web/approve.mjs       # self-test for which tool calls need a person
-node web/sandbox.mjs       # self-test for what an agent's container sees (mounts, caps, the path guard)
+node web/sandbox.mjs       # self-test for what an agent's container sees (needs GNU realpath -m: Linux only, fails on macOS)
 node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
-node web/autonomy.mjs      # self-test for auto mode: limits, the plan, nudges, the relay
+node web/autonomy.mjs      # self-test for auto mode: limits, the plan, nudges
+node web/tasks.mjs         # self-test for background tasks: input, who gets it, what the front thread is told
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/
