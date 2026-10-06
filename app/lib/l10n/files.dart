@@ -8,6 +8,7 @@ const Map<String, List<String>> fileStrings = {
   'att.failed': ['Not uploaded: {msg}', '没传上去：{msg}', '沒有上傳：{msg}'],
   'att.open': ['Open', '打开', '開啟'],
   'att.saveAs': ['Save as…', '另存为…', '另存新檔…'],
+  'att.share': ['Share…', '分享…', '分享…'],
   'att.saved': ['Saved to {path}', '已保存到 {path}', '已儲存至 {path}'],
   'att.close': ['Close', '关闭', '關閉'],
   'att.noPreview': [

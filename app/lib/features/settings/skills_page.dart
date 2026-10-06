@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 
 import '../../data/api.dart';
 import '../../l10n.dart';
+import '../../platform.dart';
 import '../../theme/app_theme.dart';
 
 class SkillsPage extends StatefulWidget {
@@ -145,6 +146,10 @@ class _SkillsPageState extends State<SkillsPage> {
   Future<void> _export() => _act(tr('skills.exporting'), () async {
     final k = _editing!;
     final text = await widget.api.exportSkill(k.id);
+    if (!AppPlatform.canSaveAs) {
+      await AppPlatform.shareText('${k.name}.SKILL.md', text, 'text/markdown');
+      return _say('');
+    }
     final loc = await getSaveLocation(suggestedName: '${k.name}.SKILL.md', acceptedTypeGroups: const [_mdType]);
     if (loc == null) return _say('');
     await File(loc.path).writeAsString(text);

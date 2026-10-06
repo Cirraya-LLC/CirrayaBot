@@ -35,7 +35,7 @@ the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
 2.6–2.11 are kept because the dsh source-code findings in them still hold and will be needed the day
 we plug in the runtime.
 
-**For the current shape see 2.12, 2.18, 2.31** (background tasks) **and 2.32** (files): PostgreSQL + one container per Agent + one-command
+**For the current shape see 2.12, 2.18, 2.31** (background tasks), **2.32** (files) **and 2.33** (Android): PostgreSQL + one container per Agent + one-command
 compose deployment.
 
 **Branch `feat/studio` (2026-09-25, not merged by the boss's decision)** turns the product into an AI
@@ -962,8 +962,7 @@ left panel preview refresh).
 
 - **The token is stored in plain text in JSON.** Moving it into Keychain / Credential Manager needs a
   native branch for each.
-- Phones aren't an "adaptation": the 308px sidebar and three columns are desktop assumptions;
-  navigation needs to be redone.
+- ~~Phones aren't an "adaptation"~~ — **Android done in 2.33**; iOS not yet.
 
 ## 2.20 Full review (2026-09-18)
 
@@ -1924,6 +1923,57 @@ real bug: `db.addTool` only stored name/args/output, so the file of a `send_file
 `file` now. **Not verified**: the macOS app launched (`open` from the sandboxed app is untested; Save as… is the
 fallback), Windows.
 
+## 2.33 Android (2026-10-06)
+
+The boss asked whether a phone client was feasible (「那我们现在做手机端好做吗 iOS android」), then: 「先做android吧
+现在USB连接了个Android」 — a Pixel 5a (Android 14) on USB, kept for testing (PIN given in chat; it is set to stay
+awake while charging: `settings global stay_on_while_plugged_in 7`).
+
+- **Same Flutter app**, `app/android/` added (`flutter create --platforms=android`), package `com.cirraya.multiagent`,
+  label CirrayaBot, Flutter's default icon (there is no product icon yet — the macOS one is Flutter's too).
+  Gradle wrapper points at **9.8.0** (the cached one; 9.3.1 was crawling in at ~170 KB/s); AGP 9.1, Kotlin 2.4.
+  **Build with JDK 21** (`JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home`) — the Mac's default
+  java is 23. No Android Studio / cmdline-tools on the Mac; the SDK in `~/Library/Android/sdk` is enough.
+- **Still zero new plugins.** What Dart can't do on Android is one MethodChannel, `cirraya/platform`
+  (`MainActivity.kt` ↔ `lib/platform.dart`): `dirs` (the app's files/cache directories — `HOME` means nothing there;
+  settings live in `files/settings/settings.json`), `open` (ACTION_VIEW) and `share` (ACTION_SEND) through a
+  `FileProvider` that only hands out `cache/shared/`. `AppPlatform.init()` runs before settings load.
+  ⚠️ The chooser itself reads the file for its preview: grant it with `ClipData` + the flag on the **chooser** intent,
+  or logcat fills with `Permission Denial … intentresolver` (the share still works, the preview doesn't).
+- **Manifest**: `INTERNET` (flutter create puts it only in the debug manifest — a release build without it
+  can't reach anything), `usesCleartextTraffic="true"` (self-hosted on a LAN / over USB is plain http).
+- **No save dialog on Android** (file_selector has none): `AppPlatform.canSaveAs` false → the preview offers
+  **Share…** instead, and chat / skill export write to the cache and open the share sheet (`shareText`).
+- **Phone layout** (`_phone(context)`: narrower than 640): one column at a time — the list full width (no rail
+  toggle, no resize grips), tap → the chat with a back arrow; the right panel is the end drawer (≤ 88% of the
+  width) and on a phone its memory/export block scrolls with the list instead of being pinned (it overflowed a
+  640-tall screen by 60px). Back (arrow, gesture, key) closes the drawer first, then the chat (`PopScope` +
+  `isEndDrawerOpen` — PopScope's canPop:false otherwise beats the drawer's own close). Header: back, title, search,
+  a narrower session chip (96), panel; the avatar and "new session" go (the session menu has New). Margins 26 → 8–10.
+  Sending doesn't put focus back in the input (the keyboard would cover the reply). The setup page's hard
+  line break is gone from all three languages.
+- ⚠️ **A post-frame callback doesn't ask for a frame.** The transcript follows growth when the newest line was in
+  view (`_atBottom` + `ScrollMetricsNotification` — thumbnails load after the list is laid out); without
+  `scheduleFrame()` the jump waited for the next touch, so a cold start landed half a message short.
+  Found with `debugPrint` + `adb logcat` on the phone; desktop had the same bug, less visibly.
+- The conversation list says why it is empty when it couldn't load (the error used to show only in the chat
+  column, which a phone's list doesn't have), with **Try again**; pull down to refresh.
+- **Testing on the phone**: `adb reverse tcp:18090 tcp:<mac port>` gives the phone `http://127.0.0.1:18090`
+  (the Mac port being a local server, or an SSH forward to the test box). Drive it with `adb shell input
+  tap/text/keyevent/swipe` and `adb exec-out screencap -p`; `adb shell sleep N` waits. A split-per-abi release has
+  versionCode 2001: going back to a debug build needs `pm uninstall -k` first (keeps data). Don't run
+  `pm clear --cache-only` — it hung.
+- `test/phone_test.dart` (393×851 and 360×640): list full width, no desktop controls, list ↔ chat, the panel closed
+  by back before the chat, no overflow. It caught the header squeezing the title to nothing at 360 and the panel
+  overflow.
+
+Verified on the Pixel 5a (debug and release builds): connect by pasting the `?k=` link, list, open a chat, Lin's
+files (Markdown preview, image preview), **Open** (the image opened in Google Photos), **Share…** (system sheet),
+picking a photo from the phone and sending it — the real model answered "The image is blue." — right panel,
+back gesture, cold start landing at the bottom with tall images. Release APK (arm64) 19 MB.
+**Not done**: iOS; push notifications (a task finishing while the app is closed tells nobody); touch for the
+browser takeover (taps work as clicks, drags don't scroll); camera capture; drag-and-drop/paste of files.
+
 ## 3. What runs now
 
 ```bash
@@ -1943,7 +1993,8 @@ node web/protocols.mjs     # self-test for translating the three protocols (incl
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/
 
-cd app && flutter analyze . && flutter test    # desktop client (see 2.19)
+cd app && flutter analyze . && flutter test    # desktop + Android client (see 2.19, 2.33)
+# Android: JAVA_HOME=<JDK 21> flutter build apk --release --split-per-abi (2.33)
 ```
 
 `run.sh` / `bots.patch.yml` / `headless.patch.yml` are the experiment from rounds 2.6–2.11 running dsh's

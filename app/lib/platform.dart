@@ -8,11 +8,31 @@ library;
 
 import 'dart:io';
 
+import 'package:flutter/services.dart';
+
 abstract final class AppPlatform {
+  // Android: the app's own directories and handing a file to another app come from the
+  // activity (android/app/src/main/kotlin/.../MainActivity.kt) over this channel.
+  static const _channel = MethodChannel('cirraya/platform');
+  static String? _androidFiles;
+  static String? _androidCache;
+
+  /// Ask Android for the app's directories, once, before anything reads [dataDir].
+  static Future<void> init() async {
+    if (!Platform.isAndroid) return;
+    final dirs = await _channel.invokeMapMethod<String, String>('dirs');
+    _androidFiles = dirs?['files'];
+    _androidCache = dirs?['cache'];
+  }
+
+  /// A phone: one column at a time, touch, no file save dialog.
+  static bool get isPhone => Platform.isAndroid || Platform.isIOS;
+
   /// Where this app keeps its own settings — the server address and token,
   /// and nothing else. Everything the product is actually made of lives in
   /// the server's PostgreSQL.
   static Directory get dataDir {
+    if (Platform.isAndroid) return Directory('${_androidFiles ?? Directory.systemTemp.path}/settings');
     if (Platform.isWindows) {
       final appData = Platform.environment['APPDATA'];
       if (appData != null && appData.isNotEmpty) {
@@ -36,6 +56,7 @@ abstract final class AppPlatform {
   /// font: a missing family falls back silently, and code in a proportional
   /// face is unreadable rather than merely off-brand.
   static String get monospaceFamily {
+    if (Platform.isAndroid) return 'monospace';
     if (Platform.isWindows) return 'Cascadia Mono';
     if (Platform.isMacOS) return 'SF Mono';
     return 'DejaVu Sans Mono';
@@ -54,6 +75,46 @@ abstract final class AppPlatform {
     if (Platform.isWindows) return const ['Microsoft YaHei', 'Segoe UI'];
     if (Platform.isMacOS) return const ['PingFang SC', 'Helvetica Neue'];
     return const ['Noto Sans CJK SC', 'WenQuanYi Zen Hei', 'DejaVu Sans'];
+  }
+
+  /// Where a file downloaded to be opened or shared goes. On Android it must be the cache's
+  /// shared/ folder: that is the one place its FileProvider hands out (res/xml/file_paths.xml).
+  static Directory get downloadRoot =>
+      Platform.isAndroid ? Directory('${_androidCache ?? Directory.systemTemp.path}/shared') : Directory.systemTemp;
+
+  /// A "save as" dialog exists (file_selector has none on Android; there it is Share instead).
+  static bool get canSaveAs => !Platform.isAndroid && !Platform.isIOS;
+
+  /// A share sheet exists.
+  static bool get canShare => Platform.isAndroid;
+
+  /// Hand a file to the system's own app for it: Preview / QuickTime on macOS, the default app on
+  /// Windows and Linux, the "open with" chooser on Android.
+  static Future<void> openFile(String path, String mime) async {
+    if (Platform.isAndroid) {
+      final ok = await _channel.invokeMethod<bool>('open', {'path': path, 'mime': mime});
+      if (ok != true) throw Exception('no app can open this file');
+      return;
+    }
+    final (cmd, args) = openCommand(path);
+    final r = await Process.run(cmd, args);
+    if (r.exitCode != 0) throw Exception('${r.stderr}'.trim().isEmpty ? 'exit ${r.exitCode}' : '${r.stderr}'.trim());
+  }
+
+  /// Where there is no save dialog: write [text] to a file named [name] and offer it through the
+  /// share sheet, which is how a phone saves (Files, Drive) or sends a file.
+  static Future<void> shareText(String name, String text, String mime) async {
+    await downloadRoot.create(recursive: true);
+    final dir = await downloadRoot.createTemp('cirrayabot-');
+    final f = File('${dir.path}/${name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')}');
+    await f.writeAsString(text);
+    await shareFile(f.path, mime);
+  }
+
+  /// Android's share sheet: save to Files, Drive, send in a chat…
+  static Future<void> shareFile(String path, String mime) async {
+    final ok = await _channel.invokeMethod<bool>('share', {'path': path, 'mime': mime});
+    if (ok != true) throw Exception('nothing to share with');
   }
 
   /// How to hand a file to the system's own app for it: Preview / QuickTime on
