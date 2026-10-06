@@ -23,6 +23,7 @@ import '../../theme/app_theme.dart';
 import '../settings/providers_page.dart';
 import '../settings/skills_page.dart';
 import 'message_view.dart';
+import 'attachments.dart';
 import 'session_panel.dart';
 import 'task_view.dart';
 
@@ -343,7 +344,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
     final text = _input.text.trim();
-    if (text.isEmpty || bench.busy) return;
+    // A message may be only files; one still uploading holds the send until it's up.
+    final hasFiles = bench.pending.any((p) => p.attachment != null);
+    if ((text.isEmpty && !hasFiles) || bench.busy) return;
+    if (bench.uploading) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('att.waitUpload'))));
+      return;
+    }
     _input.clear();
     _toBottom();
     await bench.send(text);
@@ -351,6 +358,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     // so the next message can just be typed.
     if (mounted) _inputFocus.requestFocus();
     _toBottom();
+  }
+
+  Future<void> _pickFiles() async {
+    final picked = await openFiles();
+    if (picked.isEmpty) return;
+    await bench.attach([for (final f in picked) f.path]);
   }
 
   /// Clamps what was asked for against the window. The preference itself is
@@ -972,6 +985,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       colorOf: (n) => C.parse(bench.agentByName(n)?.color ?? ''),
                       onApprove: bench.answer,
                       news: (n) => NewsCard(bench: bench, news: n),
+                      files: (files, mine) => AttachmentList(api: bench.api, files: files, alignEnd: mine),
                     );
                     return e.id != null && e.id == _flashId
                         ? _Flash(key: _flashKey, motion: _motion(context), child: view)
@@ -1076,6 +1090,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
         children: [
           if (_mentions.isNotEmpty) _mentionList(),
           if (bench.backgroundRun(bench.current) case final run?) _runBar(run),
+          if (bench.pending.isNotEmpty) PendingRow(bench: bench),
           // Keyed: without it, inserting the popup above shifts this box to a
           // new index, Flutter rebuilds it, and the TextField loses focus —
           // every key after the @ went nowhere.
@@ -1090,6 +1105,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
+                IconButton(
+                  tooltip: tr('att.attach'),
+                  onPressed: ready && !bench.busy ? _pickFiles : null,
+                  icon: Icon(Icons.attach_file, size: 19, color: C.dim),
+                ),
+                const SizedBox(width: 2),
                 Expanded(
                   // Enter sends, Shift+Enter is a newline — the IM convention, and
                   // the one the web UI already uses.

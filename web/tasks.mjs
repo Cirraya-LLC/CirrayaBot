@@ -50,7 +50,8 @@ export function eventForModel(e) {
   switch (e.kind) {
     case 'asked': return `[Platform] ${who} is waiting for the user: ${e.text}\n` +
       'Tell the user in your own words what it needs. When they answer, pass it on with answer_task.'
-    case 'done': return `[Platform] ${who} finished. Its report:\n${e.text}`
+    case 'done': return `[Platform] ${who} finished. Its report:\n${e.text}` +
+      (e.files?.length ? `\nIt sent the user ${e.files.length === 1 ? 'a file' : `${e.files.length} files`}: ${e.files.map(f => f.name).join(', ')}.` : '')
     case 'failed': return `[Platform] ${who} failed: ${e.text}`
     case 'stopped': return `[Platform] ${who} was stopped${e.by ? ` by ${e.by}` : ' by the user'}.`
     // The answer itself isn't here on purpose: it went straight to the task, and may be a password.
@@ -125,6 +126,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   assert.match(eventForModel({ kind: 'asked', task: 3, agent: 'Researcher', title: 't', text: 'which repo?' }), /answer_task/)
   assert.match(eventForModel({ kind: 'done', task: 3, title: 't', text: 'ok' }), /finished/)
+  assert.match(eventForModel({ kind: 'done', task: 3, title: 't', text: 'ok', files: [{ name: 'a.pdf' }] }), /sent the user a file: a\.pdf/)
   assert.ok(wakes('done') && wakes('asked') && wakes('failed'))
   assert.ok(!wakes('answered') && !wakes('stopped') && !wakes('approval'))
 

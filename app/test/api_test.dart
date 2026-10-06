@@ -89,4 +89,90 @@ void main() {
     expect(dollarsText(10000000), '10'); //          not '10.0' in a box you retype
     expect(dollarsText(null), '');
   });
+
+  // An upload is the raw file as the body, with the conversation and the name in
+  // the query — and a refusal comes back as the server's own sentence.
+  test('uploading a file streams its bytes, and a refusal is an ApiException', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final got = <String, Object?>{};
+    var progressCalls = 0;
+    server.listen((req) async {
+      final body = await req.fold<List<int>>([], (a, b) => a..addAll(b));
+      got['query'] = req.uri.queryParameters;
+      got['type'] = req.headers.contentType?.mimeType;
+      got['length'] = body.length;
+      final res = req.response..headers.contentType = ContentType.json;
+      if (req.uri.queryParameters['name'] == 'big.bin') {
+        res.statusCode = 413;
+        res.write('{"error":"That file is too big (the limit is 50.0 MB)"}');
+      } else {
+        res.write('{"id":"f1","name":"${req.uri.queryParameters['name']}","mime":"image/png","size":${body.length},"kind":"image"}');
+      }
+      await res.close();
+    });
+    final dir = await Directory.systemTemp.createTemp('upload-test');
+    final file = File('${dir.path}/截图.png')..writeAsBytesSync(List.filled(70000, 7));
+    final api = Api(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    const conv = Conversation(kind: 'agent', id: 'op', name: 'Op', tag: '', preview: '', at: 0, members: ['op'], color: '', colors: []);
+
+    final a = await api.uploadFile(conv, file.path, onProgress: (_, _) => progressCalls++);
+    expect(a.id, 'f1');
+    expect(a.name, '截图.png');
+    expect(a.isImage, isTrue);
+    expect(got['length'], 70000);
+    expect(got['type'], 'image/png');
+    final q = got['query'] as Map<String, String>;
+    expect(q['kind'], 'agent');
+    expect(q['id'], 'op');
+    expect(q['name'], '截图.png');
+    expect(q['k'], 't');
+    expect(progressCalls, greaterThan(1));
+
+    final big = File('${dir.path}/big.bin')..writeAsBytesSync([1, 2, 3]);
+    await expectLater(
+      api.uploadFile(conv, big.path),
+      throwsA(isA<ApiException>().having((e) => e.detail, 'detail', contains('too big'))),
+    );
+    api.close();
+    await server.close(force: true);
+    await dir.delete(recursive: true);
+  });
+
+  test('a text preview reads only the start, and says when there was more', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final whole = 'x' * 5000;
+    String? range;
+    server.listen((req) async {
+      range = req.headers.value(HttpHeaders.rangeHeader);
+      final res = req.response
+        ..statusCode = 206
+        ..headers.contentType = ContentType.text
+        ..headers.set(HttpHeaders.contentRangeHeader, 'bytes 0-99/${whole.length}');
+      res.write(whole.substring(0, 100));
+      await res.close();
+    });
+    final api = Api(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    final got = await api.fileText('f1', maxBytes: 100);
+    expect(range, 'bytes=0-99');
+    expect(got.text.length, 100);
+    expect(got.cut, isTrue);
+    expect(api.fileUri('f1', download: true).queryParameters['download'], '1');
+    api.close();
+    await server.close(force: true);
+  });
+
+  test('attachments read from whatever the server sent', () {
+    expect(Attachment.listOf(null), isEmpty);
+    expect(Attachment.listOf('nope'), isEmpty);
+    final l = Attachment.listOf([
+      {'id': 'a', 'name': 'r.pdf', 'mime': 'application/pdf', 'size': 2048, 'kind': 'pdf'},
+      'junk',
+    ]);
+    expect(l.single.kind, 'pdf');
+    expect(sizeText(l.single.size), '2.0 KB');
+    expect(sizeText(512), '512 B');
+    expect(sizeText(3 * 1024 * 1024), '3.0 MB');
+    expect(mimeForName('Notes.MD'), 'text/markdown');
+    expect(mimeForName('x.unknown'), 'application/octet-stream');
+  });
 }

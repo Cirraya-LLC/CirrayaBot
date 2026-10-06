@@ -1,4 +1,5 @@
 import { lang, t, setLang, applyDom, LANG_NAMES } from './i18n.js'
+import { renderMarkdown } from './markdown.mjs'
 
 const $ = s => document.querySelector(s)
 const K = new URLSearchParams(location.search).get('k')
@@ -277,6 +278,7 @@ let shown = 0
 
 async function openConv(c) {
   const ticket = ++shown
+  if (!cur || convKey(cur) !== convKey(c)) clearPending()
   cur = { kind: c.kind, id: c.id }
   closeSessions()
   const log = $('#log'); log.innerHTML = ''
@@ -319,13 +321,16 @@ async function drawHistory(c, ticket) {
   for (const e of hist) {
     let el
     if (e.role === 'event') el = eventCard(e.event ?? {})
+    // a file the agent sent is drawn as the file, not as the command that sent it
+    else if (e.role === 'tool' && e.name === 'send_file' && e.file) el = fileMsg(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, e.file)
     else if (e.role === 'tool') {
       el = toolLine(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, toolLabel(e.name, e.args))
       finishTool(el, e.output)
     // 'User' is the speaker the server stores for the person in group logs (data, not UI text)
     } else if (c.kind === 'group') {
       (el = bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User')).innerHTML = fmt(e.text)
-    } else (el = bubble(c.id, e.role === 'user')).innerHTML = fmt(e.content)
+      addAtts(el, e.files)
+    } else { (el = bubble(c.id, e.role === 'user')).innerHTML = fmt(e.content); addAtts(el, e.files) }
     // A search hit jumps to its message by this id
     ;(el.closest('.msg') ?? el).dataset.mid = e.id
   }
@@ -726,16 +731,23 @@ async function loadRuns() {
 
 async function send() {
   const text = input.value.trim()
-  if (!text || !cur || busy) return
+  if (!cur || busy) return
+  if (uploading()) { note(t('file.waitUpload')); return }
+  const files = PEND.filter(p => p.att && p.conv === convKey(cur)).map(p => p.att)
+  if (!text && !files.length) return
   input.value = ''; input.style.height = 'auto'
-  bubble(null, true).innerHTML = fmt(text)
+  for (const p of PEND) if (p.thumb) URL.revokeObjectURL(p.thumb)
+  PEND = []; renderPend()
+  const mine = bubble(null, true)
+  mine.innerHTML = fmt(text)
+  addAtts(mine, files)
   const ticket = shown, target = cur
   busy = true; streaming = target; sendMode(); paintRun()
   const bubs = new Map(), tools = new Map()
   try {
     const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
       body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text,
-        session: curSession ?? 'new' }) })
+        session: curSession ?? 'new', files: files.map(f => f.id) }) })
     if (!res.ok) throw new Error((await errText(res)).slice(0, 300))
     const rd = res.body.getReader(), dec = new TextDecoder()
     let buf = ''
@@ -786,7 +798,9 @@ async function send() {
             tools.get(key)?.querySelector('.ask')?.remove()
           } else {
             const el = tools.get(key)
-            if (el) finishTool(el, d.output, d.image)
+            // a file the agent sent replaces the card that sent it, as it will after a reload
+            if (el && d.name === 'send_file' && d.file) el.replaceWith(fileMsg(d.botId, d.file))
+            else if (el) finishTool(el, d.output, d.image)
           }
         }
       }
@@ -1440,6 +1454,209 @@ $('#addsk').onclick = () => openSkills(null, cur ? [cur.id] : [])
 
 // ═══ Scheduled tasks ═══
 // Weekday names from Intl; 2024-01-07 was a Sunday, so index 0 = Sunday
+// ═══ Files: attaching, showing, previewing ═══
+// Uploads start the moment a file is picked, dropped or pasted, and go with the next message.
+// What a file may be shown as is the server's call (it never serves anything that would run here);
+// this only decides how it looks: images and video in place, everything else a card that opens a preview.
+const fileUrl = (id, download = false) => api(`/api/files/${id}${download ? '?download=1' : ''}`)
+const fsize = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`
+const extBadge = name => (/\.([a-z0-9]{1,5})$/i.exec(name ?? '')?.[1] ?? 'FILE').toUpperCase()
+
+/** The attachments of one message. */
+function attsEl(files) {
+  const box = document.createElement('div')
+  box.className = 'atts'
+  for (const f of files ?? []) {
+    let el
+    if (f.kind === 'image') {
+      el = document.createElement('button')
+      el.className = 'ai'
+      el.title = f.name
+      const img = document.createElement('img')
+      img.loading = 'lazy'; img.alt = f.name; img.src = fileUrl(f.id)
+      // a broken image (deleted, not a real image) falls back to the card
+      img.onerror = () => el.replaceWith(fileCard(f))
+      el.appendChild(img)
+      el.onclick = () => openPreview(f)
+    } else if (f.kind === 'video' || f.kind === 'audio') {
+      el = document.createElement(f.kind)
+      el.controls = true; el.preload = 'metadata'; el.src = fileUrl(f.id); el.title = f.name
+      const wrap = document.createElement('div')
+      wrap.append(el, fileCard(f))
+      el = wrap
+    } else el = fileCard(f)
+    box.appendChild(el)
+  }
+  return box
+}
+
+function fileCard(f) {
+  const el = document.createElement('button')
+  el.className = 'ac'
+  el.innerHTML = `<i></i><span><b></b><small></small></span>`
+  el.querySelector('i').textContent = extBadge(f.name)
+  el.querySelector('b').textContent = f.name
+  el.querySelector('small').textContent = fsize(f.size)
+  el.title = f.name
+  el.onclick = () => openPreview(f)
+  return el
+}
+
+/** Hang attachments under a bubble (the bubble may be empty: a message can be only files). */
+function addAtts(bub, files) {
+  if (files?.length) bub.closest('.mwrap').appendChild(attsEl(files))
+}
+
+/** A file an agent sent: its own message, with the agent's avatar and name, and no text. */
+function fileMsg(botId, file) {
+  const bub = bubble(botId, false)
+  bub.closest('.msg').classList.add('fmsg')
+  addAtts(bub, [file])
+  return bub.closest('.msg')
+}
+
+// ── preview ──
+let pvFile = null
+async function openPreview(f) {
+  pvFile = f
+  const body = $('#pvbody')
+  body.className = 'pvbody'
+  body.innerHTML = ''
+  $('#pvname').textContent = f.name
+  $('#pvmeta').textContent = `${fsize(f.size)} · ${f.mime}`
+  $('#pvdl').href = fileUrl(f.id, true)
+  $('#pvdl').setAttribute('download', f.name)
+  $('#pv').hidden = false
+  $('#pvx').focus()
+  const url = fileUrl(f.id)
+  if (f.kind === 'image' || f.kind === 'video' || f.kind === 'audio') {
+    body.classList.add('center')
+    const el = document.createElement(f.kind === 'image' ? 'img' : f.kind)
+    el.src = url
+    if (f.kind !== 'image') { el.controls = true; el.autoplay = true }
+    else el.alt = f.name
+    body.appendChild(el)
+  } else if (f.kind === 'pdf') {
+    // the browser's own PDF viewer; the server leaves PDFs out of its sandbox header for this
+    const fr = document.createElement('iframe')
+    fr.src = url; fr.title = f.name
+    body.appendChild(fr)
+  } else if (f.kind === 'markdown' || f.kind === 'text') {
+    body.innerHTML = `<div class="none">${esc(t('file.loading'))}</div>`
+    // text over 2 MB is shown in part; the download has it all
+    const r = await fetch(url, { headers: { range: 'bytes=0-2097151' } }).catch(() => null)
+    if (pvFile !== f) return
+    if (!r || !r.ok) { body.innerHTML = `<div class="none">${esc(t('file.loadFailed'))}</div>`; return }
+    const text = await r.text()
+    const cut = f.size > 2097152 ? `\n\n… ${t('file.cut')}` : ''
+    if (pvFile !== f) return
+    if (f.kind === 'markdown') {
+      body.innerHTML = `<div class="md">${renderMarkdown(text)}${cut ? `<p><em>${esc(cut.trim())}</em></p>` : ''}</div>`
+    } else {
+      const pre = document.createElement('pre'); pre.textContent = text + cut
+      body.replaceChildren(pre)
+    }
+  } else {
+    body.classList.add('center')
+    body.innerHTML = `<div class="none">${esc(t('file.noPreview'))}<br><a class="btn" href="${esc(fileUrl(f.id, true))}" download="${esc(f.name)}">${esc(t('file.download'))}</a></div>`
+  }
+}
+function closePreview() {
+  pvFile = null
+  $('#pv').hidden = true
+  $('#pvbody').innerHTML = ''          // stops a playing video
+}
+$('#pvx').onclick = closePreview
+$('#pv').onclick = e => { if (e.target.id === 'pv') closePreview() }
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#pv').hidden) { e.stopPropagation(); closePreview() } }, true)
+
+// ── attaching ──
+// key → {name, size, type, progress, att (once uploaded), err, xhr, thumb}
+let PEND = []
+const uploading = () => PEND.some(p => !p.att && !p.err)
+
+function renderPend() {
+  const box = $('#pend')
+  box.hidden = !PEND.length
+  box.innerHTML = ''
+  for (const p of PEND) {
+    const el = document.createElement('div')
+    el.className = 'pc' + (p.err ? ' err' : '')
+    el.innerHTML = `${p.thumb ? `<img alt="" src="${esc(p.thumb)}">` : `<i>${esc(extBadge(p.name))}</i>`}
+      <span><b></b><small></small></span><button class="x" aria-label="${esc(t('file.remove'))}" title="${esc(t('file.remove'))}">×</button>
+      ${!p.att && !p.err ? `<div class="bar" style="width:${Math.round(p.progress * 100)}%"></div>` : ''}`
+    el.querySelector('b').textContent = p.name
+    el.querySelector('small').textContent = p.err ?? (p.att ? fsize(p.size) : t('file.uploading', { pct: Math.round(p.progress * 100) }))
+    el.querySelector('.x').onclick = () => dropPending(p)
+    box.appendChild(el)
+  }
+  sendMode()
+}
+
+function dropPending(p) {
+  p.xhr?.abort()
+  if (p.att) fetch(api(`/api/files/${p.att.id}`), { method: 'DELETE' }).catch(() => {})
+  if (p.thumb) URL.revokeObjectURL(p.thumb)
+  PEND = PEND.filter(x => x !== p)
+  renderPend()
+}
+
+/** Leaving a conversation: what was waiting to be sent there goes too. */
+function clearPending() { for (const p of [...PEND]) dropPending(p) }
+
+function addFiles(list) {
+  const c = cur
+  if (!c) return
+  for (const file of list) {
+    const p = { name: file.name || 'file', size: file.size, type: file.type, progress: 0, att: null, err: null, conv: convKey(c),
+      thumb: /^image\/(png|jpe?g|gif|webp)$/.test(file.type) ? URL.createObjectURL(file) : null }
+    PEND.push(p)
+    // XHR rather than fetch: fetch can't report upload progress
+    const x = p.xhr = new XMLHttpRequest()
+    x.open('POST', api(`/api/files?kind=${c.kind}&id=${encodeURIComponent(c.id)}&name=${encodeURIComponent(p.name)}`))
+    x.setRequestHeader('X-Lang', lang)
+    if (file.type) x.setRequestHeader('content-type', file.type)
+    x.upload.onprogress = e => { if (e.lengthComputable) { p.progress = e.loaded / e.total; renderPend() } }
+    x.onload = () => {
+      p.xhr = null
+      let body = null
+      try { body = JSON.parse(x.responseText) } catch {}
+      if (x.status === 200 && body?.id) p.att = body
+      else p.err = body?.error ?? t('file.failed')
+      renderPend()
+    }
+    x.onerror = () => { p.xhr = null; p.err = t('file.failed'); renderPend() }
+    x.send(file)
+  }
+  renderPend()
+}
+
+$('#cfile').onclick = () => { if (cur) $('#fpick').click() }
+$('#fpick').onchange = e => { addFiles([...e.target.files]); e.target.value = '' }
+// Pasting a screenshot attaches it; pasting text still pastes text.
+input.addEventListener('paste', e => {
+  const files = [...(e.clipboardData?.files ?? [])]
+  if (!files.length) return
+  e.preventDefault()
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
+  addFiles(files.map(f => f.name && f.name !== 'image.png' ? f : new File([f], `pasted-${stamp}.${(f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`, { type: f.type })))
+})
+// Dropping files anywhere on the chat column
+{
+  const main = document.querySelector('main')
+  let depth = 0
+  const hasFiles = e => [...(e.dataTransfer?.types ?? [])].includes('Files')
+  main.addEventListener('dragenter', e => { if (!hasFiles(e) || !cur) return; depth++; main.classList.add('dropping') })
+  main.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; main.classList.remove('dropping') } })
+  main.addEventListener('dragover', e => { if (hasFiles(e) && cur) e.preventDefault() })
+  main.addEventListener('drop', e => {
+    depth = 0; main.classList.remove('dropping')
+    if (!hasFiles(e) || !cur) return
+    e.preventDefault()
+    addFiles([...e.dataTransfer.files])
+  })
+}
+
 // ═══ Background tasks ═══
 // Work a conversation handed out. They run on their own and report back into the conversation as
 // event cards; this list is where to see them all, answer one, approve one, or stop one.
@@ -1564,8 +1781,9 @@ function eventCard(e) {
     if (x?.status === 'waiting' && x.approval?.id === e.approval) askOn(el, e.approval)
   } else if (e.kind === 'done' || e.kind === 'failed') {
     el.insertAdjacentHTML('beforeend', '<pre></pre>'); el.querySelector('pre').textContent = e.text
+    if (e.files?.length) el.appendChild(attsEl(e.files))
   }
-  el.onclick = ev => { if (ev.target.closest('form,button,input')) return; openTask = Number(e.task); renderTasks(); $('#tasks').scrollIntoView({ block: 'nearest' }) }
+  el.onclick = ev => { if (ev.target.closest('form,button,input,video,audio,a')) return; openTask = Number(e.task); renderTasks(); $('#tasks').scrollIntoView({ block: 'nearest' }) }
   log.appendChild(el)
   return el
 }

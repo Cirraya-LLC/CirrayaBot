@@ -19,6 +19,10 @@ of each answering on their own.
   tells you, or you answer on the task's card (that answer goes to the task alone — handy for a
   password). Finished work comes back into the conversation and gets summarized. Every task is in
   the right panel, with what it ran and a Stop button.
+- **Files both ways** — attach files to a message (📎, drag them in, or paste a screenshot); the
+  Agent sees images and text files directly and finds every file in its inbox. Agents send files
+  back (a report, a chart, an archive). Images, video and audio play in place; PDF, Markdown and
+  text open in a preview; anything else downloads. Up to 50 MB a file (`UPLOAD_MAX_MB`).
 - **Memory carries across contexts** — what was discussed in a group, he still remembers
   in a direct chat.
 - **Sessions, and search across them** — a DM or a group holds as many separate sessions as you

@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../data/api.dart';
 import '../../data/markup.dart';
 import '../../l10n.dart';
 import '../../state/workbench.dart';
@@ -85,6 +86,7 @@ class EntryView extends StatelessWidget {
     required this.colorOf,
     this.onApprove,
     this.news,
+    this.files,
   });
 
   final Entry entry;
@@ -98,6 +100,9 @@ class EntryView extends StatelessWidget {
 
   /// Draws task news. It needs the workbench (to answer a task), which this file doesn't.
   final Widget Function(News n)? news;
+
+  /// Draws a message's files. It needs the Api (to fetch them), which this file doesn't.
+  final Widget Function(List<Attachment> files, bool mine)? files;
 
   @override
   Widget build(BuildContext context) => switch (entry) {
@@ -113,16 +118,18 @@ class EntryView extends StatelessWidget {
     ),
     Ran r => _ToolCard(r, onApprove),
     News n => news?.call(n) ?? const SizedBox.shrink(),
-    Said s => _Bubble(said: s, names: names, colorOf: colorOf),
+    Said s => _Bubble(said: s, names: names, colorOf: colorOf, files: files),
+    SentFile f => _SentFile(sent: f, files: files),
   };
 }
 
 class _Bubble extends StatelessWidget {
-  const _Bubble({required this.said, required this.names, required this.colorOf});
+  const _Bubble({required this.said, required this.names, required this.colorOf, this.files});
 
   final Said said;
   final List<String> names;
   final Color Function(String) colorOf;
+  final Widget Function(List<Attachment> files, bool mine)? files;
 
   @override
   Widget build(BuildContext context) {
@@ -142,19 +149,26 @@ class _Bubble extends StatelessWidget {
               style: TextStyle(fontSize: 11.5, color: colour, fontWeight: FontWeight.w600),
             ),
           ),
-        Container(
-          constraints: const BoxConstraints(maxWidth: 720),
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 11),
-          decoration: BoxDecoration(
-            color: said.mine ? C.bubbleMine : C.bubble,
-            borderRadius: BorderRadius.circular(13),
+        // A message that is only files has no bubble, just the files.
+        if (said.text.isNotEmpty || said.streaming || said.files.isEmpty)
+          Container(
+            constraints: const BoxConstraints(maxWidth: 720),
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 11),
+            decoration: BoxDecoration(
+              color: said.mine ? C.bubbleMine : C.bubble,
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: MessageBody(
+              text: said.text.isEmpty && said.streaming ? '…' : said.text,
+              names: names,
+              colorOf: colorOf,
+            ),
           ),
-          child: MessageBody(
-            text: said.text.isEmpty && said.streaming ? '…' : said.text,
-            names: names,
-            colorOf: colorOf,
+        if (said.files.isNotEmpty && files != null)
+          Padding(
+            padding: EdgeInsets.only(top: said.text.isEmpty ? 0 : 6),
+            child: files!(said.files, said.mine),
           ),
-        ),
       ],
     );
 
@@ -362,6 +376,47 @@ class _ToolCard extends StatelessWidget {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A file an agent handed over: its avatar and name, then the file.
+class _SentFile extends StatelessWidget {
+  const _SentFile({required this.sent, this.files});
+
+  final SentFile sent;
+  final Widget Function(List<Attachment> files, bool mine)? files;
+
+  @override
+  Widget build(BuildContext context) {
+    final colour = C.parse(sent.color);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Avatar(label: sent.speaker, color: colour),
+          ),
+          const SizedBox(width: 9),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 3, left: 2),
+                  child: Text(
+                    tr('att.sent', {'name': sent.speaker}),
+                    style: TextStyle(fontSize: 11.5, color: colour, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                if (files != null) files!([sent.file], false),
+              ],
+            ),
+          ),
         ],
       ),
     );

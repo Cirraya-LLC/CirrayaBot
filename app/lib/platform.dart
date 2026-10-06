@@ -55,4 +55,13 @@ abstract final class AppPlatform {
     if (Platform.isMacOS) return const ['PingFang SC', 'Helvetica Neue'];
     return const ['Noto Sans CJK SC', 'WenQuanYi Zen Hei', 'DejaVu Sans'];
   }
+
+  /// How to hand a file to the system's own app for it: Preview / QuickTime on
+  /// macOS, the default app on Windows and Linux.
+  static (String, List<String>) openCommand(String path) {
+    if (Platform.isMacOS) return ('open', [path]);
+    // `start`'s first quoted argument is a window title, hence the empty one.
+    if (Platform.isWindows) return ('cmd', ['/c', 'start', '', path]);
+    return ('xdg-open', [path]);
+  }
 }

@@ -212,6 +212,26 @@ create table if not exists tasks (
   finished_at timestamptz
 );
 create index if not exists tasks_conv_idx on tasks (scope, scope_id, id desc);
+
+-- Attachments. The bytes live on disk (<workspace>/files/<id>, never mounted into an agent's
+-- container); this row says whose they are. An upload belongs to one conversation from the start
+-- and has no session until a message is sent with it — so one conversation can't post another's
+-- uploads, and one never sent is swept after a day. A message carries a copy of what it needs to
+-- draw them (messages.files), so a transcript is one query.
+create table if not exists files (
+  id         text primary key,
+  scope      text not null check (scope in ('dm','group')),
+  scope_id   text not null,
+  session_id text,
+  name       text not null,
+  mime       text not null default 'application/octet-stream',
+  size       bigint not null default 0,
+  by_agent   text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists files_session_idx on files (session_id);
+create index if not exists files_conv_idx on files (scope, scope_id);
+alter table messages add column if not exists files jsonb not null default '[]';
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -281,6 +301,13 @@ export async function renameSpeaker(from, to) {
   await q('update messages set speaker = $2 where speaker = $1', [from, to])
 }
 
+/** Deleting the rows is the database's half; the caller removes the bytes for the ids returned. */
+async function dropFiles(where, params) {
+  const { rows } = await q(`delete from files where ${where} returning id`, params)
+  return rows.map(r => r.id)
+}
+
+/** Returns the ids of the files that went with it, so the caller can delete them from disk. */
 export async function deleteAgent(id) {
   // Remove them from group member arrays too — otherwise the group shows a name that can't be opened
   await q(`update groups set members = array_remove(members, $1)`, [id])
@@ -292,6 +319,7 @@ export async function deleteAgent(id) {
   await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id)]])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
   await q(`update skills set agents = array_remove(agents, $1)`, [id])
+  return dropFiles(`scope = 'dm' and scope_id = $1`, [id])
 }
 
 export const nextColor = n => COLORS[n % COLORS.length]
@@ -317,6 +345,7 @@ export async function deleteGroup(id) {
   await q('delete from groups where id = $1', [id])
   await q('delete from settings where key = $1', [memKey('group', id)])
   await q(`delete from routines where target_kind = 'group' and target_id = $1`, [id])
+  return dropFiles(`scope = 'group' and scope_id = $1`, [id])
 }
 
 // ---------- sessions ----------
@@ -363,12 +392,13 @@ export async function deleteSession(id) {
   await q('delete from messages where session_id = $1', [id])
   await q('delete from tasks where session_id = $1', [id])
   await q('delete from sessions where id = $1', [id])
+  return dropFiles('session_id = $1', [id])
 }
 
 // ---------- messages ----------
-export async function addMessage(scope, scopeId, session, { role, speaker = '', content }) {
-  await q('insert into messages (scope, scope_id, session_id, role, speaker, content) values ($1,$2,$3,$4,$5,$6)',
-    [scope, scopeId, session, role, speaker, content])
+export async function addMessage(scope, scopeId, session, { role, speaker = '', content, files = [] }) {
+  await q('insert into messages (scope, scope_id, session_id, role, speaker, content, files) values ($1,$2,$3,$4,$5,$6,$7)',
+    [scope, scopeId, session, role, speaker, content, JSON.stringify(files ?? [])])
   await q('update sessions set updated_at = now() where id = $1', [session])
 }
 
@@ -380,9 +410,10 @@ export async function addEvent(scope, scopeId, session, speaker, event) {
 }
 
 /** A finished tool call, kept so the transcript still shows the work after a reload. */
-export async function addTool(scope, scopeId, session, speaker, { name, args, output }) {
+export async function addTool(scope, scopeId, session, speaker, { name, args, output, file }) {
+  // `file`: what send_file sent — the transcript draws the file where the card would be
   await q('insert into messages (scope, scope_id, session_id, role, speaker, content) values ($1,$2,$3,$4,$5,$6)',
-    [scope, scopeId, session, 'tool', speaker, JSON.stringify({ name, args, output })])
+    [scope, scopeId, session, 'tool', speaker, JSON.stringify({ name, args, output, ...file ? { file } : {} })])
 }
 
 /**
@@ -394,7 +425,7 @@ export async function addTool(scope, scopeId, session, speaker, { name, args, ou
 export async function recent(scope, scopeId, limit = 200, { tools = false, events = true, session = null } = {}) {
   const skip = [...tools ? [] : ["'tool'"], ...events ? [] : ["'event'"]]
   const { rows } = await q(
-    `select id, role, speaker, content, at from messages
+    `select id, role, speaker, content, files, at from messages
      where scope = $1 and scope_id = $2 ${skip.length ? `and role not in (${skip.join(',')})` : ''}
        ${session ? 'and session_id = $4' : ''}
      order by id desc limit $3`,
@@ -837,4 +868,45 @@ export async function unseenTaskNews(session, after = null) {
 export async function traceTask(id, step) {
   await q(`update tasks set trace = (case when jsonb_array_length(trace) >= 200 then trace - 0 else trace end) || $2::jsonb,
     updated_at = now() where id = $1`, [id, JSON.stringify([step])])
+}
+
+// ---------- files ----------
+const FILE_COLS = 'id, scope, scope_id, session_id, name, mime, size, by_agent, created_at'
+
+export async function createFile(f) {
+  const { rows } = await q(`insert into files (id, scope, scope_id, session_id, name, mime, size, by_agent)
+    values ($1,$2,$3,$4,$5,$6,$7,$8) returning ${FILE_COLS}`,
+    [f.id, f.scope, f.scope_id, f.session_id ?? null, f.name, f.mime, f.size, f.by_agent ?? ''])
+  return rows[0]
+}
+
+export async function getFile(id) {
+  if (!/^[\w-]{6,64}$/.test(String(id))) return null
+  return (await q(`select ${FILE_COLS} from files where id = $1`, [id])).rows[0] ?? null
+}
+
+export async function getFiles(ids) {
+  if (!ids.length) return []
+  return (await q(`select ${FILE_COLS} from files where id = any($1)`, [ids])).rows
+}
+
+/**
+ * Give uploads to the message being sent. Only this conversation's, only ones not sent before —
+ * returns the rows it took, so the caller can tell whether every id was good.
+ */
+export async function attachFiles(ids, scope, scopeId, session) {
+  if (!ids.length) return []
+  const { rows } = await q(`update files set session_id = $4
+    where id = any($1) and scope = $2 and scope_id = $3 and session_id is null returning ${FILE_COLS}`,
+    [ids, scope, scopeId, session])
+  return rows
+}
+
+/** Uploads nobody sent, older than `hours`. */
+export async function dropStaleUploads(hours = 24) {
+  return dropFiles(`session_id is null and created_at < now() - make_interval(hours => $1)`, [hours])
+}
+
+export async function dropUpload(id) {
+  return dropFiles('id = $1 and session_id is null', [id])
 }
