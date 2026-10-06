@@ -278,6 +278,15 @@ const M = {
   'k.srcNote': ['This was {src}. Once you edit it, it’s yours and they can no longer overwrite it.', '这是 {src}。你一改它就算你的了，他以后不能再覆盖。', '這是 {src}。你一修改它就算你的了，他之後不能再覆蓋。'],
   'k.confirmDelete': ['Delete skill “{name}”? Agents that have it will stop working this way.', '删掉技能「{name}」？装了它的 Agent 以后就不会这么做了。', '刪除技能「{name}」？安裝了它的 Agent 之後就不會這樣做了。'],
 
+  // notifications
+  'nt.title': ['Notifications', '通知', '通知'],
+  'nt.off': ['Notifications are off — click to turn on', '通知已关闭，点击开启', '通知已關閉，點擊開啟'],
+  'nt.on': ['Notifications are on — click to turn off', '通知已开启，点击关闭', '通知已開啟，點擊關閉'],
+  'nt.denied': ['This browser blocked notifications for this site — allow them in the site settings', '浏览器禁止了这个网站发通知，请在网站设置里允许', '瀏覽器禁止了這個網站發通知，請在網站設定裡允許'],
+  'nt.asked': ['{name} needs an answer', '{name} 需要你回答', '{name} 需要你回答'],
+  'nt.approval': ['{name} asks for approval', '{name} 请求批准', '{name} 請求批准'],
+  'nt.replyIn': ['{name} · {conv}', '{name} · {conv}', '{name} · {conv}'],
+
   // files
   'file.attach': ['Attach files (or drop them here, or paste)', '添加文件（也可以拖进来或粘贴）', '附加檔案（也可以拖進來或貼上）'],
   'file.download': ['Download', '下载', '下載'],

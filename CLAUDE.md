@@ -35,7 +35,7 @@ the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
 2.6–2.11 are kept because the dsh source-code findings in them still hold and will be needed the day
 we plug in the runtime.
 
-**For the current shape see 2.12, 2.18, 2.31** (background tasks), **2.32** (files) **and 2.33** (Android): PostgreSQL + one container per Agent + one-command
+**For the current shape see 2.12, 2.18, 2.31** (background tasks), **2.32** (files), **2.33–2.35** (Android, HTTPS, notifications): PostgreSQL + one container per Agent + one-command
 compose deployment.
 
 **Branch `feat/studio` (2026-09-25, not merged by the boss's decision)** turns the product into an AI
@@ -1980,7 +1980,7 @@ Verified on the Pixel 5a (debug and release builds): connect by pasting the `?k=
 files (Markdown preview, image preview), **Open** (the image opened in Google Photos), **Share…** (system sheet),
 picking a photo from the phone and sending it — the real model answered "The image is blue." — right panel,
 back gesture, cold start landing at the bottom with tall images. Release APK (arm64) 19 MB.
-**Not done**: iOS; drag-and-drop/paste of files. (Notifications and camera: 2.34.)
+**Not done**: iOS; drag-and-drop/paste of files. (Notifications and camera: 2.35.)
 
 ## 2.34 HTTPS beside http, and a phone that reaches it directly (2026-10-06)
 
@@ -1997,6 +1997,42 @@ The boss: 「http https 都要可以才行啊」 — both have to work.
 - Test box: `PUBLIC_HOST=216-195-194-137.sslip.io`, `BIND_ADDR=0.0.0.0` (http on 18090 from outside too).
   Certificate obtained in ~7s (Let's Encrypt, valid to 2027-01). The phone now connects to
   `https://216-195-194-137.sslip.io` directly — no USB, no tunnel.
+
+## 2.35 Notifications, and the camera (2026-10-06)
+
+The boss: 「通知肯定要」 (notifications are a must), and for the rest 「直接都按照你说的来即可」.
+
+- **No Google push.** A self-hosted server can't be expected to own a Firebase project, so the server keeps a feed
+  and the clients hold it open. `notify()` in server.mjs: every finished reply (`kind: reply`, DM or group), and a
+  task's `asked` / `approval` (what only the person can unblock — a task finishing is told by the front thread's
+  wake-up reply). Kept in memory, the last 300; ids start at `Date.now()` so they keep growing across restarts.
+  `GET /api/notifications/stream` (SSE, `event: notice`, `id:`; `event: hello {last}` first; replay after
+  `Last-Event-ID` / `?after=`; `: ping` every 25s) and `GET /api/notifications?after=`.
+- **The server can't tell who is looking** — a phone locked mid-reply still has its stream open — so every client
+  gets every notice and decides: the web page shows one when hidden or on another conversation; Android when the
+  activity isn't in front (`NoticeService.appVisible`, set in onResume/onPause).
+- **Web**: a bell in the sidebar footer (off until clicked; the browser asks permission; `ma_notify` in
+  localStorage). Click on a notice → that conversation and session.
+- **Android** (`NoticeService.kt`, no plugins): a foreground service (type `remoteMessaging`) reads the SSE feed
+  with HttpURLConnection, read timeout 70s, backoff 2s→60s, remembers the last id in SharedPreferences; one
+  notification per conversation (the newest replaces the last), channel "Messages" (high) + an ongoing
+  "Connected to <host>" on channel "Connection" (min — hide it there). Restarts after a reboot (`BootReceiver`).
+  The texts come from Dart in the app's language (the service has no translations), re-sent on a language change.
+  Tap → `MainActivity` → `openConversation` over the channel (or `launchTarget` when the tap started the app).
+  First run asks for POST_NOTIFICATIONS, then — once, after that answer, two system dialogs at once collide —
+  for an exemption from battery optimisation. ⚠️ Without the exemption Doze cuts the app's network while the
+  phone sleeps; with it, a reply under `dumpsys deviceidle force-idle` still arrived at once. The bell in the
+  footer turns it off/on (`Settings.notify`, on by default; turning it on asks about battery again).
+- **Camera** (Android): the paperclip on a phone offers Choose files / Take a photo / Record a video. The system
+  camera app writes into `cache/shared/capture/` through the FileProvider (`ACTION_IMAGE_CAPTURE` /
+  `ACTION_VIDEO_CAPTURE` with `EXTRA_OUTPUT`), so the app needs no camera permission.
+
+Verified on the Pixel 5a over HTTPS (no USB): permission prompt, battery prompt, a reply sent from the Mac
+arrived as "Lin — Great, the phone test worked!" while the app was in the background, tapping it opened Lin's
+chat at the new reply; forced Doze + reply → notice at once; web in Chromium (a stub Notification) recorded
+"Lin — web notice ok" with the page hidden; photo taken with Google Camera → uploaded → the model described it.
+**Not done**: phone photos over 5 MB reach the model only as a line (no resizing yet); desktop Flutter has no
+notifications (no plugin for macOS/Windows notices); iOS.
 
 ## 3. What runs now
 

@@ -10,6 +10,7 @@ import 'data/settings.dart';
 import 'features/settings/setup_page.dart';
 import 'features/workbench/workbench_page.dart';
 import 'l10n.dart';
+import 'platform.dart';
 import 'state/workbench.dart';
 import 'theme/app_theme.dart';
 
@@ -37,6 +38,30 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
     currentTheme.addListener(_themeChanged);
     currentScale.value = _settings.uiScale;
     currentScale.addListener(_scaleChanged);
+    _syncNotices();
+  }
+
+  /// The background notification feed follows the settings: which server, on or off, and the
+  /// language its texts are in. Best effort — a phone that refuses still has the app.
+  void _syncNotices() {
+    if (!AppPlatform.backgroundNotices) return;
+    final s = _settings;
+    final run = s.configured && s.notify
+        ? AppPlatform.startNotices(s.baseUrl, s.token, {
+            for (final k in const ['asked', 'approval', 'replyIn', 'connected', 'connectedNote', 'chMessages', 'chConnection'])
+              k: tr('nt.$k'),
+          })
+        : AppPlatform.stopNotices();
+    run.catchError((Object _) {});
+  }
+
+  Future<void> _setNotify(bool on) async {
+    _settings = _settings.copyWith(notify: on);
+    await widget.store.save(_settings);
+    _syncNotices();
+    // Turning it on is when to ask about battery: without it Doze stops the feed while the phone sleeps.
+    if (on) await AppPlatform.batteryExempt().catchError((Object _) => false);
+    if (mounted) setState(() {});
   }
 
   void _scaleChanged() {
@@ -57,6 +82,7 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
   void _langChanged() {
     _settings = _settings.copyWith(lang: currentLang.value.code);
     widget.store.save(_settings).ignore(); // best effort: a read-only disk keeps the choice for this run
+    _syncNotices(); // the notifications' texts are in the app's language
     void mark(Element e) {
       e.markNeedsBuild();
       e.visitChildren(mark);
@@ -78,6 +104,7 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
       _bench = Workbench(s);
       _editing = false;
     });
+    _syncNotices();
   }
 
   @override
@@ -125,6 +152,8 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
               key: ValueKey(_settings.baseUrl),
               bench: bench,
               onEditServer: () => setState(() => _editing = true),
+              notify: AppPlatform.backgroundNotices ? _settings.notify : null,
+              onNotify: _setNotify,
               collapsed: _settings.sidebarCollapsed,
               // The page owns the state while it is open; this only writes it
               // down, so toggling does not rebuild the whole app mid-animation.

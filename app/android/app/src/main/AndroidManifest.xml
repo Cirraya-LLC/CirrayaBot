@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- The app is only a view onto a server: it needs the network, nothing else. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Notifications without a push service: a foreground service keeps the server's feed open
+         (NoticeService), restarts after a reboot, and may ask to be spared from battery optimisation. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <!-- usesCleartextTraffic: a self-hosted server often sits on a LAN or behind an SSH/USB tunnel
          on plain http. Android refuses that by default; HTTPS is still what a public server should use. -->
     <application
@@ -30,6 +37,15 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <service
+            android:name=".NoticeService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging"/>
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
         <!-- Files downloaded for "open with" / "share" live in the cache; other apps get a
              content:// URI for just that file, never a path. -->
         <provider

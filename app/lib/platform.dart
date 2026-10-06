@@ -77,6 +77,39 @@ abstract final class AppPlatform {
     return const ['Noto Sans CJK SC', 'WenQuanYi Zen Hei', 'DejaVu Sans'];
   }
 
+  // ── notifications while the app is closed (Android: NoticeService) ──
+
+  /// Notices can arrive while the app isn't running.
+  static bool get backgroundNotices => Platform.isAndroid;
+
+  /// Keep the server's notification feed open in the background. [texts] are the notification texts
+  /// in the app's language (the service has no translations of its own).
+  static Future<void> startNotices(String base, String token, Map<String, String> texts) =>
+      _channel.invokeMethod('noticesStart', {'base': base, 'token': token, 'texts': texts});
+
+  static Future<void> stopNotices() => _channel.invokeMethod('noticesStop');
+
+  /// Ask to be spared from battery optimisation (a system dialog). True when already spared.
+  static Future<bool> batteryExempt() async => await _channel.invokeMethod<bool>('batteryExempt') ?? false;
+
+  /// The conversation a notice was about, when tapping it is what started the app.
+  static Future<Map<String, String>?> launchTarget() =>
+      Platform.isAndroid ? _channel.invokeMapMethod<String, String>('launchTarget') : Future.value(null);
+
+  /// A notice tapped while the app was running.
+  static void onOpenConversation(void Function(Map<String, String> target) open) {
+    if (!Platform.isAndroid) return;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'openConversation') open(Map<String, String>.from(call.arguments as Map));
+    });
+  }
+
+  /// The system camera can be asked for a photo or a video to attach.
+  static bool get canCapture => Platform.isAndroid;
+
+  /// Take a photo (or record a video) with the system camera app. The file's path, or null if cancelled.
+  static Future<String?> capture({bool video = false}) => _channel.invokeMethod<String>('capture', {'video': video});
+
   /// Where a file downloaded to be opened or shared goes. On Android it must be the cache's
   /// shared/ folder: that is the one place its FileProvider hands out (res/xml/file_paths.xml).
   static Directory get downloadRoot =>
