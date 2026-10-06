@@ -9,6 +9,9 @@ const Map<String, List<String>> fileStrings = {
   'att.open': ['Open', '打开', '開啟'],
   'att.saveAs': ['Save as…', '另存为…', '另存新檔…'],
   'att.share': ['Share…', '分享…', '分享…'],
+  'att.pickFiles': ['Choose files', '选择文件', '選擇檔案'],
+  'att.takePhoto': ['Take a photo', '拍照', '拍照'],
+  'att.recordVideo': ['Record a video', '录像', '錄影'],
   'att.saved': ['Saved to {path}', '已保存到 {path}', '已儲存至 {path}'],
   'att.close': ['Close', '关闭', '關閉'],
   'att.noPreview': [

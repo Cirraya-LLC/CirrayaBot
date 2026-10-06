@@ -1290,10 +1290,11 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
       const bot = bots[0]
       run.speaker = bot.id
       emit('start', { botId: bot.id })
-      await askSolo(providers.get(bot.id), bot,
+      const reply = await askSolo(providers.get(bot.id), bot,
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
         d => emit('delta', { botId: bot.id, text: d }), tool(bot.id), signal, lang, gateFor(bot), session)
       emit('end', { botId: bot.id })
+      notify({ kind: 'reply', conv: { kind: 'agent', id: bot.id, name: bot.name }, session, agent: bot.name, text: reply })
       return
     }
     const g = (await db.listGroups()).find(x => x.id === scopeId)
@@ -1303,14 +1304,40 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
     const speaker = (wake && bots.find(b => b.id === wake.speaker)) || (text != null && findMention(text, bots)) || coordinator
     run.speaker = speaker.id
     emit('start', { botId: speaker.id })
-    await askInGroup(providers.get(speaker.id), speaker, bots.filter(b => b.id !== speaker.id), coordinator,
+    const reply = await askInGroup(providers.get(speaker.id), speaker, bots.filter(b => b.id !== speaker.id), coordinator,
       { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
         group: await db.getMemory('group', scopeId) },
       d => emit('delta', { botId: speaker.id, text: d }), tool(speaker.id),
       scopeId, signal, lang, gateFor(speaker), session)
+    notify({ kind: 'reply', conv: { kind: 'group', id: scopeId, name: g?.name ?? scopeId }, session, agent: speaker.name, text: reply })
     emit('end', { botId: speaker.id })
   }
 }
+
+// ---------- Notifications ----------
+// One feed for everything a person may want to hear about while not looking: a reply finished, a
+// task asks something, a command waits for approval. The server doesn't know who is looking —
+// a phone locked mid-reply still has its stream open — so every client gets every notice and
+// decides itself (the web page: hidden, or another conversation open; Android: app not in front).
+// Kept in memory, the last NOTICE_KEEP, so a client that reconnects gets what it missed
+// (SSE Last-Event-ID, or ?after=); a restart forgets them.
+const NOTICE_KEEP = 300
+const notices = []
+const noticeSubs = new Set()
+let noticeSeq = Date.now()            // ids keep growing across restarts, so a client's "after" stays meaningful
+
+/** Plain text for a notification: no code fences, Markdown marks or long whitespace. */
+const noticeText = t => String(t ?? '').replace(/```[\s\S]*?```/g, ' [code] ').replace(/[*_`#>|]/g, '')
+  .replace(/\s+/g, ' ').trim().slice(0, 180)
+
+function notify(n) {
+  const notice = { id: ++noticeSeq, at: Date.now(), ...n, text: noticeText(n.text) }
+  notices.push(notice)
+  if (notices.length > NOTICE_KEEP) notices.shift()
+  for (const send of noticeSubs) send(notice)
+}
+
+const noticesAfter = after => notices.filter(x => x.id > after)
 
 // ---------- Background tasks ----------
 // The rules are in tasks.mjs. A task runs as its agent, on its machine, one at a time per agent
@@ -1345,6 +1372,14 @@ async function taskEvent(t, kind, text = '', extra = {}) {
   await db.addEvent(t.scope, t.scope_id, t.session_id, agent,
     { task: Number(t.id), kind, agent, agent_id: t.agent_id, title: t.title, text: clipText(text, RESULT_MAX), ...extra })
   if (wakes(kind)) wakeFront(t)
+  // What only the person can unblock is worth a notification of its own; a task finishing is told by
+  // the front thread's reply (the wake-up), which notifies like any reply.
+  if (kind === 'asked' || kind === 'approval') {
+    const conv = t.scope === 'group'
+      ? { kind: 'group', id: t.scope_id, name: (await db.listGroups()).find(g => g.id === t.scope_id)?.name ?? t.scope_id }
+      : { kind: 'agent', id: t.scope_id, name: agent }
+    notify({ kind, conv, session: t.session_id, agent, task: Number(t.id), text })
+  }
 }
 
 /**
@@ -2197,6 +2232,25 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === 'GET' || req.method === 'HEAD') return serveFile(req, res, f, url.searchParams.get('download') === '1')
     }
+
+    // ---- Notifications ----
+    // The feed: SSE, every notice as `event: notice` with its id. Reconnecting with Last-Event-ID (or
+    // ?after=) replays what was missed. A comment line every 25s keeps proxies and phones from
+    // taking the quiet connection for a dead one.
+    if (url.pathname === '/api/notifications/stream' && req.method === 'GET') {
+      const after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? 0) || 0
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
+      const send = n => { if (!res.destroyed) res.write(`id: ${n.id}\nevent: notice\ndata: ${JSON.stringify(n)}\n\n`) }
+      // the newest id first, so a client that missed nothing knows where it stands
+      res.write(`event: hello\ndata: ${JSON.stringify({ last: noticeSeq })}\n\n`)
+      if (after) for (const n of noticesAfter(after)) send(n)
+      noticeSubs.add(send)
+      const ping = setInterval(() => { if (!res.destroyed) res.write(': ping\n\n') }, 25_000)
+      res.on('close', () => { clearInterval(ping); noticeSubs.delete(send) })
+      return
+    }
+    if (url.pathname === '/api/notifications' && req.method === 'GET')
+      return send(200, { last: noticeSeq, notices: noticesAfter(Number(url.searchParams.get('after')) || 0) })
 
     // ---- Background tasks ----
     // A conversation's tasks, newest first: ?kind=agent|group&id=

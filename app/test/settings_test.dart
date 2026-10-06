@@ -147,4 +147,19 @@ void main() {
     }
     expect((await tester.runAsync(store.load))!.theme, ThemeMode.dark);
   });
+
+  test('interface size and notifications survive a save/load round trip; old files get the defaults', () async {
+    final dir = await Directory.systemTemp.createTemp('settings-scale');
+    final store = SettingsStore(dir: dir);
+    await store.save(const Settings(baseUrl: 'http://x:1', uiScale: 1.3, notify: false));
+    final back = await store.load();
+    expect(back.uiScale, 1.3);
+    expect(back.notify, isFalse);
+    // a settings file from before these existed
+    await File('${dir.path}/settings.json').writeAsString('{"baseUrl":"http://x:1","token":"t"}');
+    final old = await store.load();
+    expect(old.uiScale, 0, reason: 'automatic');
+    expect(old.notify, isTrue, reason: 'on unless turned off');
+    await dir.delete(recursive: true);
+  });
 }

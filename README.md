@@ -39,6 +39,9 @@ of each answering on their own.
 - **Bring your own model upstream** — name / endpoint URL / key / model / context window.
   Configure several and switch any time. Three API shapes are supported:
   OpenAI Chat Completions, OpenAI Responses and Anthropic Messages.
+- **Notifications** — when a reply lands, or an Agent needs an answer or an approval, while you aren't
+  looking: in the browser (the bell in the sidebar footer) and on Android, also when the app is closed (a small
+  background connection; no Google services needed).
 - **Three UI languages** — the web UI and the desktop client support English (default),
   Simplified Chinese (简体中文) and Traditional Chinese (繁體中文), switchable in the UI
   (the 🌐 icon in the sidebar footer; the desktop client also on its setup screen).
@@ -223,7 +226,10 @@ work in the client, on the same data as the web UI. Details in `app/README.md`.
 The same client builds for Android phones (Android 7 and later). On a phone it shows one thing at
 a time: the conversation list, then the chat (back arrow or the system back gesture to return);
 the side panel slides in from the right. Files are picked with the system picker; PDFs, videos and
-the like open in your phone's own apps, and "Share…" saves or sends them.
+the like open in your phone's own apps, and "Share…" saves or sends them. The paperclip can also take a photo or record a
+video. Notifications keep coming while the app is closed; the first start asks for permission and to be spared
+from battery optimisation (without it the phone cuts the connection while it sleeps). Everything is drawn 15%
+larger on a phone; Appearance → Size changes it.
 
 ```bash
 cd app

@@ -23,6 +23,7 @@ class Settings {
     this.sidebarWidth = defaultSidebarWidth,
     this.panelWidth = defaultPanelWidth,
     this.uiScale = 0,
+    this.notify = true,
   });
 
   static const double defaultSidebarWidth = 308;
@@ -51,6 +52,9 @@ class Settings {
   /// Interface size: 0 = automatic (see effectiveScale), else a factor.
   final double uiScale;
 
+  /// Notifications while the app is closed (Android). On unless turned off.
+  final bool notify;
+
   bool get configured => baseUrl.isNotEmpty;
 
   Settings copyWith({
@@ -62,6 +66,7 @@ class Settings {
     double? sidebarWidth,
     double? panelWidth,
     double? uiScale,
+    bool? notify,
   }) => Settings(
     baseUrl: normaliseUrl(baseUrl ?? this.baseUrl),
     token: token ?? this.token,
@@ -71,6 +76,7 @@ class Settings {
     sidebarWidth: sidebarWidth ?? this.sidebarWidth,
     panelWidth: panelWidth ?? this.panelWidth,
     uiScale: uiScale ?? this.uiScale,
+    notify: notify ?? this.notify,
   );
 
   Map<String, Object?> toJson() => {
@@ -82,6 +88,7 @@ class Settings {
     'sidebarWidth': sidebarWidth,
     'panelWidth': panelWidth,
     'uiScale': uiScale,
+    'notify': notify,
   };
 
   static Settings fromJson(Map<String, Object?> j) => Settings(
@@ -93,6 +100,7 @@ class Settings {
     sidebarWidth: (j['sidebarWidth'] as num?)?.toDouble() ?? defaultSidebarWidth,
     panelWidth: (j['panelWidth'] as num?)?.toDouble() ?? defaultPanelWidth,
     uiScale: (j['uiScale'] as num?)?.toDouble() ?? 0,
+    notify: (j['notify'] as bool?) ?? true,
   );
 
   /// Anything unrecognised means "follow the desktop" — the answer that is

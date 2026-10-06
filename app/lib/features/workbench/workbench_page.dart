@@ -53,9 +53,15 @@ class WorkbenchPage extends StatefulWidget {
     this.sidebarWidth = Settings.defaultSidebarWidth,
     this.panelWidth = Settings.defaultPanelWidth,
     this.onResized,
+    this.notify,
+    this.onNotify,
   });
 
   final Workbench bench;
+
+  /// Background notifications (Android): null where there are none to switch.
+  final bool? notify;
+  final ValueChanged<bool>? onNotify;
   final VoidCallback onEditServer;
 
   /// Restored from the settings file; [onCollapsed] writes it back.
@@ -126,14 +132,31 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   void initState() {
     super.initState();
     bench.addListener(_onChange);
+    AppPlatform.onOpenConversation(_openTarget);
     _boot();
   }
 
   Future<void> _boot() async {
     await bench.refresh();
+    // Started by tapping a notification: straight to that conversation.
+    final target = await AppPlatform.launchTarget().catchError((Object _) => null);
+    if (target != null && mounted) return _openTarget(target);
     // Coming back from server settings keeps the conversation that was open.
     final start = bench.current ?? bench.conversations.firstOrNull;
     if (start != null && mounted) await bench.open(start);
+  }
+
+  /// A notification was tapped: open what it was about, in the session it happened in.
+  Future<void> _openTarget(Map<String, String> t) async {
+    if (bench.conversations.isEmpty) await bench.refresh();
+    final c = bench.conversations.where((x) => x.kind == t['kind'] && x.id == t['id']).firstOrNull;
+    if (c == null || !mounted) return;
+    if (_phone(context)) setState(() => _phoneChat = true);
+    await bench.open(c);
+    final session = t['session'] ?? '';
+    if (session.isNotEmpty && session != bench.session && bench.sessions.any((x) => x.id == session)) {
+      await bench.openSession(session);
+    }
   }
 
   String? _shownId;
@@ -377,6 +400,31 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   }
 
   Future<void> _pickFiles() async {
+    // A phone has a camera: offer it beside the file picker.
+    if (AppPlatform.canCapture) {
+      final how = await showModalBottomSheet<String>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final (key, icon, label) in [
+                ('files', Icons.folder_open_outlined, tr('att.pickFiles')),
+                ('photo', Icons.photo_camera_outlined, tr('att.takePhoto')),
+                ('video', Icons.videocam_outlined, tr('att.recordVideo')),
+              ])
+                ListTile(leading: Icon(icon), title: Text(label), onTap: () => Navigator.of(ctx).pop(key)),
+            ],
+          ),
+        ),
+      );
+      if (how == null) return;
+      if (how != 'files') {
+        final path = await AppPlatform.capture(video: how == 'video').catchError((Object _) => null);
+        if (path != null) await bench.attach([path]);
+        return;
+      }
+    }
     final picked = await openFiles();
     if (picked.isEmpty) return;
     await bench.attach([for (final f in picked) f.path]);
@@ -741,6 +789,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     }),
                     _footIcon(Icons.auto_awesome_outlined, tr('wb.skillLibrary'), () => _openSkills()),
                     _footIcon(Icons.dns_outlined, tr('wb.server'), widget.onEditServer),
+                    if (widget.notify != null)
+                      _footIcon(
+                        widget.notify! ? Icons.notifications_active_outlined : Icons.notifications_off_outlined,
+                        tr(widget.notify! ? 'nt.on' : 'nt.off'),
+                        () => widget.onNotify?.call(!widget.notify!),
+                      ),
                     // The app root persists these choices and rebuilds everything.
                     PopupMenuButton<Object>(
                       tooltip: tr('common.theme'),

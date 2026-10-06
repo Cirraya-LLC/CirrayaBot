@@ -1657,6 +1657,54 @@ input.addEventListener('paste', e => {
   })
 }
 
+// ═══ Notifications ═══
+// The server sends every notice to every client (it can't know who is looking). This page shows
+// one only when it is in the background or another conversation is open; clicking it brings the
+// page forward on that conversation. Off until the person turns it on (the browser asks first).
+const NT_KEY = 'ma_notify'
+const ntWanted = () => { try { return localStorage.getItem(NT_KEY) === 'on' } catch { return false } }
+const ntOn = () => ntWanted() && 'Notification' in window && Notification.permission === 'granted'
+function paintNotif() {
+  const b = $('#notifbtn')
+  b.classList.toggle('on', ntOn())
+  b.dataset.tipKey = ntOn() ? 'nt.on' : 'nt.off'
+}
+$('#notifbtn').onclick = async () => {
+  if (!('Notification' in window)) return
+  if (ntOn()) { try { localStorage.setItem(NT_KEY, 'off') } catch {} paintNotif(); return }
+  const p = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
+  if (p !== 'granted') { note(t('nt.denied')); paintNotif(); return }
+  try { localStorage.setItem(NT_KEY, 'on') } catch {}
+  paintNotif()
+}
+paintNotif()
+
+function noticeTitle(n) {
+  if (n.kind === 'asked') return t('nt.asked', { name: n.agent })
+  if (n.kind === 'approval') return t('nt.approval', { name: n.agent })
+  return n.conv?.kind === 'group' ? t('nt.replyIn', { name: n.agent, conv: n.conv.name }) : n.agent
+}
+
+function onNotice(n) {
+  const looking = !document.hidden && cur && n.conv && cur.kind === n.conv.kind && cur.id === n.conv.id
+  // the list's previews and order follow the news either way
+  fetch(api('/api/conversations')).then(r => r.json()).then(list => { CONVS = list; renderConvs() }).catch(() => {})
+  if (looking || !ntOn()) return
+  const shown = new Notification(noticeTitle(n), { body: n.text ?? '', tag: `${n.conv?.kind}:${n.conv?.id}` })
+  shown.onclick = () => {
+    window.focus()
+    const c = CONVS.find(x => x.kind === n.conv?.kind && x.id === n.conv?.id)
+    if (c) { if (n.session) lastSession.set(convKey(c), n.session); openConv(c) }
+    shown.close()
+  }
+}
+
+// EventSource reconnects by itself and sends Last-Event-ID, so nothing is missed across a blip.
+if ('EventSource' in window) {
+  const es = new EventSource(api('/api/notifications/stream'))
+  es.addEventListener('notice', e => { try { onNotice(JSON.parse(e.data)) } catch {} })
+}
+
 // ═══ Background tasks ═══
 // Work a conversation handed out. They run on their own and report back into the conversation as
 // event cards; this list is where to see them all, answer one, approve one, or stop one.
