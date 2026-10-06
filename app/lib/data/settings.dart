@@ -22,6 +22,7 @@ class Settings {
     this.sidebarCollapsed = false,
     this.sidebarWidth = defaultSidebarWidth,
     this.panelWidth = defaultPanelWidth,
+    this.uiScale = 0,
   });
 
   static const double defaultSidebarWidth = 308;
@@ -47,6 +48,9 @@ class Settings {
   final double sidebarWidth;
   final double panelWidth;
 
+  /// Interface size: 0 = automatic (see effectiveScale), else a factor.
+  final double uiScale;
+
   bool get configured => baseUrl.isNotEmpty;
 
   Settings copyWith({
@@ -57,6 +61,7 @@ class Settings {
     bool? sidebarCollapsed,
     double? sidebarWidth,
     double? panelWidth,
+    double? uiScale,
   }) => Settings(
     baseUrl: normaliseUrl(baseUrl ?? this.baseUrl),
     token: token ?? this.token,
@@ -65,6 +70,7 @@ class Settings {
     sidebarCollapsed: sidebarCollapsed ?? this.sidebarCollapsed,
     sidebarWidth: sidebarWidth ?? this.sidebarWidth,
     panelWidth: panelWidth ?? this.panelWidth,
+    uiScale: uiScale ?? this.uiScale,
   );
 
   Map<String, Object?> toJson() => {
@@ -75,6 +81,7 @@ class Settings {
     'sidebarCollapsed': sidebarCollapsed,
     'sidebarWidth': sidebarWidth,
     'panelWidth': panelWidth,
+    'uiScale': uiScale,
   };
 
   static Settings fromJson(Map<String, Object?> j) => Settings(
@@ -85,6 +92,7 @@ class Settings {
     sidebarCollapsed: (j['sidebarCollapsed'] as bool?) ?? false,
     sidebarWidth: (j['sidebarWidth'] as num?)?.toDouble() ?? defaultSidebarWidth,
     panelWidth: (j['panelWidth'] as num?)?.toDouble() ?? defaultPanelWidth,
+    uiScale: (j['uiScale'] as num?)?.toDouble() ?? 0,
   );
 
   /// Anything unrecognised means "follow the desktop" — the answer that is

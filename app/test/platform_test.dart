@@ -13,7 +13,8 @@ void main() {
       if (f is! File || !f.path.endsWith('.dart')) continue;
       if (f.path.endsWith('platform.dart')) continue;
       final src = f.readAsStringSync();
-      if (RegExp(r'Platform\.is[A-Z]').hasMatch(src)) offenders.add(f.path);
+      // AppPlatform.isPhone and friends are the sanctioned way to ask; dart:io's Platform.isX is not.
+      if (RegExp(r'(?<!App)Platform\.is[A-Z]').hasMatch(src)) offenders.add(f.path);
     }
     expect(offenders, isEmpty, reason: 'move the difference into lib/platform.dart: $offenders');
   });

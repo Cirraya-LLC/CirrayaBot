@@ -1,0 +1,19 @@
+# HTTPS in front of the app — only runs when PUBLIC_HOST is set (start.sh turns the "https"
+# compose profile on). Plain http keeps working on WEB_PORT; this adds https on 443.
+{
+	# Certificates over port 443 alone (TLS-ALPN-01): port 80 is often taken by something else
+	# on the machine, or not reachable. The http port inside the container is never published.
+	auto_https disable_redirects
+	http_port 8081
+}
+
+{$PUBLIC_HOST} {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	# Streams (SSE replies, the notification feed) and the browser's WebSocket pass straight
+	# through; Caddy sets X-Forwarded-Proto, which is how the app knows to mark its cookie Secure.
+	reverse_proxy app:8080
+}

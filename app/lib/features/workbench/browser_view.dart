@@ -216,10 +216,25 @@ class _BrowserThumbState extends State<BrowserThumb> with _ShotPoller {
 /// back over the screencast stream. Address bar, back and reload stay as
 /// separate requests — they are not typing.
 class BrowserPage extends StatefulWidget {
-  const BrowserPage({super.key, required this.api, required this.agentId, required this.name});
+  const BrowserPage({
+    super.key,
+    required this.api,
+    required this.agentId,
+    required this.name,
+    this.debugShot,
+    this.debugInput,
+  });
   final Api api;
   final String agentId;
   final String name;
+
+  /// Tests: start on this picture instead of waiting for the server.
+  @visibleForTesting
+  final ({Uint8List image, String url, String title})? debugShot;
+
+  /// Tests: every input event goes here instead of the WebSocket.
+  @visibleForTesting
+  final void Function(Map<String, Object?> event)? debugInput;
 
   @override
   State<BrowserPage> createState() => _BrowserPageState();
@@ -280,10 +295,14 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
   @override
   void initState() {
     super.initState();
+    if (widget.debugShot != null) {
+      shot = widget.debugShot;
+      loaded = true;
+    }
     startPolling();
     _ime.addListener(_onIme);
     _keys.addListener(() => setState(() {}));
-    _connectInput();
+    if (widget.debugInput == null) _connectInput();
   }
 
   Future<void> _connectInput() async {
@@ -313,6 +332,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
   void dispose() {
     _ws?.close();
     _moveTimer?.cancel();
+    _wheelTimer?.cancel();
     _imeIdle?.cancel();
     _address.dispose();
     _addressFocus.dispose();
@@ -329,6 +349,11 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
   }
 
   void _send(Map<String, Object?> e) {
+    final sink = widget.debugInput;
+    if (sink != null) {
+      sink(e);
+      return;
+    }
     final ws = _ws;
     if (ws != null) {
       ws.add(jsonEncode(e));
@@ -386,19 +411,103 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
 
   String _downButton = 'left';
 
+  /// Two presses close in time and place are a double click (three, a triple).
+  void _countClick(Offset p, {double near = 6}) {
+    final now = DateTime.now();
+    final close = (p - _lastDownAt).distance < near;
+    _clickCount = now.difference(_lastDown) < const Duration(milliseconds: 400) && close ? _clickCount + 1 : 1;
+    _lastDown = now;
+    _lastDownAt = p;
+  }
+
   void _down(PointerDownEvent e, Size box) {
     _keys.requestFocus(); // clicking into the page hands it the keyboard
-    final now = DateTime.now();
-    final near = (e.localPosition - _lastDownAt).distance < 6;
-    _clickCount = now.difference(_lastDown) < const Duration(milliseconds: 400) && near ? _clickCount + 1 : 1;
-    _lastDown = now;
-    _lastDownAt = e.localPosition;
+    _countClick(e.localPosition);
     _downButton = _button(e.buttons);
     _send({'t': 'down', ..._at(e.localPosition, box), 'button': _downButton, 'count': _clickCount});
   }
 
   void _up(PointerUpEvent e, Size box) =>
       _send({'t': 'up', ..._at(e.localPosition, box), 'button': _downButton, 'count': _clickCount});
+
+  // ── touch ──
+  // A finger is not a mouse. As in a phone's browser, a tap clicks and a drag scrolls the page —
+  // sent as a mouse drag it would select text instead. One finger at a time; others are ignored.
+  // The mouse and trackpad keep the handling above (hover, drags, buttons) unchanged.
+  int? _touch;
+  Offset _touchStart = Offset.zero;
+  bool _touchScrolling = false;
+
+  /// Scroll not sent yet, in page pixels, and where on the page it happens.
+  Offset _wheel = Offset.zero;
+  Offset _wheelAt = Offset.zero;
+  Timer? _wheelTimer;
+
+  /// The last thing that pressed on the page was a finger (the hint under it says "tap", not "click").
+  bool? _lastWasTouch;
+
+  static bool _isTouch(PointerEvent e) =>
+      e.kind == PointerDeviceKind.touch ||
+      e.kind == PointerDeviceKind.stylus ||
+      e.kind == PointerDeviceKind.invertedStylus;
+
+  void _pointerDown(PointerDownEvent e, Size box) {
+    final touch = _isTouch(e);
+    if (_lastWasTouch != touch) setState(() => _lastWasTouch = touch);
+    if (!touch) return _down(e, box);
+    if (_touch != null) return;
+    // Nothing is sent yet: whether this is a tap or a drag is only known later.
+    _touch = e.pointer;
+    _touchStart = e.localPosition;
+    _touchScrolling = false;
+  }
+
+  void _pointerMove(PointerMoveEvent e, Size box) {
+    if (!_isTouch(e)) return _move(e.localPosition, box);
+    if (e.pointer != _touch) return;
+    final scale = _viewW / box.width;
+    if (!_touchScrolling) {
+      if ((e.localPosition - _touchStart).distance < kTouchSlop) return;
+      _touchScrolling = true;
+      // Count the way travelled before it became a drag, too.
+      _wheel -= (e.localPosition - _touchStart) * scale;
+    } else {
+      // Dragging the page up shows what is below it: a wheel turn down.
+      _wheel -= e.localDelta * scale;
+    }
+    _wheelAt = e.localPosition;
+    _wheelTimer ??= Timer(const Duration(milliseconds: 30), () => _flushWheel(box));
+  }
+
+  /// Wheel turns are many while a finger moves; send at most one every 30 ms, all of it.
+  void _flushWheel(Size box) {
+    _wheelTimer?.cancel();
+    _wheelTimer = null;
+    if (_wheel == Offset.zero) return;
+    _send({'t': 'wheel', ..._at(_wheelAt, box), 'dx': _wheel.dx, 'dy': _wheel.dy});
+    _wheel = Offset.zero;
+  }
+
+  void _pointerUp(PointerUpEvent e, Size box) {
+    if (!_isTouch(e)) return _up(e, box);
+    if (e.pointer != _touch) return;
+    _touch = null;
+    if (_touchScrolling) return _flushWheel(box);
+    // A tap: the click a mouse would make there, and the keyboard goes to the page.
+    _keys.requestFocus();
+    _countClick(e.localPosition, near: kTouchSlop);
+    final at = _at(e.localPosition, box);
+    _send({'t': 'down', ...at, 'button': 'left', 'count': _clickCount});
+    _send({'t': 'up', ...at, 'button': 'left', 'count': _clickCount});
+  }
+
+  void _pointerCancel(PointerCancelEvent e) {
+    if (e.pointer != _touch) return;
+    _touch = null;
+    _wheelTimer?.cancel();
+    _wheelTimer = null;
+    _wheel = Offset.zero;
+  }
 
   // ── keyboard ──
   /// What of the sink's text has already been sent.
@@ -450,13 +559,24 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
   Widget build(BuildContext context) {
     final s = shot;
     final typing = _keys.hasFocus;
+    // A phone: the picture takes the width, with no margin to spare.
+    final narrow = MediaQuery.sizeOf(context).width < 640;
+    final side = narrow ? 4.0 : 14.0;
+    final touch = _lastWasTouch ?? narrow;
     return Scaffold(
       appBar: AppBar(
         backgroundColor: C.side,
         titleSpacing: 0,
         title: Row(
           children: [
-            Text(tr('br.title', {'name': widget.name}), style: const TextStyle(fontSize: 14.5)),
+            Flexible(
+              child: Text(
+                tr('br.title', {'name': widget.name}),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 14.5),
+              ),
+            ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
@@ -485,7 +605,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+            padding: EdgeInsets.fromLTRB(side, 10, side, 8),
             child: Row(
               children: [
                 Expanded(
@@ -504,7 +624,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
           ),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
+              padding: EdgeInsets.symmetric(horizontal: side),
               child: Center(
                 child: s == null
                     ? Text(tr(loaded ? 'br.notOpenLong' : 'br.connecting'), style: TextStyle(color: C.dim))
@@ -541,9 +661,10 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
                                     cursor: SystemMouseCursors.basic,
                                     onHover: (e) => _move(e.localPosition, box.biggest),
                                     child: Listener(
-                                      onPointerDown: (e) => _down(e, box.biggest),
-                                      onPointerMove: (e) => _move(e.localPosition, box.biggest),
-                                      onPointerUp: (e) => _up(e, box.biggest),
+                                      onPointerDown: (e) => _pointerDown(e, box.biggest),
+                                      onPointerMove: (e) => _pointerMove(e, box.biggest),
+                                      onPointerUp: (e) => _pointerUp(e, box.biggest),
+                                      onPointerCancel: _pointerCancel,
                                       onPointerSignal: (e) {
                                         if (e is PointerScrollEvent) {
                                           _send({
@@ -573,7 +694,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+            padding: EdgeInsets.fromLTRB(side == 4 ? 8 : 14, 8, side == 4 ? 8 : 14, 10),
             child: Row(
               children: [
                 Expanded(
@@ -586,11 +707,16 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
                                   ? 'br.noDirect'
                                   : typing
                                   ? 'br.typing'
+                                  : touch
+                                  ? 'br.tapToType'
                                   : 'br.clickToType',
                             ),
                             tr(streaming ? 'br.live' : 'br.polling'),
                             tr('br.shared', {'name': widget.name}),
                           ].join(' · '),
+                    // A short screen with the keyboard up has little room below the picture.
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 11.5, color: error.isNotEmpty ? C.code : C.dim2),
                   ),
                 ),

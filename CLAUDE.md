@@ -1967,12 +1967,36 @@ awake while charging: `settings global stay_on_while_plugged_in 7`).
   by back before the chat, no overflow. It caught the header squeezing the title to nothing at 360 and the panel
   overflow.
 
+- **Bigger on a phone** (the boss: 「是不是图标 文字之类的都太小了」): `UiScale` (theme/app_theme.dart) lays the
+  whole app out at screen/scale and stretches it — text, icons and spacing together, dialogs and menus included
+  (it wraps the navigator via `MaterialApp.builder`); size, safe areas and the keyboard inset are divided by the
+  factor so layout still lines up. Appearance menu: Automatic (phone 115%, desktop 100%) / 100 / 115 / 130%,
+  stored as `uiScale`. `phone_test.dart` runs at ×1.15 and 360 wide ×1.3 (= 277 logical px) too.
+- **Browser takeover by touch** (`browser_view.dart`): tap = click (sent on lift, within the touch slop), drag =
+  `wheel` scroll in page pixels, inverted; mouse/trackpad unchanged; picture fits the phone width.
+  `test/browser_touch_test.dart` via a `debugInput` seam.
+
 Verified on the Pixel 5a (debug and release builds): connect by pasting the `?k=` link, list, open a chat, Lin's
 files (Markdown preview, image preview), **Open** (the image opened in Google Photos), **Share…** (system sheet),
 picking a photo from the phone and sending it — the real model answered "The image is blue." — right panel,
 back gesture, cold start landing at the bottom with tall images. Release APK (arm64) 19 MB.
-**Not done**: iOS; push notifications (a task finishing while the app is closed tells nobody); touch for the
-browser takeover (taps work as clicks, drags don't scroll); camera capture; drag-and-drop/paste of files.
+**Not done**: iOS; drag-and-drop/paste of files. (Notifications and camera: 2.34.)
+
+## 2.34 HTTPS beside http, and a phone that reaches it directly (2026-10-06)
+
+The boss: 「http https 都要可以才行啊」 — both have to work.
+
+- The app still serves plain http on `WEB_PORT`. **`PUBLIC_HOST=<domain>` in `.env` adds HTTPS**: start.sh sets
+  `COMPOSE_PROFILES=https`, which brings up a `caddy:2-alpine` service (`deploy/Caddyfile`) on port 443 that gets
+  and renews its own certificate and proxies to `app:8080` (SSE and the browser WebSocket pass through; it sets
+  `X-Forwarded-Proto`, so the cookie is marked Secure). Empty `PUBLIC_HOST` = http only, as before.
+- ⚠️ **Certificates over 443 only** (TLS-ALPN-01, `disable_http_challenge`, `http_port 8081` unpublished): port 80
+  is often someone else's — on the test box it is another project's nginx. So 443 itself must be reachable at that
+  name; another HTTPS port can't get a certificate this way.
+- No domain? `<ip-with-dashes>.sslip.io` resolves to that IP and Let's Encrypt issues for it.
+- Test box: `PUBLIC_HOST=216-195-194-137.sslip.io`, `BIND_ADDR=0.0.0.0` (http on 18090 from outside too).
+  Certificate obtained in ~7s (Let's Encrypt, valid to 2027-01). The phone now connects to
+  `https://216-195-194-137.sslip.io` directly — no USB, no tunnel.
 
 ## 3. What runs now
 

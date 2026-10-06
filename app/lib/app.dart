@@ -35,6 +35,14 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
     currentLang.addListener(_langChanged);
     currentTheme.value = _settings.theme;
     currentTheme.addListener(_themeChanged);
+    currentScale.value = _settings.uiScale;
+    currentScale.addListener(_scaleChanged);
+  }
+
+  void _scaleChanged() {
+    _settings = _settings.copyWith(uiScale: currentScale.value);
+    widget.store.save(_settings).ignore();
+    if (mounted) setState(() {});
   }
 
   void _themeChanged() {
@@ -76,6 +84,7 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
   void dispose() {
     currentLang.removeListener(_langChanged);
     currentTheme.removeListener(_themeChanged);
+    currentScale.removeListener(_scaleChanged);
     _bench?.dispose();
     super.dispose();
   }
@@ -103,6 +112,8 @@ class _MultiAgentAppState extends State<MultiAgentApp> {
       // Material cross-fades themes over 200ms while C.* flips at once, which
       // leaves half the window mid-fade. Everything switches together instead.
       themeAnimationDuration: Duration.zero,
+      // Around the navigator, so dialogs, menus and pushed pages are scaled too.
+      builder: (context, child) => UiScale(scale: effectiveScale(currentScale.value), child: child!),
       home: (bench == null || _editing)
           ? SetupPage(
               key: ValueKey(_settings.baseUrl),

@@ -21,6 +21,7 @@ const Map<String, List<String>> browserStrings = {
     '鍵盤已交給瀏覽器：直接打字、Ctrl/⌘ 快速鍵都會進他的頁面；點上面的網址列收回',
   ],
   'br.clickToType': ['Click the picture to hand the keyboard to the browser', '点一下画面，键盘就交给浏览器', '點一下畫面，鍵盤就交給瀏覽器'],
+  'br.tapToType': ['Tap to click and type · drag to scroll', '点一下就是点击和输入 · 拖动来滚动页面', '點一下就是點擊和輸入 · 拖動來捲動頁面'],
   'br.live': ['Live view', '实时画面', '即時畫面'],
   'br.polling': ['Screenshot refresh', '截图刷新', '截圖更新'],
   'br.shared': ['You and {name} share the same browser', '你和 {name} 用的是同一个浏览器', '你和 {name} 用的是同一個瀏覽器'],

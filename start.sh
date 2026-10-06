@@ -68,12 +68,18 @@ if [ "$RUNTIME" = podman ] && ! grep -q '^DOCKER_SOCK=..*' .env; then
     echo "⚠️  podman socket not found. Run once: systemctl --user enable --now podman.socket" >&2; exit 1; }
 fi
 
+# HTTPS: a domain in PUBLIC_HOST turns the Caddy service on (compose reads COMPOSE_PROFILES from .env).
+if grep -q '^PUBLIC_HOST=..*' .env; then setkv COMPOSE_PROFILES https; else setkv COMPOSE_PROFILES ""; fi
+
 "${COMPOSE[@]}" up -d --build
 
 set -a; . ./.env; set +a
 ADDR="${BIND_ADDR:-127.0.0.1}"
 echo
 echo "Up: http://${ADDR}:${WEB_PORT:-8080}/?k=${ACCESS_TOKEN}"
+if [ -n "${PUBLIC_HOST:-}" ]; then
+  echo "    https://${PUBLIC_HOST}/?k=${ACCESS_TOKEN}   (the certificate is fetched on the first visit; give it a few seconds)"
+fi
 echo "Data lives in the pgdata volume; Agent workspaces in ./data/workspace"
 echo "The first visit opens \"Model upstreams\" right away; add one and you are ready."
 if [ "${AGENT_TOOLS:-off}" = on ]; then

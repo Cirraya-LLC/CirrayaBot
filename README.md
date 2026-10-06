@@ -231,6 +231,11 @@ flutter build apk --release --split-per-abi    # → build/app/outputs/flutter-a
 adb install build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 ```
 
+**HTTPS.** Put a domain that points at this machine into `.env` as `PUBLIC_HOST=` and run `./start.sh`
+again: a Caddy container serves `https://<PUBLIC_HOST>` on port 443 and gets the certificate itself
+(only port 443 has to be reachable — port 80 isn't used). Plain http keeps working on `WEB_PORT`. No
+domain? `203-0-113-7.sslip.io` resolves to `203.0.113.7`.
+
 The release build is signed with the debug key — fine for installing it yourself, not for Google
 Play. The phone has to reach the server: a public address, the LAN, or over USB with
 `adb reverse tcp:8080 tcp:8080` and `http://127.0.0.1:8080` as the address. Plain `http://` is

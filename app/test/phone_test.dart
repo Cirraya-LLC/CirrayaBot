@@ -11,8 +11,10 @@ import 'package:multi_agent/theme/app_theme.dart';
 void main() {
   // A phone shows one column at a time: the list, then the chat with a way back — the arrow
   // or the system back gesture — and nothing desktop-only (rail toggle, resize grips).
-  for (final size in const [Size(393, 851), Size(360, 640)]) {
-    testWidgets('phone layout at ${size.width.toInt()}x${size.height.toInt()}: list ↔ chat, no overflow', (tester) async {
+  // Sizes as the phone draws them: the interface is scaled up (UiScale), so 360 wide at 130% lays
+  // out in 277 logical pixels.
+  for (final (size, scale) in const [(Size(393, 851), 1.0), (Size(360, 640), 1.0), (Size(393, 851), 1.15), (Size(360, 640), 1.15), (Size(360, 640), 1.3)]) {
+    testWidgets('phone layout at ${size.width.toInt()}x${size.height.toInt()} ×$scale: list ↔ chat, no overflow', (tester) async {
       tester.view.physicalSize = size;
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -26,13 +28,14 @@ void main() {
       bench.loading = false;
       await tester.pumpWidget(MaterialApp(
         theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+        builder: (context, child) => UiScale(scale: scale, child: child!),
         home: WorkbenchPage(bench: bench, onEditServer: () {}, collapsed: false, onCollapsed: (_) {}),
       ));
       await tester.pump();
 
       // the list, full width, without the desktop's rail toggle or grips
       expect(find.text('Operator'), findsOneWidget);
-      expect(tester.getSize(find.byKey(const ValueKey('sidebar'))).width, size.width);
+      expect(tester.getSize(find.byKey(const ValueKey('sidebar'))).width, closeTo(size.width / scale, 0.01));
       expect(find.byTooltip(tr('wb.collapseSidebar')), findsNothing);
       expect(find.byKey(const ValueKey('grip-left')), findsNothing);
       expect(find.byTooltip(tr('wb.back')), findsNothing);

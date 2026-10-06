@@ -59,5 +59,21 @@ services:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH}:/app/workspace
 
+  # HTTPS — only with PUBLIC_HOST set (start.sh then sets COMPOSE_PROFILES=https). Caddy gets and
+  # renews the certificate itself; it must be reachable on port 443 at that name.
+  https:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
+    ports:
+      - "${HTTPS_BIND:-0.0.0.0}:443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+
 volumes:
   pgdata:
+  caddydata:
