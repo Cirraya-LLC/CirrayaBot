@@ -5,9 +5,9 @@ library;
 const Map<String, List<String>> settingsStrings = {
   // Setup
   'setup.intro': [
-    'Connect to the server you deployed. Paste the whole address it printed on\nstartup (the one with ?k=) and both fields fill themselves.',
-    '连到你自己部署的服务器。把启动时打印的那个带 ?k= 的地址\n整条粘进来就行，两个框会自己填好。',
-    '連到你自己部署的伺服器。把啟動時印出的那個帶 ?k= 的位址\n整條貼進來就行，兩個欄位會自己填好。',
+    'Connect to the server you deployed. Paste the whole address it printed on startup (the one with ?k=) and both fields fill themselves.',
+    '连到你自己部署的服务器。把启动时打印的那个带 ?k= 的地址整条粘进来就行，两个框会自己填好。',
+    '連到你自己部署的伺服器。把啟動時印出的那個帶 ?k= 的位址整條貼進來就行，兩個欄位會自己填好。',
   ],
   'setup.urlHint': [
     'Server address, e.g. http://192.168.1.10:8080',

@@ -85,6 +85,8 @@ const Map<String, List<String>> workbenchStrings = {
   'ev.answered': ['You answered task #{id} directly', '你直接回答了任务 #{id}', '你直接回答了任務 #{id}'],
   'ev.over': ['Already answered', '已经回答过了', '已經回答過了'],
   'wb.listSep': [', ', '、', '、'],
+  'wb.back': ['Back to conversations', '返回对话列表', '返回對話列表'],
+  'wb.retry': ['Try again', '重试', '重試'],
   'wb.hideRight': ['Hide side panel', '收起右栏', '收合右欄'],
   'wb.resize': ['Drag to resize · double-click to reset', '拖动调整宽度 · 双击恢复默认', '拖曳調整寬度 · 按兩下還原預設'],
   'wb.collapseSidebar': ['Collapse sidebar', '收起侧栏', '收合側欄'],

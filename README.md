@@ -202,7 +202,7 @@ Without compose, pointing at an existing PostgreSQL:
 DATABASE_URL=postgres://user:pass@127.0.0.1:5432/multiagent node web/server.mjs
 ```
 
-## Desktop client (Windows / macOS)
+## Desktop client (Windows / macOS) and Android
 
 `app/` is a Flutter client that talks to the same server and the same data.
 **There's no account system**: enter the server address and token and go — paste the whole
@@ -217,6 +217,25 @@ flutter build macos   --release
 
 Chatting, creating / editing / deleting Agents and groups, and configuring model upstreams all
 work in the client, on the same data as the web UI. Details in `app/README.md`.
+
+### Android
+
+The same client builds for Android phones (Android 7 and later). On a phone it shows one thing at
+a time: the conversation list, then the chat (back arrow or the system back gesture to return);
+the side panel slides in from the right. Files are picked with the system picker; PDFs, videos and
+the like open in your phone's own apps, and "Share…" saves or sends them.
+
+```bash
+cd app
+flutter build apk --release --split-per-abi    # → build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+adb install build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+```
+
+The release build is signed with the debug key — fine for installing it yourself, not for Google
+Play. The phone has to reach the server: a public address, the LAN, or over USB with
+`adb reverse tcp:8080 tcp:8080` and `http://127.0.0.1:8080` as the address. Plain `http://` is
+allowed (a self-hosted server on a LAN often has no certificate); a server on the internet should
+be behind HTTPS.
 
 ## Known limits
 

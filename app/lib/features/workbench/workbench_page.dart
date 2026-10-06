@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import '../../data/api.dart';
 import '../../data/settings.dart';
 import '../../l10n.dart';
+import '../../platform.dart';
 import 'browser_view.dart';
 import 'editors.dart';
 import '../../state/workbench.dart';
@@ -82,6 +83,9 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   final _scaffold = GlobalKey<ScaffoldState>();
   bool _rightOpen = true;
   late bool _railed = widget.collapsed;
+
+  /// Phone only: the chat is on screen (otherwise the conversation list is).
+  bool _phoneChat = false;
 
   // What was asked for; [_wide] and [_side2] are that, clamped to the window.
   late double _wantWide = widget.sidebarWidth;
@@ -203,10 +207,15 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     if (box == null) return;
     final rect = box.localToGlobal(Offset.zero) & box.size;
     await showSessionPanel(context, bench, rect, focusSearch: focusSearch);
-    if (mounted) _inputFocus.requestFocus();
+    // not on a phone: focus there means the keyboard comes up over what you were reading
+    if (mounted && !_phone(context)) _inputFocus.requestFocus();
   }
 
+  /// The newest line is in view (within a little). While it is, growth below follows it down.
+  bool _atBottom = true;
+
   void _toBottom([int tries = 3]) {
+    _atBottom = true;
     // After the frame, or the extent is still the old one. And again until it
     // stops moving: a lazy list only measures the rows it has built, so the
     // first jump can land short of the newest message.
@@ -281,6 +290,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     try {
       final text = await bench.api.exportChat(c, session);
       final day = DateTime.now().toIso8601String().substring(0, 10);
+      if (!AppPlatform.canSaveAs) {
+        await AppPlatform.shareText('${c.name}-$day.json', text, 'application/json');
+        return;
+      }
       final loc = await getSaveLocation(suggestedName: '${c.name}-$day.json', acceptedTypeGroups: const [_jsonType]);
       if (loc == null) return; // cancelled
       await File(loc.path).writeAsString(text);
@@ -289,6 +302,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       _say(tr('wb.exportFailed', {'msg': e.message}));
     } on FileSystemException catch (e) {
       _say(tr('wb.cantWrite', {'msg': e.osError?.message ?? e.message}));
+    } catch (e) {
+      _say(tr('wb.exportFailed', {'msg': '$e'}));
     }
   }
 
@@ -355,8 +370,9 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     _toBottom();
     await bench.send(text);
     // The field was disabled while busy, which took focus away. Give it back
-    // so the next message can just be typed.
-    if (mounted) _inputFocus.requestFocus();
+    // so the next message can just be typed — not on a phone, where focus brings
+    // up the keyboard and it would cover the reply that just arrived.
+    if (mounted && !_phone(context)) _inputFocus.requestFocus();
     _toBottom();
   }
 
@@ -451,6 +467,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (_phone(context)) return _phoneLayout();
     final narrow = _narrow(context);
     _fitWidths(MediaQuery.sizeOf(context).width, narrow);
     return CallbackShortcuts(
@@ -488,6 +505,35 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     );
   }
 
+  /// A phone: one screen at a time. The list; tap a conversation and the chat replaces it; the
+  /// right panel slides in from the edge. Back — the arrow or the system gesture — returns to the list.
+  Widget _phoneLayout() {
+    final chat = _phoneChat && bench.current != null;
+    final width = MediaQuery.sizeOf(context).width;
+    return PopScope(
+      canPop: !chat,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        // Back closes what is on top first: an open panel, then the chat.
+        final scaffold = _scaffold.currentState;
+        if (scaffold != null && scaffold.isEndDrawerOpen) {
+          scaffold.closeEndDrawer();
+          return;
+        }
+        setState(() => _phoneChat = false);
+      },
+      child: Scaffold(
+        key: _scaffold,
+        endDrawer: Drawer(
+          width: _side2 < width * 0.88 ? _side2 : width * 0.88,
+          shape: const RoundedRectangleBorder(),
+          child: SafeArea(child: _right()),
+        ),
+        body: SafeArea(child: chat ? _centre() : _sidebar()),
+      ),
+    );
+  }
+
   /// Zero when the desktop asks for less motion: the end state, no travel.
   Duration _motion(BuildContext context) =>
       MediaQuery.disableAnimationsOf(context) || _dragging != null
@@ -496,6 +542,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 
   // ── left ──────────────────────────────────────────────────────────────
   Widget _sidebar() {
+    // On a phone the list is the whole screen: full width, no rail.
+    final phone = _phone(context);
+    final w = phone ? MediaQuery.sizeOf(context).width : _wide;
+    final railed = !phone && _railed;
     final filter = _search.text.trim().toLowerCase();
     final rows = bench.conversations.where((c) {
       if (filter.isEmpty) return true;
@@ -507,18 +557,18 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       key: const ValueKey('sidebar'),
       duration: motion,
       curve: Curves.easeInOutCubic,
-      width: _railed ? _rail : _wide,
+      width: railed ? _rail : w,
       decoration: BoxDecoration(
         color: C.side,
         border: Border(right: BorderSide(color: C.line)),
       ),
-      // OverflowBox pins the child at _wide whatever the parent has animated
+      // OverflowBox pins the child at w whatever the parent has animated
       // down to, so the rows are clipped rather than re-laid-out.
       child: ClipRect(
         child: OverflowBox(
           alignment: Alignment.centerLeft,
-          minWidth: _wide,
-          maxWidth: _wide,
+          minWidth: w,
+          maxWidth: w,
           child: Column(
         children: [
           SizedBox(
@@ -531,9 +581,9 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   left: 0,
                   top: 0,
                   bottom: 0,
-                  width: _wide,
-                  child: _fade(!_railed, motion, IgnorePointer(
-                    ignoring: _railed,
+                  width: w,
+                  child: _fade(!railed, motion, IgnorePointer(
+                    ignoring: railed,
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(14, 14, 8, 10),
                       child: Row(
@@ -558,8 +608,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   top: 0,
                   bottom: 0,
                   width: _rail,
-                  child: _fade(_railed, motion, IgnorePointer(
-                    ignoring: !_railed,
+                  child: _fade(railed, motion, IgnorePointer(
+                    ignoring: !railed,
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -602,17 +652,30 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                 ? Center(
                     child: Padding(
                       padding: const EdgeInsets.all(16),
-                      child: Text(
-                        tr('wb.noConversations'),
-                        textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 12.5, color: C.dim2),
+                      // Couldn't load is not "there is nothing": say which, and offer another try.
+                      // (The error also shows in the chat column, which a phone's list doesn't have.)
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            bench.error ?? tr('wb.noConversations'),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 12.5, color: bench.error != null ? C.bad : C.dim2),
+                          ),
+                          if (bench.error != null)
+                            TextButton(onPressed: bench.refresh, child: Text(tr('wb.retry'))),
+                        ],
                       ),
                     ),
                   )
-                : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                    itemCount: rows.length,
-                    itemBuilder: (_, i) => _row(rows[i]),
+                : RefreshIndicator(
+                    // pull down to reload, the way a phone list works (harmless with a mouse)
+                    onRefresh: bench.refresh,
+                    child: ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                      itemCount: rows.length,
+                      itemBuilder: (_, i) => _row(rows[i]),
+                    ),
                   ),
           ),
           const Divider(height: 1),
@@ -651,6 +714,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   /// it fades out with the labels. Names come from tooltips, collapsed or not.
   Widget _foot() {
     final motion = _motion(context);
+    final phone = _phone(context);
+    final railed = !phone && _railed;
     final day = moneyText(bench.usage.day.costMicro ?? 0);
     final month = moneyText(bench.usage.month.costMicro ?? 0);
     return SizedBox(
@@ -658,16 +723,17 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       child: Row(
         children: [
           const SizedBox(width: (_rail - 32) / 2),
-          _footIcon(
-            _railed ? Icons.keyboard_double_arrow_right : Icons.keyboard_double_arrow_left,
-            tr(_railed ? 'wb.expandSidebar' : 'wb.collapseSidebar'),
-            () => _setRailed(!_railed),
-          ),
+          if (!phone)
+            _footIcon(
+              railed ? Icons.keyboard_double_arrow_right : Icons.keyboard_double_arrow_left,
+              tr(railed ? 'wb.expandSidebar' : 'wb.collapseSidebar'),
+              () => _setRailed(!railed),
+            ),
           Expanded(
-            child: _fade(!_railed, motion, IgnorePointer(
-              ignoring: _railed,
+            child: _fade(!railed, motion, IgnorePointer(
+              ignoring: railed,
               child: ExcludeFocus(
-                excluding: _railed,
+                excluding: railed,
                 child: Row(
                   children: [
                     _footIcon(Icons.tune, tr('wb.providers'), () async {
@@ -759,6 +825,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       message: _railed ? c.name : '',
       child: InkWell(
       onTap: () async {
+        if (_phone(context)) setState(() => _phoneChat = true);
         await bench.open(c);
       },
       onFocusChange: (has) {
@@ -871,21 +938,28 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   // ── centre ────────────────────────────────────────────────────────────
   Widget _centre() {
     final c = bench.current;
+    final phone = _phone(context);
     return Column(
       children: [
         Container(
           height: 60,
-          padding: const EdgeInsets.symmetric(horizontal: 18),
+          padding: EdgeInsets.symmetric(horizontal: phone ? 2 : 18),
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: C.line)),
           ),
           child: Row(
             children: [
-              if (c != null)
+              if (_phone(context))
+                IconButton(
+                  tooltip: tr('wb.back'),
+                  onPressed: () => setState(() => _phoneChat = false),
+                  icon: Icon(Icons.arrow_back, size: 20, color: C.dim),
+                )
+              else if (c != null)
                 c.isGroup
                     ? GroupAvatar(colors: [for (final h in c.colors) C.parse(h)], count: c.members.length)
                     : Avatar(label: c.name, color: C.parse(c.color), size: 32),
-              const SizedBox(width: 11),
+              SizedBox(width: phone ? 2 : 11),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -893,6 +967,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   children: [
                     Text(
                       c?.name ?? tr('wb.pickConversation'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600),
                     ),
                     Text(
@@ -918,14 +994,16 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   icon: Icon(Icons.search, size: 18, color: C.dim),
                 ),
                 _sessionButton(),
-                IconButton(
-                  tooltip: tr('ses.new'),
-                  onPressed: bench.session == null ? null : bench.newSession,
-                  icon: Icon(Icons.add, size: 19, color: C.dim),
-                ),
+                if (!_phone(context))
+                  IconButton(
+                    tooltip: tr('ses.new'),
+                    onPressed: bench.session == null ? null : bench.newSession,
+                    icon: Icon(Icons.add, size: 19, color: C.dim),
+                  ),
               ],
               IconButton(
-                tooltip: tr(_rightOpen ? 'wb.hideRight' : 'wb.showRight'),
+                // narrow: the panel is a drawer, and this button always opens it
+                tooltip: tr(_rightOpen && !_narrow(context) ? 'wb.hideRight' : 'wb.showRight'),
                 onPressed: () => _narrow(context)
                     ? _scaffold.currentState?.openEndDrawer()
                     : setState(() => _rightOpen = !_rightOpen),
@@ -973,9 +1051,29 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     ),
                   ),
                 )
-              : ListView.builder(
+              : NotificationListener<ScrollNotification>(
+                  // The list grows after it is drawn — thumbnails load, a reply streams in. If the
+                  // newest line was in view, keep it in view; if someone scrolled up to read, leave them.
+                  onNotification: (n) {
+                    _atBottom = n.metrics.pixels >= n.metrics.maxScrollExtent - 48;
+                    return false;
+                  },
+                  child: NotificationListener<ScrollMetricsNotification>(
+                    // Only when the size changed: _atBottom still says where the view was before.
+                    onNotification: (n) {
+                      if (_atBottom && n.metrics.pixels < n.metrics.maxScrollExtent) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted && _scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+                        });
+                        // A thumbnail arriving changes the size without asking for a frame, and a
+                        // post-frame callback waits for one — without this it ran on the next touch.
+                        WidgetsBinding.instance.scheduleFrame();
+                      }
+                      return false;
+                    },
+                    child: ListView.builder(
                   controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(26, 16, 26, 16),
+                  padding: _phone(context) ? const EdgeInsets.fromLTRB(10, 10, 10, 10) : const EdgeInsets.fromLTRB(26, 16, 26, 16),
                   itemCount: bench.entries.length,
                   itemBuilder: (_, i) {
                     final e = bench.entries[i];
@@ -991,6 +1089,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                         ? _Flash(key: _flashKey, motion: _motion(context), child: view)
                         : view;
                   },
+                ),
+                  ),
                 ),
         ),
         _composer(),
@@ -1014,7 +1114,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 200),
+          // a phone header also holds a back arrow, search and the panel button
+          constraints: BoxConstraints(maxWidth: _phone(context) ? 96 : 200),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1083,7 +1184,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   Widget _composer() {
     final ready = bench.current != null;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(26, 6, 26, 18),
+      padding: _phone(context) ? const EdgeInsets.fromLTRB(8, 4, 8, 8) : const EdgeInsets.fromLTRB(26, 6, 26, 18),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1313,6 +1414,129 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   Widget _right() {
     final c = bench.current;
     final ids = c == null ? <String>[] : (c.isGroup ? c.members : [c.id]);
+    final phone = _phone(context);
+    // Memory, self-notes, export / import.
+    final bottom = Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  c == null ? tr('wb.memory') : tr(c.isGroup ? 'wb.groupMemory' : 'wb.agentMemory', {'name': c.name}),
+                  style: TextStyle(fontSize: 11, color: C.dim),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _memory,
+                  onChanged: (_) {
+                    if (_memoryStatus.isNotEmpty) setState(() => _memoryStatus = '');
+                  },
+                  enabled: c != null,
+                  maxLines: 7,
+                  minLines: 7,
+                  decoration: InputDecoration(
+                    hintText: tr(c?.isGroup == true ? 'wb.groupMemoryHint' : 'wb.agentMemoryHint'),
+                  ),
+                  style: const TextStyle(fontSize: 12, height: 1.5),
+                ),
+                const SizedBox(height: 8),
+                // These buttons are filled, so they need real gaps — packed into
+                // two Rows they sat flush and read as one bar.
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: () async {
+                        String status;
+                        try {
+                          await bench.saveMemory(_memory.text);
+                          status = tr('wb.saved');
+                        } on ApiException catch (e) {
+                          status = tr('wb.notSaved', {'msg': e.message});
+                        }
+                        if (!mounted) return;
+                        setState(() => _memoryStatus = status);
+                      },
+                      child: Text(tr('common.save')),
+                    ),
+                    TextButton.icon(
+                      onPressed: c == null ? null : () => _exportChat(c),
+                      icon: const Icon(Icons.download_outlined, size: 15),
+                      label: Text(tr('wb.exportChat'), style: const TextStyle(fontSize: 12)),
+                    ),
+                    TextButton.icon(
+                      onPressed: c == null || bench.busy ? null : () => _importChat(c),
+                      icon: const Icon(Icons.upload_outlined, size: 15),
+                      label: Text(tr('common.import'), style: const TextStyle(fontSize: 12)),
+                    ),
+                  ],
+                ),
+                if (_memoryStatus.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    _memoryStatus,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: C.dim),
+                  ),
+                ],
+                // The Agent's own notes: a second, separate store he writes with
+                // the remember tool. Not for groups — only a person writes a
+                // group's memory.
+                if (c != null && !c.isGroup) ...[
+                  const SizedBox(height: 14),
+                  const Divider(height: 1),
+                  const SizedBox(height: 10),
+                  Text(
+                    tr('wb.selfMemory', {'name': c.name}),
+                    style: TextStyle(fontSize: 11, color: C.dim),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    tr('wb.selfMemoryNote'),
+                    style: TextStyle(fontSize: 10.5, color: C.dim2, height: 1.5),
+                  ),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _selfMemory,
+                    onChanged: (_) {
+                      if (_selfMemoryStatus.isNotEmpty) setState(() => _selfMemoryStatus = '');
+                    },
+                    maxLines: 4,
+                    minLines: 4,
+                    decoration: InputDecoration(hintText: tr('wb.selfMemoryHint')),
+                    style: const TextStyle(fontSize: 12, height: 1.5),
+                  ),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      onPressed: () async {
+                        String status;
+                        try {
+                          await bench.saveSelfMemory(_selfMemory.text);
+                          status = tr('wb.saved');
+                        } on ApiException catch (e) {
+                          status = tr('wb.notSaved', {'msg': e.message});
+                        }
+                        if (!mounted) return;
+                        setState(() => _selfMemoryStatus = status);
+                      },
+                      child: Text(tr('common.save')),
+                    ),
+                  ),
+                  if (_selfMemoryStatus.isNotEmpty)
+                    Text(
+                      _selfMemoryStatus,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11, color: C.dim),
+                    ),
+                ],
+              ],
+            ),
+          );
     return Container(
       width: _side2,
       decoration: BoxDecoration(
@@ -1448,131 +1672,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     ),
                   ),
                 ],
+                // A phone's panel is short: what is pinned below the list on a desktop scrolls with it.
+                if (phone) ...[const Divider(height: 1), bottom],
               ],
             ),
           ),
-          const Divider(height: 1),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  c == null ? tr('wb.memory') : tr(c.isGroup ? 'wb.groupMemory' : 'wb.agentMemory', {'name': c.name}),
-                  style: TextStyle(fontSize: 11, color: C.dim),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _memory,
-                  onChanged: (_) {
-                    if (_memoryStatus.isNotEmpty) setState(() => _memoryStatus = '');
-                  },
-                  enabled: c != null,
-                  maxLines: 7,
-                  minLines: 7,
-                  decoration: InputDecoration(
-                    hintText: tr(c?.isGroup == true ? 'wb.groupMemoryHint' : 'wb.agentMemoryHint'),
-                  ),
-                  style: const TextStyle(fontSize: 12, height: 1.5),
-                ),
-                const SizedBox(height: 8),
-                // These buttons are filled, so they need real gaps — packed into
-                // two Rows they sat flush and read as one bar.
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    TextButton(
-                      onPressed: () async {
-                        String status;
-                        try {
-                          await bench.saveMemory(_memory.text);
-                          status = tr('wb.saved');
-                        } on ApiException catch (e) {
-                          status = tr('wb.notSaved', {'msg': e.message});
-                        }
-                        if (!mounted) return;
-                        setState(() => _memoryStatus = status);
-                      },
-                      child: Text(tr('common.save')),
-                    ),
-                    TextButton.icon(
-                      onPressed: c == null ? null : () => _exportChat(c),
-                      icon: const Icon(Icons.download_outlined, size: 15),
-                      label: Text(tr('wb.exportChat'), style: const TextStyle(fontSize: 12)),
-                    ),
-                    TextButton.icon(
-                      onPressed: c == null || bench.busy ? null : () => _importChat(c),
-                      icon: const Icon(Icons.upload_outlined, size: 15),
-                      label: Text(tr('common.import'), style: const TextStyle(fontSize: 12)),
-                    ),
-                  ],
-                ),
-                if (_memoryStatus.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    _memoryStatus,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11, color: C.dim),
-                  ),
-                ],
-                // The Agent's own notes: a second, separate store he writes with
-                // the remember tool. Not for groups — only a person writes a
-                // group's memory.
-                if (c != null && !c.isGroup) ...[
-                  const SizedBox(height: 14),
-                  const Divider(height: 1),
-                  const SizedBox(height: 10),
-                  Text(
-                    tr('wb.selfMemory', {'name': c.name}),
-                    style: TextStyle(fontSize: 11, color: C.dim),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    tr('wb.selfMemoryNote'),
-                    style: TextStyle(fontSize: 10.5, color: C.dim2, height: 1.5),
-                  ),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: _selfMemory,
-                    onChanged: (_) {
-                      if (_selfMemoryStatus.isNotEmpty) setState(() => _selfMemoryStatus = '');
-                    },
-                    maxLines: 4,
-                    minLines: 4,
-                    decoration: InputDecoration(hintText: tr('wb.selfMemoryHint')),
-                    style: const TextStyle(fontSize: 12, height: 1.5),
-                  ),
-                  const SizedBox(height: 4),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton(
-                      onPressed: () async {
-                        String status;
-                        try {
-                          await bench.saveSelfMemory(_selfMemory.text);
-                          status = tr('wb.saved');
-                        } on ApiException catch (e) {
-                          status = tr('wb.notSaved', {'msg': e.message});
-                        }
-                        if (!mounted) return;
-                        setState(() => _selfMemoryStatus = status);
-                      },
-                      child: Text(tr('common.save')),
-                    ),
-                  ),
-                  if (_selfMemoryStatus.isNotEmpty)
-                    Text(
-                      _selfMemoryStatus,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 11, color: C.dim),
-                    ),
-                ],
-              ],
-            ),
-          ),
+          if (!phone) ...[const Divider(height: 1), bottom],
         ],
       ),
     );
@@ -1677,6 +1782,9 @@ class _GripLineState extends State<_GripLine> {
 }
 
 bool _narrow(BuildContext context) => MediaQuery.sizeOf(context).width < 1180;
+
+/// Phone-sized: one column at a time (see _phoneLayout).
+bool _phone(BuildContext context) => MediaQuery.sizeOf(context).width < 640;
 
 String _two(int n) => n.toString().padLeft(2, '0');
 

@@ -347,7 +347,13 @@ class _HeaderState extends State<_Header> {
 
   Future<String?> _open() async {
     final path = await downloadToTemp(widget.api, widget.file);
-    await openWithSystem(path);
+    await AppPlatform.openFile(path, widget.file.mime);
+    return null;
+  }
+
+  Future<String?> _share() async {
+    final path = await downloadToTemp(widget.api, widget.file);
+    await AppPlatform.shareFile(path, widget.file.mime);
     return null;
   }
 
@@ -378,7 +384,8 @@ class _HeaderState extends State<_Header> {
                   child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.6)),
                 ),
               TextButton(onPressed: () => _run(_open), child: Text(tr('att.open'))),
-              TextButton(onPressed: () => _run(_saveAs), child: Text(tr('att.saveAs'))),
+              if (AppPlatform.canSaveAs) TextButton(onPressed: () => _run(_saveAs), child: Text(tr('att.saveAs'))),
+              if (AppPlatform.canShare) TextButton(onPressed: () => _run(_share), child: Text(tr('att.share'))),
               IconButton(
                 tooltip: tr('att.close'),
                 onPressed: () => Navigator.of(context).pop(),
@@ -460,17 +467,12 @@ class _TextBodyState extends State<_TextBody> {
 /// Download a file into a temporary folder of its own, under its own name,
 /// so the app that opens it shows the right name.
 Future<String> downloadToTemp(Api api, Attachment f) async {
-  final dir = await Directory.systemTemp.createTemp('cirrayabot-');
+  final root = AppPlatform.downloadRoot;
+  await root.create(recursive: true);
+  final dir = await root.createTemp('cirrayabot-');
   final path = '${dir.path}${Platform.pathSeparator}${f.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')}';
   await api.downloadFile(f.id, path);
   return path;
-}
-
-/// Hand a file to the system's own app for it (AppPlatform.openCommand).
-Future<void> openWithSystem(String path) async {
-  final (cmd, args) = AppPlatform.openCommand(path);
-  final r = await Process.run(cmd, args);
-  if (r.exitCode != 0) throw Exception('${r.stderr}'.trim().isEmpty ? 'exit ${r.exitCode}' : '${r.stderr}'.trim());
 }
 
 // ---------- Markdown ----------
