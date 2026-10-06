@@ -175,12 +175,14 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     // is left alone. A search hit instead lands on its message.
     final id = bench.current?.id;
     final ses = '$id/${bench.session}';
-    final atBottom = !_scroll.hasClients || _scroll.position.maxScrollExtent - _scroll.position.pixels < 160;
+    final atBottom = !_scroll.hasClients || _atBottom;
     final jump = bench.jumpTo;
     if (jump != null && bench.entries.isNotEmpty) {
       bench.jumpTo = null;
       _jumpTo(jump);
-    } else if (jump == null && (id != _shownId || ses != _shownSession || atBottom)) {
+    } else if (jump == null && (id != _shownId || ses != _shownSession)) {
+      _toBottom(force: true);
+    } else if (jump == null && atBottom) {
       _toBottom();
     }
     if (id != _shownId) _mentions = const [];
@@ -237,18 +239,27 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   /// The newest line is in view (within a little). While it is, growth below follows it down.
   bool _atBottom = true;
 
-  void _toBottom([int tries = 3]) {
+  /// A finger is on the transcript, or it is still coasting from one. Never jump then: a jump
+  /// does not only pull the view back, it ends the drag — the rest of the swipe moves nothing,
+  /// and the list seems not to scroll at all.
+  bool get _scrolling => _scroll.hasClients && _scroll.position.isScrollingNotifier.value;
+
+  /// [force]: a different conversation or session — land at its bottom even if the last one
+  /// was still coasting. Otherwise only when nobody is scrolling.
+  void _toBottom({int tries = 3, bool force = false}) {
     _atBottom = true;
     // After the frame, or the extent is still the old one. And again until it
     // stops moving: a lazy list only measures the rows it has built, so the
     // first jump can land short of the newest message.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
+      if (!mounted || !_scroll.hasClients || (_scrolling && !force)) return;
       final max = _scroll.position.maxScrollExtent;
       _scroll.jumpTo(max);
       if (tries > 1) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && _scroll.hasClients && _scroll.position.maxScrollExtent != max) _toBottom(tries - 1);
+          if (mounted && _scroll.hasClients && _scroll.position.maxScrollExtent != max) {
+            _toBottom(tries: tries - 1, force: force);
+          }
         });
       }
     });
@@ -390,13 +401,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       return;
     }
     _input.clear();
-    _toBottom();
+    _toBottom(force: true);
     await bench.send(text);
     // The field was disabled while busy, which took focus away. Give it back
     // so the next message can just be typed — not on a phone, where focus brings
     // up the keyboard and it would cover the reply that just arrived.
     if (mounted && !_phone(context)) _inputFocus.requestFocus();
-    _toBottom();
+    _toBottom(force: true);
   }
 
   Future<void> _pickFiles() async {
@@ -1119,16 +1130,21 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
               : NotificationListener<ScrollNotification>(
                   // The list grows after it is drawn — thumbnails load, a reply streams in. If the
                   // newest line was in view, keep it in view; if someone scrolled up to read, leave them.
+                  // depth 0: the transcript itself, not a code block scrolling sideways inside a message.
                   onNotification: (n) {
-                    _atBottom = n.metrics.pixels >= n.metrics.maxScrollExtent - 48;
+                    if (n.depth == 0) _atBottom = n.metrics.pixels >= n.metrics.maxScrollExtent - 48;
                     return false;
                   },
                   child: NotificationListener<ScrollMetricsNotification>(
                     // Only when the size changed: _atBottom still says where the view was before.
+                    // Not while someone scrolls — the lazy list re-measures rows as they come into
+                    // view, and following that would yank the view back mid-swipe (see _scrolling).
                     onNotification: (n) {
-                      if (_atBottom && n.metrics.pixels < n.metrics.maxScrollExtent) {
+                      if (n.depth == 0 && _atBottom && !_scrolling && n.metrics.pixels < n.metrics.maxScrollExtent) {
                         WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted && _scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+                          if (mounted && _scroll.hasClients && _atBottom && !_scrolling) {
+                            _scroll.jumpTo(_scroll.position.maxScrollExtent);
+                          }
                         });
                         // A thumbnail arriving changes the size without asking for a frame, and a
                         // post-frame callback waits for one — without this it ran on the next touch.
