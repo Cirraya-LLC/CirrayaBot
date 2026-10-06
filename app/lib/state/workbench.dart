@@ -7,6 +7,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
@@ -26,13 +27,27 @@ sealed class Entry {
 }
 
 class Said extends Entry {
-  Said({required this.mine, required this.speaker, required this.color, this.text = ''});
+  Said({required this.mine, required this.speaker, required this.color, this.text = '', this.files = const []});
 
   final bool mine;
   final String speaker;
   final String color;
   String text;
   bool streaming = false;
+
+  /// What was attached to it (the person's message carries them).
+  final List<Attachment> files;
+}
+
+/// A file an agent sent with send_file. It stands where the call was made —
+/// live and after a reload — and reads as the agent handing something over,
+/// not as a command card.
+class SentFile extends Entry {
+  SentFile({required this.speaker, required this.color, required this.file});
+
+  final String speaker;
+  final String color;
+  final Attachment file;
 }
 
 class Ran extends Entry {
@@ -75,6 +90,29 @@ class News extends Entry {
   String get text => (event['text'] as String?) ?? '';
   String get by => (event['by'] as String?) ?? '';
   String? get approval => event['approval'] as String?;
+
+  /// Files a finished task sent the person; they come back with its report.
+  List<Attachment> get files => Attachment.listOf(event['files']);
+}
+
+/// A file picked to go with the next message. It uploads at once; the message
+/// can be sent when every one has its [attachment] (or was removed).
+class Pending {
+  Pending({required this.path, required this.name, required this.size});
+
+  final String path;
+  final String name;
+  final int size;
+  int sent = 0;
+
+  /// Set when the upload finished.
+  Attachment? attachment;
+
+  /// Set when it failed; it is not sent, and stays until removed so the person sees why.
+  String? error;
+
+  bool get uploading => attachment == null && error == null;
+  double get progress => size <= 0 ? 0 : (sent / size).clamp(0, 1).toDouble();
 }
 
 class Workbench extends ChangeNotifier {
@@ -253,6 +291,8 @@ class Workbench extends ChangeNotifier {
 
   Future<void> open(Conversation c) async {
     final ticket = ++_shown;
+    // Files picked for another conversation can't go here: take them back.
+    if (_pendingFor != null && _pendingFor != _key(c)) clearPending();
     current = c;
     entries.clear();
     memory = '';
@@ -502,10 +542,78 @@ class Workbench extends ChangeNotifier {
     selfMemory = text;
   }
 
+  // ---- Attachments for the next message ----
+  final List<Pending> pending = [];
+  String? _pendingFor;
+
+  /// Whether a picked file is still on its way up — sending waits for it.
+  bool get uploading => pending.any((p) => p.uploading);
+
+  /// Pick files for the next message. Each uploads at once, in parallel.
+  Future<void> attach(List<String> paths) async {
+    final c = current;
+    if (c == null || paths.isEmpty) return;
+    _pendingFor = _key(c);
+    final added = <Pending>[];
+    for (final path in paths) {
+      var size = 0;
+      try {
+        size = await File(path).length();
+      } on FileSystemException catch (_) {}
+      final p = Pending(path: path, name: path.split(RegExp(r'[\\/]')).last, size: size);
+      pending.add(p);
+      added.add(p);
+    }
+    notifyListeners();
+    await Future.wait(added.map((p) => _upload(c, p)));
+  }
+
+  Future<void> _upload(Conversation c, Pending p) async {
+    try {
+      final a = await api.uploadFile(
+        c,
+        p.path,
+        name: p.name,
+        onProgress: (sent, _) {
+          p.sent = sent;
+          notifyListeners();
+        },
+      );
+      // Removed (or the conversation changed) while it was uploading: take it back.
+      if (!pending.contains(p)) {
+        unawaited(api.deleteUpload(a.id).catchError((_) {}));
+        return;
+      }
+      p.attachment = a;
+    } on ApiException catch (e) {
+      p.error = e.message;
+    } on FileSystemException catch (e) {
+      p.error = e.osError?.message ?? e.message;
+    }
+    notifyListeners();
+  }
+
+  /// Drop one picked file; if it already uploaded, take it back from the server too.
+  void removePending(Pending p) {
+    if (!pending.remove(p)) return;
+    final a = p.attachment;
+    if (a != null) unawaited(api.deleteUpload(a.id).catchError((_) {}));
+    notifyListeners();
+  }
+
+  void clearPending() {
+    for (final p in [...pending]) {
+      removePending(p);
+    }
+    _pendingFor = null;
+  }
+
   /// Sends and streams the reply. Returns when the turn is over.
   Future<void> send(String text) async {
     final c = current;
-    if (c == null || busy || text.trim().isEmpty) return;
+    // A message may be only files; it waits while any is still uploading.
+    final files = [for (final p in pending) if (p.attachment != null) p.attachment!];
+    if (c == null || busy || (text.trim().isEmpty && files.isEmpty) || uploading) return;
 
     busy = true;
     _streaming = c;
@@ -517,16 +625,18 @@ class Workbench extends ChangeNotifier {
       if (ticket == _shown) entries.add(e);
     }
 
-    add(Said(mine: true, speaker: userSpeaker, color: '', text: text.trim()));
+    add(Said(mine: true, speaker: userSpeaker, color: '', text: text.trim(), files: files));
+    // They go with this message now; a failed one stays behind for the person to see and remove.
+    pending.removeWhere((p) => p.attachment != null);
     notifyListeners();
 
     // Tool cards are matched run→done by bot+name+args; the server sends the
     // same args back on both phases, so this is the key it already gives us.
-    final pending = <String, Ran>{};
+    final cards = <String, Ran>{};
     Said? live;
 
     try {
-      await for (final ev in api.chat(c, text.trim(), session: session)) {
+      await for (final ev in api.chat(c, text.trim(), session: session, files: [for (final f in files) f.id])) {
         if (ev.name == 'session') {
           // Which session this went into — a new one's id, the first time.
           // Remembered even if the person switched away, so coming back lands
@@ -596,20 +706,32 @@ class Workbench extends ChangeNotifier {
               live?.streaming = false;
               live = null;
               final card = Ran(speaker: name, color: colour, label: _label(ev.data['name'], args));
-              pending[key] = card;
+              cards[key] = card;
               add(card);
             } else if (phase == 'ask') {
-              pending[key]?.approvalId = ev.data['id'] as String?;
+              cards[key]?.approvalId = ev.data['id'] as String?;
             } else if (phase == 'answered') {
-              pending[key]
+              cards[key]
                 ?..approvalId = null
                 ..approved = ev.data['ok'] == true;
             } else {
-              final card = pending.remove(key);
-              card
-                ?..running = false
-                ..output = (ev.data['output'] as String?) ?? ''
-                ..image = _decodeImage(ev.data['image']);
+              final card = cards.remove(key);
+              final sentFile = Attachment.maybe(ev.data['file']);
+              if (card != null && sentFile != null && ev.data['name'] == 'send_file') {
+                // A file the agent handed over: it takes the card's place, as it will after a reload.
+                final at = entries.indexOf(card);
+                final entry = SentFile(speaker: name, color: colour, file: sentFile);
+                if (at >= 0) {
+                  entries[at] = entry;
+                } else {
+                  add(entry);
+                }
+              } else {
+                card
+                  ?..running = false
+                  ..output = (ev.data['output'] as String?) ?? ''
+                  ..image = _decodeImage(ev.data['image']);
+              }
             }
           case 'done':
             break;
@@ -624,7 +746,7 @@ class Workbench extends ChangeNotifier {
 
     // Anything still marked running lost its `done` — say so rather than
     // leaving a spinner that never resolves.
-    for (final card in pending.values) {
+    for (final card in cards.values) {
       card
         ..running = false
         ..output = tr('state.noResult');
@@ -664,7 +786,10 @@ class Workbench extends ChangeNotifier {
     if (m.event != null) return News(m.event!)..id = m.id;
     final colour = m.mine ? '' : (agentByName(m.speaker)?.color ?? c.color);
     if (m.tool == null) {
-      return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text)..id = m.id;
+      return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text, files: m.files)..id = m.id;
+    }
+    if (m.tool == 'send_file' && m.file != null) {
+      return SentFile(speaker: m.speaker, color: colour, file: m.file!)..id = m.id;
     }
     return Ran(speaker: m.speaker, color: colour, label: _label(m.tool, m.args))
       ..id = m.id

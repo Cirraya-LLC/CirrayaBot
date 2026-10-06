@@ -15,12 +15,15 @@ import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs
 import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
   taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText } from './tasks.mjs'
-import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT } from './sandbox.mjs'
+import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD } from './sandbox.mjs'
+import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, attachmentNote, sendablePath,
+  VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { createServer } from 'node:http'
-import { readFile, mkdir } from 'node:fs/promises'
-import { existsSync, statSync } from 'node:fs'
-import { join, extname } from 'node:path'
+import { readFile, mkdir, readdir, rm, rename, realpath, open as openFile, copyFile } from 'node:fs/promises'
+import { existsSync, statSync, createReadStream, createWriteStream } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
+import { join, extname, posix } from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 
@@ -99,11 +102,13 @@ function transcriptRow(m, text) {
     try { return { id: Number(m.id), role: 'event', speaker: m.speaker, at: m.at, event: JSON.parse(m.content) } }
     catch { return { id: Number(m.id), role: 'assistant', at: m.at, ...text } }
   }
-  if (m.role !== 'tool') return { id: Number(m.id), role: m.role, at: m.at, ...text }
+  const files = (m.files ?? []).map(fileView)
+  if (m.role !== 'tool') return { id: Number(m.id), role: m.role, at: m.at, ...text, files }
   try {
-    const { name, args, output } = JSON.parse(m.content)
-    return { id: Number(m.id), role: 'tool', speaker: m.speaker, at: m.at, name, args: args ?? {}, output: output ?? '' }
-  } catch { return { id: Number(m.id), role: m.role, at: m.at, ...text } }
+    const { name, args, output, file } = JSON.parse(m.content)
+    return { id: Number(m.id), role: 'tool', speaker: m.speaker, at: m.at, name, args: args ?? {}, output: output ?? '',
+      ...file ? { file: fileView(file) } : {} }
+  } catch { return { id: Number(m.id), role: m.role, at: m.at, ...text, files } }
 }
 
 // ---------- Sessions ----------
@@ -236,7 +241,10 @@ You are root — install and write whatever you like; it stays on your own machi
 This group's shared drive is /groups/${groupId}: everyone in the group sees it. To hand a colleague a file,
 put it there; what colleagues give you is there too. (Other directories under /groups belong to your other groups.)` : ''}
 Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).
-You also have your own browser (the browser tool): open pages, click buttons, fill forms, take screenshots to see the page.`)
+You also have your own browser (the browser tool): open pages, click buttons, fill forms, take screenshots to see the page.
+Files the user sends are copied to ${groupId ? `/groups/${groupId}/inbox` : '/work/inbox'} (the message says where each one is).
+To give the user a file — a report, an image, a document, an archive — make it, then send it with send_file;
+they can preview it right in the conversation. Don't paste a long file into your reply when you can send it.`)
   if (task) parts.push(taskSection({ t: task, byName, groupDir: groupId && box ? `/groups/${groupId}` : '' }))
   else {
     if (auto && box) parts.push(`
@@ -326,6 +334,9 @@ const NETWORK = `${PREFIX}-agents`
 // When we run in a container WORKROOT is /app/workspace, while on the host it's somewhere else —
 // using WORKROOT would mount the agent's container on an empty directory, with no error at all.
 const HOSTWORK = env.WORKSPACE_HOST_PATH || WORKROOT
+// The same directories as this process sees them: in compose HOSTWORK is mounted at WORKROOT; run
+// straight on the host, HOSTWORK is right there (and WORKROOT is some other, unmounted directory).
+const LOCALWORK = existsSync(HOSTWORK) ? HOSTWORK : WORKROOT
 
 function cliRun(argv, input, timeout = EXEC_TIMEOUT) {
   return new Promise(done => {
@@ -435,8 +446,8 @@ async function ensureContainerNow(botId, groupId) {
   const sig = `${want.work}|${want.image}|${want.groups}`
   if (containerReady.get(name) !== sig) {
     // The host directories have to exist first, or docker makes them itself, owned by root.
-    await mkdir(join(WORKROOT, 'agents', botId), { recursive: true })
-    for (const g of groups) await mkdir(join(WORKROOT, 'groups', g), { recursive: true })
+    await mkdir(join(LOCALWORK, 'agents', botId), { recursive: true })
+    for (const g of groups) await mkdir(join(LOCALWORK, 'groups', g), { recursive: true })
     // Containers are long-lived, and what they should see changes: WORKSPACE_HOST_PATH moves, the image is
     // upgraded, the sandbox rules change, the agent joins or leaves a group. A container that is wrong in any
     // of these looks perfectly fine from inside — so it is checked here, every time the answer could differ.
@@ -475,6 +486,203 @@ async function removeContainer(botId) {
   const name = cname(botId)
   containerReady.delete(name)
   await cliRun(['rm', '-f', name], null, 60_000)
+}
+
+// ---------- Files: sent by people and by agents ----------
+// The bytes are stored once, at <workspace>/files/<id>, a directory no agent container mounts. A
+// message carries the list it needs to draw them. Moving a file into or out of an agent's machine
+// goes through its container (docker exec), never through the host path of its desk: a link the
+// agent planted in /work resolves inside the container, where it can only reach what the agent could.
+const FILES_DIR = join(LOCALWORK, 'files')
+const UPLOAD_MAX = Math.max(1, Number(env.UPLOAD_MAX_MB || 50)) * MB
+const newFileId = () => randomUUID().replace(/-/g, '').slice(0, 24)
+
+/** What a client gets for a file. */
+const fileView = f => ({ id: f.id, name: f.name, mime: f.mime, size: Number(f.size) || 0, kind: kindOf(f.mime, f.name),
+  ...f.by_agent ? { by: f.by_agent } : {} })
+
+/** Remove the bytes of deleted rows. Best effort: an orphaned blob wastes disk, it leaks nothing. */
+async function dropBlobs(ids) {
+  for (const id of ids ?? []) await rm(join(FILES_DIR, id), { force: true }).catch(() => {})
+}
+
+/** Count bytes as they pass, and stop the moment there are too many. */
+const capped = (max, onSize) => async function* (src) {
+  let n = 0
+  for await (const c of src) {
+    n += c.length
+    if (n > max) throw new Say('file.tooBig', { max: sizeText(max) }, 413)
+    onSize(n)
+    yield c
+  }
+}
+
+/** A person's upload, streamed to disk. It belongs to one conversation and to no message yet. */
+async function storeUpload(req, scope, scopeId, name, given) {
+  const declared = Number(req.headers['content-length'])
+  if (declared > UPLOAD_MAX) throw new Say('file.tooBig', { max: sizeText(UPLOAD_MAX) }, 413)
+  const id = newFileId(), tmp = join(FILES_DIR, `${id}.part`)
+  let size = 0
+  uploading.add(`${id}.part`)
+  try {
+    await pipeline(req, capped(UPLOAD_MAX, n => { size = n }), createWriteStream(tmp, { flags: 'wx' }))
+    if (!size) throw new Say('file.empty')
+    await rename(tmp, join(FILES_DIR, id))
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw e
+  } finally { uploading.delete(`${id}.part`) }
+  const clean = safeName(name)
+  return db.createFile({ id, scope, scope_id: scopeId, name: clean, mime: mimeOf(clean, given), size })
+}
+
+/**
+ * Send a stored file. Ranges are honoured — a browser seeking in a video asks for one, and without
+ * it the video plays but can't be skipped through. The headers (servedHeaders) decide what it may be
+ * shown as: nothing that would run on our origin.
+ */
+async function serveFile(req, res, f, download) {
+  const path = join(FILES_DIR, f.id)
+  let size
+  try { size = statSync(path).size } catch { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('gone') }
+  const headers = { ...servedHeaders(f, download), 'accept-ranges': 'bytes' }
+  const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''))
+  let start = 0, end = size - 1, status = 200
+  if (range && (range[1] || range[2])) {
+    if (range[1]) { start = Number(range[1]); if (range[2]) end = Math.min(Number(range[2]), size - 1) }
+    else start = Math.max(0, size - Number(range[2]))          // "the last N bytes"
+    if (start > end || start >= size) { res.writeHead(416, { 'content-range': `bytes */${size}` }); return res.end() }
+    status = 206
+    headers['content-range'] = `bytes ${start}-${end}/${size}`
+  }
+  headers['content-length'] = end - start + 1
+  res.writeHead(status, headers)
+  if (req.method === 'HEAD') return res.end()
+  createReadStream(path, { start, end }).on('error', () => res.destroy()).pipe(res)
+}
+
+/** Uploads never sent, swept after a day; half-written ones from before a restart, at once. */
+async function sweepUploads() {
+  await dropBlobs(await db.dropStaleUploads(24))
+  for (const n of await readdir(FILES_DIR).catch(() => [])) if (n.endsWith('.part') && !uploading.has(n))
+    await rm(join(FILES_DIR, n), { force: true }).catch(() => {})
+}
+const uploading = new Set()
+
+/** Run something in a container with a file on its stdin, or with its stdout into a file. */
+function execStream(argv, { from = null, to = null, max = Infinity } = {}) {
+  return new Promise(done => {
+    const p = spawn(CLI, ['exec', ...from ? ['-i'] : [], ...argv], { stdio: ['pipe', 'pipe', 'pipe'] })
+    let err = '', out = '', size = 0, over = false
+    const timer = setTimeout(() => p.kill('SIGKILL'), 300_000)
+    const sink = to ? createWriteStream(to) : null
+    p.stdout.on('data', d => {
+      size += d.length
+      if (size > max) { over = true; p.kill('SIGKILL'); return }
+      sink ? sink.write(d) : out += d
+    })
+    p.stderr.on('data', d => { err += d })
+    p.on('error', e => { err += e.message })
+    p.on('close', code => {
+      clearTimeout(timer)
+      const finish = () => done({ code: over ? 413 : code, out, err: err.trim(), size })
+      sink ? sink.end(finish) : finish()
+    })
+    if (from) createReadStream(from).on('error', () => p.stdin.end()).pipe(p.stdin)
+    else p.stdin.end()
+  })
+}
+
+// Put a file in the inbox under a name not taken yet ("a.pdf", then "a (2).pdf"…). The guard is the
+// same one write_file uses: inside a group drive, a planted link can't redirect the write elsewhere.
+const INBOX_SCRIPT = `set -e
+dir=$1 name=$2
+base=$name ext=
+case "$name" in ?*.*) base=\${name%.*} ext=.\${name##*.};; esac
+p="$dir/$name" i=2
+while [ -e "$p" ] || [ -L "$p" ]; do p="$dir/$base ($i)$ext"; i=$((i+1)); done
+set -- "$p"
+${PATH_GUARD}mkdir -p -- "$(dirname -- "$p")" && cat > "$p" && printf '%s' "$p"`
+
+/**
+ * Copy what the person sent into the agent's machine, so its tools can open it: /work/inbox in a DM,
+ * the group drive's inbox in a group (every member sees it). Returns the files with the path each
+ * landed at — the model is told it. With tools off there's no machine, and nothing to copy.
+ */
+async function deliverToInbox(files, bot, groupId) {
+  if (!CFG.tools || !files.length) return files
+  // The message matters more than the copies: a machine that won't start costs the inbox, not the message.
+  const c = await ensureContainer(bot.id, groupId).catch(e => { console.warn(`[files] no inbox for ${bot.id}: ${e.message}`); return null })
+  if (!c) return files
+  const dir = groupId ? `/groups/${groupId}/inbox` : '/work/inbox'
+  const out = []
+  for (const f of files) {
+    const r = await execStream(['-w', '/work', c, 'bash', '-c', INBOX_SCRIPT, '_', dir, f.name], { from: join(FILES_DIR, f.id) })
+    if (r.code !== 0) console.warn(`[files] could not put ${f.name} in ${bot.id}'s inbox: ${r.err.slice(0, 200)}`)
+    out.push(r.code === 0 && r.out ? { ...f, path: r.out } : f)
+  }
+  return out
+}
+
+// Read a file out of the agent's machine. Links are followed inside the container, and the place it
+// really is must still be the agent's desk or this conversation's group drive.
+const SEND_SCRIPT = `${PATH_GUARD}case "$p/" in /work/*) ;; /groups/$2/*) [ -n "$2" ] || { echo "only files in /work can be sent" >&2; exit 5; };;
+  *) echo "$1 is really $p, outside what can be sent" >&2; exit 5;; esac
+[ -f "$p" ] || { echo "there is no file at $1" >&2; exit 4; }
+exec cat -- "$p"`
+
+/** send_file: the agent hands the person a file. It shows up in the conversation, previewable. */
+async function sendFromAgent(ctx, args) {
+  if (!ctx.container) return 'You have no machine to send files from.'
+  const groupId = ctx.scope === 'group' ? ctx.scopeId : null
+  const where = sendablePath(args.path, { groupId })
+  if (typeof where === 'string') return `Not sent: ${where}.`
+  const id = newFileId(), dest = join(FILES_DIR, id)
+  const r = await execStream(['-w', '/work', ctx.container, 'bash', '-c', SEND_SCRIPT, '_', where.path, groupId ?? ''],
+    { to: dest, max: UPLOAD_MAX })
+  if (r.code !== 0 || !r.size) {
+    await rm(dest, { force: true }).catch(() => {})
+    return `Not sent: ${r.code === 413 ? `over the ${sizeText(UPLOAD_MAX)} limit` : !r.size && r.code === 0 ? 'the file is empty' : r.err || `exit ${r.code}`}.`
+  }
+  const name = safeName(posix.basename(where.path))
+  const row = await db.createFile({ id, scope: ctx.scope, scope_id: ctx.scopeId, session_id: ctx.session,
+    name, mime: mimeOf(name), size: r.size, by_agent: ctx.bot.id })
+  const file = fileView(row)
+  ;(ctx.sent ??= []).push(file)
+  return { text: `Sent ${name} (${sizeText(r.size)}) to the user; they can open or preview it in the conversation.`, file }
+}
+
+/**
+ * A stored message as the model reads it, attachments included. Every file gets a line (name, type,
+ * where it is). A message not answered yet — the turn being taken now — also gets its images (for a
+ * model that can see) and the text of its text files: later turns only get the line, since every step
+ * resends the whole history and the images would be paid for again each time.
+ */
+async function withAttachments(text, files, fresh, budget) {
+  if (!files?.length) return { content: text }
+  const notes = [], images = []
+  for (const f of files) {
+    notes.push(attachmentNote(f))
+    if (!fresh) continue
+    const kind = kindOf(f.mime, f.name), path = join(FILES_DIR, f.id)
+    try {
+      if (VISION_MIMES.has(f.mime) && f.size <= VISION_MAX && budget.images < VISION_COUNT) {
+        images.push(`data:${f.mime};base64,${(await readFile(path)).toString('base64')}`)
+        budget.images++
+      } else if ((kind === 'text' || kind === 'markdown') && budget.text < INLINE_TEXT_TOTAL) {
+        const room = Math.min(INLINE_TEXT_MAX, INLINE_TEXT_TOTAL - budget.text)
+        const fh = await openFile(path, 'r')
+        let body
+        try { const { buffer, bytesRead } = await fh.read(Buffer.alloc(room * 4), 0, room * 4, 0); body = buffer.subarray(0, bytesRead).toString('utf8') }
+        finally { await fh.close() }
+        const cut = body.length > room || f.size > room * 4
+        body = body.slice(0, room)
+        budget.text += body.length
+        notes.push(`--- ${f.name} ---\n${body}${cut ? `\n… (cut here; the whole file is${f.path ? ` at ${f.path}` : ' longer'})` : ''}\n--- end of ${f.name} ---`)
+      }
+    } catch (e) { console.warn(`[files] could not read ${f.id} for the model: ${e.message}`) }
+  }
+  return { content: [text, ...notes].filter(Boolean).join('\n\n'), ...images.length ? { images } : {} }
 }
 
 const TOOL_SPECS = [
@@ -540,6 +748,13 @@ const TOOL_SPECS = [
     description: 'Write a file (overwrites). Parent directories are created automatically.',
     parameters: { type: 'object', required: ['path', 'content'], properties: {
       path: { type: 'string' }, content: { type: 'string' } } } } },
+  { type: 'function', function: {
+    name: 'send_file',
+    description: 'Send a file from your machine to the user. It appears in the conversation, where they can preview it ' +
+      '(images, video, audio, PDF, Markdown, text) or download it. Use it for anything you made for them — a report, a chart, ' +
+      'a screenshot, a document, an archive. Only files in /work, or in this group\'s shared drive, can be sent.',
+    parameters: { type: 'object', required: ['path'], properties: {
+      path: { type: 'string', description: 'The file, e.g. /work/report.pdf, or report.pdf (relative to /work)' } } } } },
 ]
 
 // The front of a conversation hands work out with these. In a DM a task is always the agent itself,
@@ -660,6 +875,7 @@ async function runTool(name, args, ctx) {
       : `You have no skill named "${args.name}". Installed for you: ${mine.map(x => x.name).join(', ') || '(none)'}`
   }
   if (name === 'save_skill') return saveSkillFromAgent(ctx.bot, args)
+  if (name === 'send_file') return sendFromAgent(ctx, args)
   if (name === 'remember') return rememberFromAgent(ctx.bot, args.fact)
   if (name === 'update_plan') {
     const plan = checkPlan(args.plan)
@@ -825,12 +1041,13 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
 Do not try this again. Do it another way, or say why you cannot.`
       const out = typeof res === 'string' ? res : res.text
       if (res?.image) shot = res.image
-      // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored
-      onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {} })
+      // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored.
+      // A file the agent sent rides on the same card, and is stored with it: that card is where the person sees it.
+      onTool?.({ phase: 'done', name: c.name, args, output: out, ...res?.image ? { image: res.image } : {}, ...res?.file ? { file: res.file } : {} })
       // Keep the call in the transcript, cut to the same length the live stream shows — reopening a
       // conversation should show the same cards, not more and not fewer.
       // A background task keeps its own trace instead: its commands aren't part of the conversation.
-      const step = { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE) }
+      const step = { name: c.name, args, output: (out ?? '').slice(0, TOOL_TRACE), ...res?.file ? { file: res.file } : {} }
       if (ctx.task) await db.traceTask(ctx.task.id, { ...step, at: Date.now() })
       else if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.session, ctx.bot?.name ?? '', step)
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
@@ -914,16 +1131,22 @@ async function stopNoted(write, signal, fn) {
  * message: it is something the front thread is being told, not something it said. In a group (`self`
  * given) everyone else's words come prefixed with their name.
  */
-function forModel(rows, self = null) {
-  return rows.map(m => {
+async function forModel(rows, self = null) {
+  // Messages nobody has answered yet are this turn's: they get their attachments in full (withAttachments).
+  const answered = rows.reduce((n, m) => m.role === 'assistant' ? Math.max(n, Number(m.id)) : n, 0)
+  const budget = { images: 0, text: 0 }
+  const out = []
+  for (const m of [...rows].reverse()) {                      // newest first, so the budget goes to the latest
     if (m.role === 'event') {
-      try { return { role: 'user', content: eventForModel(JSON.parse(m.content)) } } catch { return null }
+      try { out.push({ role: 'user', content: eventForModel(JSON.parse(m.content)) }) } catch {}
+      continue
     }
-    if (!self) return { role: m.role, content: m.content }                 // a DM: the agent is the only one answering
-    return m.speaker === self.name && m.role === 'assistant'
-      ? { role: 'assistant', content: m.content }                           // what he said himself
-      : { role: 'user', content: `[${modelSpeaker(m.speaker)}] ${m.content}` }
-  }).filter(Boolean)
+    const mine = !self || (m.speaker === self.name && m.role === 'assistant')
+    const text = mine ? m.content : `[${modelSpeaker(m.speaker)}] ${m.content}`
+    const role = self ? (mine ? 'assistant' : 'user') : m.role     // a DM: the agent is the only one answering
+    out.push({ role, ...await withAttachments(text, m.files, Number(m.id) > answered, budget) })
+  }
+  return out.reverse()
 }
 
 // session -> the newest message id its last front turn read. News that lands mid-turn (a quick task
@@ -946,7 +1169,7 @@ async function openTasksIn(scope, scopeId, session) {
 function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session) {
   return withAgent(bot.id, async () => {
     // Only this session's history: a new session is a clean slate for the model, not a new view of the old one
-    const history = forModel(readHistory(await db.recent('dm', bot.id, FETCH_MAX, { session }), session))
+    const history = await forModel(readHistory(await db.recent('dm', bot.id, FETCH_MAX, { session }), session))
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
     const { open, nameOf } = await openTasksIn('dm', bot.id, session)
@@ -969,7 +1192,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
     const system = systemFor(bot, memory, { peers, box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id),
       lead, auto: gate.autonomy === 'auto', groupId, open, nameOf })
     const messages = [{ role: 'system', content: system },
-      ...forModel(readHistory(await db.recent('group', groupId, FETCH_MAX, { session }), session), bot)]
+      ...await forModel(readHistory(await db.recent('group', groupId, FETCH_MAX, { session }), session), bot)]
     const write = content => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content })
     const reply = await stopNoted(write, signal, () => runAgent(p, messages, onDelta, onTool,
       { container, signal, bot, peers, lang, scope: 'group', scopeId: groupId, session, front: true,
@@ -1013,7 +1236,7 @@ const waitingRuns = new Set()
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
 async function converse(bots, groupId, providers, text, emit, controller, lang = 'en',
-  { unattended = false, session: want = null, run = newRun(), wake = null } = {}) {
+  { unattended = false, session: want = null, run = newRun(), wake = null, files: fileIds = [] } = {}) {
   const signal = controller.signal
   const scope = groupId || bots.length > 1 ? 'group' : 'dm'
   const scopeId = groupId ?? (bots.length > 1 ? 'main' : bots[0].id)
@@ -1026,7 +1249,13 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
     holdSession(session)
     emit('session', { id: session })
     // Stored before waiting its turn: the message was sent now, even if the agent is still on the last one.
-    if (text != null) await db.addMessage(scope, scopeId, session, { role: 'user', speaker: USER_SPEAKER, content: text })
+    // Its attachments become this session's, and are copied into the agent's machine (any member's will
+    // do in a group: they all mount its drive); the message keeps where each one landed.
+    if (text != null) {
+      const files = await deliverToInbox((await db.attachFiles(fileIds, scope, scopeId, session)).map(fileView),
+        bots[0], scope === 'group' ? scopeId : null)
+      await db.addMessage(scope, scopeId, session, { role: 'user', speaker: USER_SPEAKER, content: text, files })
+    }
     const key = `session:${session}`
     // One turn per session at a time — a second message would race the first for the same history. It waits instead.
     if (locks.has(key) && text != null) emit('note', { text: tr(lang, 'run.queued') })
@@ -1175,10 +1404,10 @@ async function runTask(id) {
       if (await db.updateTask(id, { status: 'waiting', question: ctx.question }, { from: ['running', 'waiting'] }))
         await taskEvent(t, 'asked', ctx.question)
     } else {
-      // Ended without finish_task: what it said last is the report.
+      // Ended without finish_task: what it said last is the report. Files it sent go with the report.
       const result = ctx.result ?? clipText(text || '(finished without a report)', RESULT_MAX)
       if (await db.updateTask(id, { status: 'done', result, approval: null, finished_at: new Date() }, { from: ['running', 'waiting'] }))
-        await taskEvent(t, 'done', result)
+        await taskEvent(t, 'done', result, ctx.sent?.length ? { files: ctx.sent } : {})
     }
   } catch (e) {
     if (ac.signal.aborted) return     // stopped: stopTask already wrote the status and the card
@@ -1523,7 +1752,7 @@ async function providerFromBody(b) {
 }
 
 // ---------- HTTP ----------
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' }
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' }
 
 // Compared as hashes of equal length, so the time taken says nothing about how much of a guess was right.
 const digest = v => createHash('sha256').update(String(v)).digest()
@@ -1696,7 +1925,7 @@ const server = createServer(async (req, res) => {
         // Its tasks go with it; stop the ones still going first, or they'd report into a session that's gone.
         for (const x of await db.listTasks(s.scope, s.scope_id, 1000))
           if (x.session_id === s.id && isOpen(x)) await stopTask(x, '', { quiet: true })
-        await db.deleteSession(s.id)
+        await dropBlobs(await db.deleteSession(s.id))
         frontRead.delete(s.id)
         return send(200, { ok: true })
       }
@@ -1748,7 +1977,7 @@ const server = createServer(async (req, res) => {
       if (!await db.getAgent(bm[1])) return send(404, { error: t('err.noAgent') })
       for (const x of await db.tasksWithStatus(OPEN))
         if (x.agent_id === bm[1] || (x.scope === 'dm' && x.scope_id === bm[1])) await stopTask(x, '', { quiet: true })
-      await db.deleteAgent(bm[1])
+      await dropBlobs(await db.deleteAgent(bm[1]))
       // Delete the container too — an ownerless container only wastes memory,
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
       await removeContainer(bm[1]).catch(() => {})
@@ -1946,6 +2175,29 @@ const server = createServer(async (req, res) => {
       return send(200, { stopped: hit.length })
     }
 
+    // ---- Files ----
+    // Upload: the raw bytes as the body, ?kind=agent|group&id=<conversation>&name=<file name>. No
+    // multipart to parse; the content-type header is the type, and the extension decides when it says nothing.
+    if (url.pathname === '/api/files' && req.method === 'POST') {
+      const kind = url.searchParams.get('kind'), id = url.searchParams.get('id') ?? ''
+      const conv = kind === 'group' ? (await db.listGroups()).find(g => g.id === id) : await db.getAgent(id)
+      if (!conv) return send(404, { error: t(kind === 'group' ? 'err.noGroup' : 'err.noAgent') })
+      const row = await storeUpload(req, scopeOf(kind), id, url.searchParams.get('name') ?? '', req.headers['content-type'])
+      return send(200, fileView(row))
+    }
+    const fm = url.pathname.match(/^\/api\/files\/([\w-]+)$/)
+    if (fm) {
+      const f = await db.getFile(fm[1])
+      if (!f) return send(404, { error: t('file.none') })
+      // Taking back an upload before sending it. A sent file goes with its session, not on its own.
+      if (req.method === 'DELETE') {
+        if (f.session_id) return send(409, { error: t('file.sent') })
+        await dropBlobs(await db.dropUpload(f.id))
+        return send(200, { ok: true })
+      }
+      if (req.method === 'GET' || req.method === 'HEAD') return serveFile(req, res, f, url.searchParams.get('download') === '1')
+    }
+
     // ---- Background tasks ----
     // A conversation's tasks, newest first: ?kind=agent|group&id=
     if (url.pathname === '/api/tasks' && req.method === 'GET') {
@@ -2092,7 +2344,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       // target: {type:'agent'|'group', id}. botIds is the old field, kept for compatibility.
-      const { target, botIds = [], text = '', session = null } = await readBody(req)
+      const { target, botIds = [], text = '', session = null, files: fileIds = [] } = await readBody(req)
       const all = await loadBots()
       let bots, groupId = null
       if (target?.type === 'group') {
@@ -2106,7 +2358,15 @@ const server = createServer(async (req, res) => {
       } else {
         bots = all.filter(b => botIds.includes(b.id))
       }
-      if (!bots?.length || !text.trim()) return send(400, { error: t('chat.needTarget') })
+      // Attachments must be this conversation's own uploads, not sent before. A message may be only files.
+      const ids = Array.isArray(fileIds) ? [...new Set(fileIds.map(String))].slice(0, 20) : []
+      if (bots?.length && ids.length) {
+        const scope = groupId || bots.length > 1 ? 'group' : 'dm', scopeId = groupId ?? (bots.length > 1 ? 'main' : bots[0].id)
+        const rows = await db.getFiles(ids)
+        if (rows.length !== ids.length || rows.some(f => f.scope !== scope || f.scope_id !== scopeId || f.session_id))
+          return send(400, { error: t('file.notYours') })
+      }
+      if (!bots?.length || (!str(text).trim() && !ids.length)) return send(400, { error: t('chat.needTarget') })
 
       // Resolve everyone's upstream first: if one is missing, say so before opening the stream, not halfway through a group relay
       const providers = new Map()
@@ -2130,7 +2390,7 @@ const server = createServer(async (req, res) => {
       res.on('close', () => { if (!res.writableEnded) auto ? detachRun(run) : ac.abort() })
 
       try {
-        await converse(bots, groupId, providers, text, emit, ac, lang, { session: want, run })
+        await converse(bots, groupId, providers, str(text), emit, ac, lang, { session: want, run, files: ids })
       } finally { clearInterval(ping) }
       emit('done', {})
       return res.end()
@@ -2162,7 +2422,7 @@ const server = createServer(async (req, res) => {
     if (gm && req.method === 'DELETE') {         // disband; files in the shared drive are left alone
       const g = (await db.listGroups()).find(x => x.id === gm[1])
       for (const x of await db.listTasks('group', gm[1], 1000)) if (isOpen(x)) await stopTask(x, '', { quiet: true })
-      await db.deleteGroup(gm[1])
+      await dropBlobs(await db.deleteGroup(gm[1]))
       if (g) dropContainersOf(g.members)
       return send(200, { ok: true })
     }
@@ -2249,8 +2509,9 @@ if (s.seeded) console.log(`First start, imported from files: ${s.agents} agents,
 if (await db.seedProviderFromEnv(env)) console.log('Created the default upstream from .env (change it later in the UI ⚙)')
 { const n = await db.fillAgentModels(); if (n) console.log(`${n} agent(s) took over the model name from their upstream`) }
 
-await mkdir(join(WORKROOT, 'agents'), { recursive: true })
-await mkdir(join(WORKROOT, 'groups'), { recursive: true })
+await mkdir(join(LOCALWORK, 'agents'), { recursive: true })
+await mkdir(join(LOCALWORK, 'groups'), { recursive: true })
+await mkdir(FILES_DIR, { recursive: true })
 await recoverTasks()
 
 // Keep idle keep-alive connections for 65 seconds (Node's default is 5). Connections in a client's pool
@@ -2349,6 +2610,8 @@ server.on('upgrade', async (req, socket) => {
 
 // Scheduled tasks: runs missed while down are made up only once after startup (next_run_at in the past → due on this tick)
 setInterval(() => tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e)), 20_000)
+setInterval(() => sweepUploads().catch(e => console.warn('[files] sweep failed:', e.message)), 3_600_000)
+sweepUploads().catch(e => console.warn('[files] sweep failed:', e.message))
 tickRoutines().catch(e => console.error('Scheduled task dispatch failed', e))
 
 server.listen(CFG.port, CFG.host, () => {

@@ -35,7 +35,7 @@ the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
 2.6–2.11 are kept because the dsh source-code findings in them still hold and will be needed the day
 we plug in the runtime.
 
-**For the current shape see 2.12, 2.18 and 2.31** (background tasks): PostgreSQL + one container per Agent + one-command
+**For the current shape see 2.12, 2.18, 2.31** (background tasks) **and 2.32** (files): PostgreSQL + one container per Agent + one-command
 compose deployment.
 
 **Branch `feat/studio` (2026-09-25, not merged by the boss's decision)** turns the product into an AI
@@ -1847,6 +1847,83 @@ cards, reply box, panel, trace, zero errors. Client: 45 tests (+ tasks, + panel 
 containers (no docker on the Mac this ran on), a real model actually choosing to delegate well, the Flutter
 build run as an app.
 
+## 2.32 Files both ways, with previews (2026-10-06)
+
+The boss: "用户和AI 最好都能直接发送文件图片视频等 并且支持直接预览图片 md txt pdf 等常用文件" (users and the AI
+should both be able to send files, images, videos and so on, with direct previews of images, md, txt, pdf and
+other common files).
+
+- **Stored once, by the server**: bytes at `<workspace>/files/<id>` (a directory no agent container mounts),
+  a row in table `files` (conversation, session, name, mime, size, `by_agent`). An upload belongs to one
+  conversation from the start and gets a session only when a message is sent with it — so one conversation
+  can't post another's uploads, a file can't be sent twice, and an unsent upload is swept after a day.
+  A message keeps the list it needs to draw them (`messages.files`, jsonb), so a transcript is still one query.
+  Deleting a session / agent / group returns the file ids from db.mjs and the server deletes the bytes.
+- **API**: `POST /api/files?kind=&id=&name=` with the raw bytes as body (no multipart; content-type = type,
+  the extension decides when it's empty/octet-stream; `UPLOAD_MAX_MB`, default 50), `GET /api/files/:id`
+  (Range supported — video seeking needs it; `?download=1` for an attachment), `DELETE` only for an unsent
+  upload. `POST /api/chat` takes `files: [ids]`; a message may be only files.
+- ⚠️ **Never serve a file as something that runs on our origin.** An agent can be talked into sending an HTML
+  page, and on this origin a script would hold the person's session (the cookie is HttpOnly, but same-origin
+  `fetch` doesn't need to read it). `servedHeaders` in `web/files.mjs`: HTML / JS / XML / text all go out as
+  `text/plain`, unknown types as `application/octet-stream`, `nosniff`, and a `sandbox` CSP on everything —
+  **except PDF**, which Chrome won't render under a sandbox CSP. Tested: an uploaded `evil.html` previews as its
+  source text and the page title stays put.
+- **What the model gets**: every attachment adds a line `[Attached: name (type, size) — saved at <path>]`.
+  On the turn it is sent (messages after the last reply) images go in as images (png/jpeg/gif/webp ≤ 5 MB,
+  4 per turn) and text/Markdown files inline (20k characters each, 60k per turn); later turns only get the
+  line — every step resends the whole history. A model that rejects images loses them the usual way (2.22).
+  PDFs, video and archives are only lines + the inbox copy (no PDF parsing on the server).
+- **The inbox**: with tools on, each attachment is copied into the agent's machine — `/work/inbox` in a DM,
+  `/groups/<gid>/inbox` in a group (any member's container writes it; they all mount the drive). Names never
+  overwrite (`a.pdf`, `a (2).pdf`).
+- **`send_file {path}`** (tools on): the agent hands the person a file from `/work` or **the drive of the group it
+  is talking in** — never another group's drive, nothing under `/groups` from a DM (`sendablePath`). It shows as
+  the file itself (the agent's avatar, no command card), live and after a reload; the tool row stores it.
+  From a background task the files ride on the task's `done` card and the front thread is told their names.
+- ⚠️ **Files cross the container boundary only through `docker exec`**, never through the host path of the
+  agent's desk. Reading `/srv/workspace/agents/x/report.pdf` on the host follows any link the agent planted —
+  `report.pdf -> /etc/shadow` would be read on the host (and writing the inbox through a planted `inbox -> /etc`
+  would write there). Inside the container the same link only reaches what the agent could reach anyway. Both
+  scripts (`INBOX_SCRIPT`, `SEND_SCRIPT` in server.mjs) also run `PATH_GUARD`, and SEND re-checks the real path
+  after links are followed.
+- `LOCALWORK` = the workspace as this process sees it: `WORKSPACE_HOST_PATH` when that exists here (run on the
+  host), else `./workspace` (in compose it's the mount of the same directory). The container mkdirs use it too
+  now — they used `./workspace`, which run on the host was a directory no container mounted.
+- **UI** (web): 📎 next to the composer, drag onto the chat, or paste a screenshot; files upload at once (XHR, for
+  progress) and wait as chips; Send waits for them. Under a message: images as thumbnails, video / audio
+  players, everything else a card with an extension badge. Clicking opens the preview: image, video, audio,
+  PDF (the browser's viewer in an iframe), Markdown (`web/markdown.mjs` — escaped first, http(s) links only, no
+  images fetched), text/code/JSON (first 2 MB via a Range request), others "no preview" + Download. Leaving a
+  conversation drops what wasn't sent. `web/markdown.mjs` is served as a module, so `.mjs` got a MIME type.
+- **UI** (client, `lib/features/workbench/attachments.dart`, Markdown parser `lib/data/markdown.dart`): a paperclip
+  opens the file picker (multi-select); chips with progress above the input; Send waits for uploads; switching
+  conversation drops (and deletes) unsent uploads. Images are thumbnails that open full screen with zoom; Markdown is
+  rendered and text shown (first 1 MB) in a dialog; **PDF, video, audio and other files open in the OS's own app**
+  (download to temp, then `open` / `xdg-open` / `start` — `AppPlatform.openCommand`, since `Platform.isX` is only
+  allowed in `platform.dart`); every preview has Save as…. **No drag-and-drop or paste in the client** — both need a
+  plugin (`desktop_drop`, `super_clipboard`); a desktop Flutter app has no PDF/video widget without one either.
+
+Verified locally (fake upstream, tools off): uploads (Chinese name, empty → 400, unknown conversation → 404),
+another conversation's upload refused, a sent file can't be reused or deleted alone, the model got 1 image + 7
+lines on the turn and only lines on the next, a files-only message, headers per type (image/pdf/text/html),
+a Range request, download disposition, 401 without the token, deleting the session removed rows and bytes.
+Web in headless Chromium: 6 picked + 1 dropped file, send, thumbnails decoded, Markdown/JSON/HTML/PDF/zip/image
+previews, Esc, everything back after a reload, zero page errors.
+
+**On a real deployment** (test box `216.195.194.137`, compose project `cbtest` in `/opt/cirrayabot-test`, port
+18090 on localhost only, `AGENT_PREFIX=cbt`, tools on, 66hxhx `gpt-5.6-sol`): the agent found both attachments in
+`/work/inbox`, answered the image's colour (red, it also checked the pixels with python) and the code word from the
+Markdown file, wrote `summary.md` and sent it. Scripted agent against real containers: a planted
+`/work/sec/leak -> /etc/shadow` refused ("is really /etc/shadow"), `/groups/<other>/…` and `../../etc/passwd`
+refused, a relative link inside /work sent; a group-mate's `/groups/<g>/inbox -> /work/secretdir` made the inbox
+write fail (PATH_GUARD) while the message still went through without a path. Web through an SSH tunnel: the agent's
+`report.md` + `chart.png` rendered as its file messages live and after a reload. The client's `Workbench`/`Api` (a
+throwaway test, not committed) uploaded, sent, got both agent files live and after reopening. ⚠️ That run caught a
+real bug: `db.addTool` only stored name/args/output, so the file of a `send_file` row vanished on reload — it keeps
+`file` now. **Not verified**: the macOS app launched (`open` from the sandboxed app is untested; Save as… is the
+fallback), Windows.
+
 ## 3. What runs now
 
 ```bash
@@ -1860,6 +1937,8 @@ node web/sandbox.mjs       # self-test for what an agent's container sees (needs
 node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate guard)
 node web/autonomy.mjs      # self-test for auto mode: limits, the plan, nudges
 node web/tasks.mjs         # self-test for background tasks: input, who gets it, what the front thread is told
+node web/files.mjs         # self-test for attachments: types, what they're served as, names, what send_file may read
+node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/

@@ -129,6 +129,8 @@ class Message {
     this.args = const {},
     this.id,
     this.event,
+    this.files = const [],
+    this.file,
   });
 
   /// The server's row id — a search hit names the message it found by this.
@@ -141,8 +143,70 @@ class Message {
   final Map<Object?, Object?> args;
 
   /// Set for news about a background task (it asked, finished, failed…):
-  /// `{task, kind, agent, agent_id, title, text, by?, approval?}`.
+  /// `{task, kind, agent, agent_id, title, text, by?, approval?, files?}`.
   final Map<String, Object?>? event;
+
+  /// What the message carries: the person's attachments, or none.
+  final List<Attachment> files;
+
+  /// On a `send_file` tool row: the file the agent sent.
+  final Attachment? file;
+}
+
+/// A file someone sent — the person, or an agent with send_file. The bytes
+/// stay on the server; this is what a screen needs to draw and fetch it.
+class Attachment {
+  const Attachment({required this.id, required this.name, required this.mime, required this.size, required this.kind});
+
+  factory Attachment.fromJson(Map<String, Object?> j) => Attachment(
+    id: '${j['id'] ?? ''}',
+    name: (j['name'] as String?) ?? '',
+    mime: (j['mime'] as String?) ?? 'application/octet-stream',
+    size: (j['size'] as num?)?.toInt() ?? 0,
+    kind: (j['kind'] as String?) ?? 'other',
+  );
+
+  /// A list of them from whatever the server put in a field; anything else is none.
+  static List<Attachment> listOf(Object? v) => [
+    for (final f in v is List ? v : const [])
+      if (f is Map) Attachment.fromJson(f.cast<String, Object?>()),
+  ];
+
+  static Attachment? maybe(Object? v) => v is Map ? Attachment.fromJson(v.cast<String, Object?>()) : null;
+
+  final String id;
+  final String name;
+  final String mime;
+  final int size;
+
+  /// image / video / audio / pdf / markdown / text / other — decided by the server.
+  final String kind;
+
+  bool get isImage => kind == 'image';
+}
+
+/// A size as a person reads it.
+String sizeText(int n) => n < 1024
+    ? '$n B'
+    : n < 1024 * 1024
+    ? '${(n / 1024).toStringAsFixed(1)} KB'
+    : '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
+
+/// The type to declare when uploading. The server decides again from the name
+/// when this says nothing useful, so the list only needs the common ones.
+String mimeForName(String name) {
+  final dot = name.lastIndexOf('.');
+  final ext = dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
+  return const {
+        'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif', 'webp': 'image/webp',
+        'svg': 'image/svg+xml', 'bmp': 'image/bmp', 'heic': 'image/heic',
+        'mp4': 'video/mp4', 'm4v': 'video/mp4', 'mov': 'video/quicktime', 'webm': 'video/webm',
+        'mp3': 'audio/mpeg', 'm4a': 'audio/mp4', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+        'pdf': 'application/pdf', 'md': 'text/markdown', 'markdown': 'text/markdown',
+        'txt': 'text/plain', 'log': 'text/plain', 'csv': 'text/csv', 'json': 'application/json',
+        'zip': 'application/zip',
+      }[ext] ??
+      'application/octet-stream';
 }
 
 /// Work a conversation handed out to run in the background. It reports back
@@ -725,6 +789,7 @@ class Api {
           speaker: speaker,
           text: (m['text'] as String?) ?? '',
           at: (m['at'] as num?)?.toInt() ?? 0,
+          files: Attachment.listOf(m['files']),
         );
       }).toList();
     }
@@ -739,6 +804,7 @@ class Api {
         speaker: m['role'] == 'user' ? userSpeaker : c.name,
         text: (m['content'] as String?) ?? '',
         at: (m['at'] as num?)?.toInt() ?? 0,
+        files: Attachment.listOf(m['files']),
       );
     }).toList();
   }
@@ -804,6 +870,7 @@ class Api {
     at: (m['at'] as num?)?.toInt() ?? 0,
     tool: (m['name'] as String?) ?? '',
     args: (m['args'] as Map?) ?? const {},
+    file: Attachment.maybe(m['file']),
   );
 
   Message _eventMessage(Map<String, Object?> m) => Message(
@@ -1021,17 +1088,148 @@ class Api {
   /// so a late click gets an ApiException rather than a silent yes.
   Future<void> answerApproval(String id, bool ok) => _json('POST', '/api/approvals/$id', {'ok': ok});
 
+  // ---- Files ----
+  // The same network failures _send turns into ApiException, for calls that
+  // stream a body or a download and so can't go through it.
+  Future<T> _net<T>(Future<T> Function() f) async {
+    try {
+      return await f();
+    } on HttpException catch (e) {
+      throw ApiException(ApiFailure.unreachable, e.message);
+    } on SocketException catch (e) {
+      throw ApiException(ApiFailure.unreachable, e.osError?.message ?? e.message);
+    } on StateError catch (e) {
+      throw ApiException(ApiFailure.unreachable, e.message);
+    } on ArgumentError {
+      throw ApiException(ApiFailure.unreachable, tr('api.badUrl'));
+    } on TlsException catch (e) {
+      throw ApiException(ApiFailure.unreachable, tr('api.tls', {'detail': e.message}));
+    }
+  }
+
+  /// A non-2xx answer as an ApiException, with the server's own sentence when it sent one.
+  Future<Never> _fail(HttpClientResponse res) async {
+    if (res.statusCode == 401) {
+      await res.drain<void>();
+      throw const ApiException(ApiFailure.unauthorized);
+    }
+    final text = await res.transform(const Utf8Decoder(allowMalformed: true)).join();
+    String detail = text;
+    try {
+      final j = jsonDecode(text);
+      if (j is Map && j['error'] is String) detail = j['error'] as String;
+    } catch (_) {}
+    throw ApiException(ApiFailure.server, detail.trim());
+  }
+
+  /// Upload a file to [c] — streamed from disk, so a large one never sits in
+  /// memory. It belongs to that conversation and to no message until one is
+  /// sent with it. A local file that can't be read throws FileSystemException.
+  Future<Attachment> uploadFile(
+    Conversation c,
+    String path, {
+    String? name,
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final file = File(path);
+    final fileName = name ?? path.split(RegExp(r'[\\/]')).last;
+    final total = await file.length();
+    final res = await _net(() async {
+      final req = await _client.openUrl(
+        'POST',
+        _uri(
+          '/api/files?kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}&name=${Uri.encodeQueryComponent(fileName)}',
+        ),
+      );
+      req.headers.set('X-Lang', currentLang.value.code);
+      req.headers.contentType = ContentType.parse(mimeForName(fileName));
+      req.contentLength = total;
+      var sent = 0;
+      onProgress?.call(0, total);
+      await req.addStream(
+        file.openRead().map((chunk) {
+          sent += chunk.length;
+          onProgress?.call(sent, total);
+          return chunk;
+        }),
+      );
+      return req.close();
+    });
+    if (res.statusCode >= 400) await _fail(res);
+    final text = await res.transform(utf8.decoder).join();
+    try {
+      final j = jsonDecode(text);
+      if (j is Map<String, Object?>) return Attachment.fromJson(j);
+    } on FormatException {
+      // fall through
+    }
+    throw ApiException(ApiFailure.server, tr('api.badShape'));
+  }
+
+  /// Take back an upload that was never sent.
+  Future<void> deleteUpload(String id) => _json('DELETE', '/api/files/$id');
+
+  /// Where a file is fetched from. The token rides in the query, so this is
+  /// usable as-is by Image.network.
+  Uri fileUri(String id, {bool download = false}) => _uri('/api/files/$id${download ? '?download=1' : ''}');
+
+  /// The start of a text file, for a preview: at most [maxBytes], and whether
+  /// there was more.
+  Future<({String text, bool cut})> fileText(String id, {int maxBytes = 1 << 20}) async {
+    final res = await _net(() async {
+      final req = await _client.openUrl('GET', fileUri(id));
+      req.headers.set('X-Lang', currentLang.value.code);
+      req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-${maxBytes - 1}');
+      return req.close();
+    });
+    if (res.statusCode >= 400) await _fail(res);
+    final bytes = <int>[];
+    var cut = false;
+    await for (final chunk in res) {
+      final room = maxBytes - bytes.length;
+      if (chunk.length >= room) {
+        bytes.addAll(chunk.take(room));
+        cut = cut || chunk.length > room;
+        break;
+      }
+      bytes.addAll(chunk);
+    }
+    // A 206 says how long the whole file is: "bytes 0-1048575/5242880".
+    final range = res.headers.value(HttpHeaders.contentRangeHeader);
+    final whole = int.tryParse(range?.split('/').last ?? '');
+    if (whole != null && whole > bytes.length) cut = true;
+    return (text: const Utf8Decoder(allowMalformed: true).convert(bytes), cut: cut);
+  }
+
+  /// Save a file to [toPath].
+  Future<void> downloadFile(String id, String toPath) async {
+    final res = await _net(() async {
+      final req = await _client.openUrl('GET', fileUri(id, download: true));
+      req.headers.set('X-Lang', currentLang.value.code);
+      return req.close();
+    });
+    if (res.statusCode >= 400) await _fail(res);
+    final sink = File(toPath).openWrite();
+    try {
+      await _net(() => res.pipe(sink));
+    } catch (_) {
+      await sink.close().catchError((_) {});
+      rethrow;
+    }
+  }
+
   /// Sends a message and yields events as they arrive.
   ///
   /// The reply is streamed because the whole point is watching a colleague
   /// work — tool calls, handoffs and text land as they happen, not in one
   /// block at the end.
   /// [session] null starts a new one; the server says which with a `session` event.
-  Stream<ChatEvent> chat(Conversation c, String text, {String? session}) async* {
+  Stream<ChatEvent> chat(Conversation c, String text, {String? session, List<String> files = const []}) async* {
     final res = await _send('POST', '/api/chat', {
       'target': {'type': c.kind, 'id': c.id},
       'text': text,
       'session': session ?? 'new',
+      if (files.isNotEmpty) 'files': files,
     });
     if (res.statusCode >= 400) {
       final body = await res.transform(utf8.decoder).join();

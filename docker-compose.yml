@@ -41,6 +41,8 @@ services:
       AGENT_MEMORY: ${AGENT_MEMORY:-2g}
       AGENT_CPUS: ${AGENT_CPUS:-2}
       AGENT_EXEC_TIMEOUT: ${AGENT_EXEC_TIMEOUT:-120}
+      # largest file a person or an agent can send, in MB
+      UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-50}
       # change it when running a second deployment on the same machine, or both fight over the same container names
       AGENT_PREFIX: ${AGENT_PREFIX:-ma}
       # ⚠️ Agent containers are SIBLINGS, not children: the left side of -v must be a real host path.

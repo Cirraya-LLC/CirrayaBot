@@ -60,6 +60,7 @@ Future<(HttpServer, Completer<void>)> fakeServer({String historyB = 'B history',
 
 void main() {
   tasksTest();
+  filesTest();
 
   // Reopening a conversation used to show only the final text: which commands ran was
   // lost with the stream. A stored tool row has to come back as a finished card.
@@ -332,3 +333,93 @@ void tasksTest() {
     await server.close(force: true);
   });
 }
+
+/// Files: a stored message brings its attachments, a stored send_file call
+/// comes back as the file (not a command card), a live one replaces its card
+/// where it stood, and a message can be only files.
+void filesTest() {
+  test('attachments in history, send_file live and stored, and a files-only message', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    Map<String, Object?>? chatBody;
+    final uploaded = <String>[];
+    server.listen((req) async {
+      final res = req.response..headers.contentType = ContentType.json;
+      switch (req.uri.path) {
+        case '/api/conversations':
+          res.write(jsonEncode([{'kind': 'agent', 'id': 'a', 'name': 'A', 'members': ['a']}]));
+        case '/api/bots':
+          res.write(jsonEncode([{'id': 'a', 'name': 'A', 'persona': 'x', 'color': '#336699'}]));
+        case '/api/sessions':
+          res.write(jsonEncode([{'id': 's1', 'title': 'only'}]));
+        case '/api/dm/a':
+          res.write(jsonEncode([
+            {
+              'id': 1, 'role': 'user', 'content': 'look',
+              'files': [{'id': 'f1', 'name': 'shot.png', 'mime': 'image/png', 'size': 10, 'kind': 'image'}],
+            },
+            {
+              'id': 2, 'role': 'tool', 'speaker': 'A', 'name': 'send_file', 'args': {'path': '/work/r.md'},
+              'output': 'Sent r.md', 'file': {'id': 'f2', 'name': 'r.md', 'mime': 'text/markdown', 'size': 5, 'kind': 'markdown'},
+            },
+            {'id': 3, 'role': 'assistant', 'content': 'done', 'files': []},
+          ]));
+        case '/api/files':
+          await req.drain<void>();
+          final name = req.uri.queryParameters['name']!;
+          uploaded.add(name);
+          res.write(jsonEncode({'id': 'up-$name', 'name': name, 'mime': 'text/plain', 'size': 3, 'kind': 'text'}));
+        case '/api/chat':
+          chatBody = jsonDecode(await utf8.decoder.bind(req).join()) as Map<String, Object?>;
+          res.headers.contentType = ContentType('text', 'event-stream', charset: 'utf-8');
+          void ev(String name, Map<String, Object?> d) => res.write('event: $name\ndata: ${jsonEncode(d)}\n\n');
+          ev('session', {'id': 's1'});
+          ev('start', {'botId': 'a'});
+          ev('tool', {'botId': 'a', 'phase': 'run', 'name': 'send_file', 'args': {'path': 'out.pdf'}});
+          ev('tool', {
+            'botId': 'a', 'phase': 'done', 'name': 'send_file', 'args': {'path': 'out.pdf'}, 'output': 'Sent out.pdf',
+            'file': {'id': 'f9', 'name': 'out.pdf', 'mime': 'application/pdf', 'size': 99, 'kind': 'pdf'},
+          });
+          ev('delta', {'botId': 'a', 'text': 'here you go'});
+          ev('end', {'botId': 'a'});
+          ev('done', {});
+        default:
+          res.write('[]');
+      }
+      await res.close();
+    });
+    final bench = Workbench(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    await bench.refresh();
+    await bench.open(bench.conversations.first);
+
+    final said = bench.entries[0] as Said;
+    expect(said.files.single.name, 'shot.png');
+    final sent = bench.entries[1] as SentFile;
+    expect(sent.file.kind, 'markdown');
+    expect(sent.speaker, 'A');
+
+    // Pick a file, then send with no text: a message that is only files.
+    final dir = await Directory.systemTemp.createTemp('wb-files');
+    final f = File('${dir.path}/a.txt')..writeAsStringSync('abc');
+    await bench.attach([f.path]);
+    expect(uploaded, ['a.txt']);
+    expect(bench.pending.single.attachment?.id, 'up-a.txt');
+    expect(bench.uploading, isFalse);
+    final before = bench.entries.length;
+    await bench.send('');
+    expect(chatBody?['files'], ['up-a.txt']);
+    expect(bench.pending, isEmpty, reason: 'they went with the message');
+    final mine = bench.entries[before] as Said;
+    expect(mine.mine, isTrue);
+    expect(mine.files.single.name, 'a.txt');
+    // The live send_file card was replaced by the file, where the card stood: before the reply text.
+    final live = bench.entries[before + 1];
+    expect(live, isA<SentFile>());
+    expect((live as SentFile).file.name, 'out.pdf');
+    expect((bench.entries[before + 2] as Said).text, 'here you go');
+
+    bench.dispose();
+    await server.close(force: true);
+    await dir.delete(recursive: true);
+  });
+}
+

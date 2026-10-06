@@ -47,6 +47,13 @@ export const serverStrings = {
     '「{name}」只剩 {n} 个成员了，先在群设置里加人（至少两个）',
     '「{name}」只剩 {n} 位成員了，請先在群組設定裡加人（至少兩位）'],
 
+  // Files
+  'file.tooBig':   ['That file is too big (the limit is {max})', '文件太大了（上限 {max}）', '檔案太大了（上限 {max}）'],
+  'file.empty':    ['That file is empty', '这是个空文件', '這是個空檔案'],
+  'file.none':     ['There is no such file', '没有这个文件', '沒有這個檔案'],
+  'file.sent':     ['That file was already sent; it goes when its session is deleted', '这个文件已经发出去了，要删得删掉它所在的会话', '這個檔案已經傳送了，要刪除得刪掉它所在的會話'],
+  'file.notYours': ['One of the attachments was not uploaded to this conversation, or was already sent', '有附件不是传到这个对话的，或者已经发过了', '有附件不是上傳到這個對話的，或者已經傳送過了'],
+
   // Background tasks
   'task.none':        ['There is no such task', '没有这个任务', '沒有這個任務'],
   'task.notOpen':     ['That task has already ended', '这个任务已经结束了', '這個任務已經結束了'],

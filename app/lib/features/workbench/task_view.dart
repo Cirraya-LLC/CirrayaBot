@@ -9,6 +9,7 @@ import '../../data/api.dart';
 import '../../l10n.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
+import 'attachments.dart';
 
 TextStyle get _mono => TextStyle(
   fontFamily: AppTheme.mono,
@@ -90,6 +91,10 @@ class NewsCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 _ApproveRow(bench: bench, task: x),
               ],
+            ],
+            if (n.kind == 'done' && n.files.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              AttachmentList(api: bench.api, files: n.files),
             ],
             if ((n.kind == 'done' || n.kind == 'failed') && n.text.isNotEmpty) ...[
               const SizedBox(height: 6),

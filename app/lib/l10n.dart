@@ -11,6 +11,7 @@ import 'package:flutter/widgets.dart';
 import 'l10n/browser.dart';
 import 'l10n/common.dart';
 import 'l10n/editors.dart';
+import 'l10n/files.dart';
 import 'l10n/settings.dart';
 import 'l10n/state.dart';
 import 'l10n/workbench.dart';
@@ -36,6 +37,7 @@ final List<Map<String, List<String>>> stringTables = [
   settingsStrings,
   browserStrings,
   stateStrings,
+  fileStrings,
 ];
 
 final Map<String, List<String>> _all = {for (final t in stringTables) ...t};

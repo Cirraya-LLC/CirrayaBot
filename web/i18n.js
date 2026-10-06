@@ -278,6 +278,18 @@ const M = {
   'k.srcNote': ['This was {src}. Once you edit it, it’s yours and they can no longer overwrite it.', '这是 {src}。你一改它就算你的了，他以后不能再覆盖。', '這是 {src}。你一修改它就算你的了，他之後不能再覆蓋。'],
   'k.confirmDelete': ['Delete skill “{name}”? Agents that have it will stop working this way.', '删掉技能「{name}」？装了它的 Agent 以后就不会这么做了。', '刪除技能「{name}」？安裝了它的 Agent 之後就不會這樣做了。'],
 
+  // files
+  'file.attach': ['Attach files (or drop them here, or paste)', '添加文件（也可以拖进来或粘贴）', '附加檔案（也可以拖進來或貼上）'],
+  'file.download': ['Download', '下载', '下載'],
+  'file.loading': ['Loading…', '加载中…', '載入中…'],
+  'file.loadFailed': ['Could not load this file', '这个文件加载不出来', '這個檔案載入不了'],
+  'file.cut': ['Only the first 2 MB is shown — download it for the rest', '只显示了前 2 MB，完整内容请下载', '只顯示了前 2 MB，完整內容請下載'],
+  'file.noPreview': ['No preview for this kind of file', '这种文件没法预览', '這種檔案無法預覽'],
+  'file.remove': ['Remove', '移除', '移除'],
+  'file.uploading': ['Uploading {pct}%', '上传中 {pct}%', '上傳中 {pct}%'],
+  'file.failed': ['Upload failed', '上传失败', '上傳失敗'],
+  'file.waitUpload': ['Still uploading — send once the files are up', '文件还在上传，传完再发', '檔案還在上傳，傳完再傳送'],
+
   // background tasks (not to be confused with scheduled tasks below)
   's2.tasks': ['Background tasks', '后台任务', '背景任務'],
   'tk.none': ['Nothing handed out yet. Ask for something big and it runs here in the background.', '还没有派出去的活。交代一件大事，它就会在这里后台进行。', '還沒有派出去的工作。交代一件大事，它就會在這裡背景進行。'],
