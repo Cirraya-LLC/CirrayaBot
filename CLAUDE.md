@@ -1956,6 +1956,15 @@ awake while charging: `settings global stay_on_while_plugged_in 7`).
   view (`_atBottom` + `ScrollMetricsNotification` — thumbnails load after the list is laid out); without
   `scheduleFrame()` the jump waited for the next touch, so a cold start landed half a message short.
   Found with `debugPrint` + `adb logcat` on the phone; desktop had the same bug, less visibly.
+- ⚠️ **A jump also ends the drag.** The boss: 「但是现在会话的上下滚动有点问题 滚不动」 — a swipe up from the bottom
+  didn't move the transcript at all, not even mid-swipe. The lazy list re-measures rows as they come into view, so
+  a `ScrollMetricsNotification` arrives a pixel into the swipe, still inside the 48px "at the bottom" band; the
+  follow logic jumped to the bottom, and `jumpTo` puts the position idle — the drag is disposed and the rest of the
+  swipe goes nowhere. (`_onChange` did the same on any change within 160px.) Now nothing follows while
+  `isScrollingNotifier` is true (finger down or coasting), only depth-0 notifications count (not a code block
+  scrolling sideways inside a message), `_onChange` uses `_atBottom` instead of its own 160px guess, and only a new
+  conversation/session or sending a message forces the jump. `test/scroll_test.dart` swipes while a reply streams
+  in; it fails on the old code.
 - The conversation list says why it is empty when it couldn't load (the error used to show only in the chat
   column, which a phone's list doesn't have), with **Try again**; pull down to refresh.
 - **Testing on the phone**: `adb reverse tcp:18090 tcp:<mac port>` gives the phone `http://127.0.0.1:18090`
