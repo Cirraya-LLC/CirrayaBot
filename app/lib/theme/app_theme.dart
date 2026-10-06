@@ -211,6 +211,51 @@ abstract final class C {
 /// Anyone may set it; the app root persists it and repaints.
 final ValueNotifier<ThemeMode> currentTheme = ValueNotifier(ThemeMode.system);
 
+/// How big the whole interface is drawn: 0 = automatic (larger on a phone, where the desktop
+/// sizes — 12px labels, 18px icons — are too small to read and tap), else a factor.
+final ValueNotifier<double> currentScale = ValueNotifier(0);
+
+/// The choices offered under Appearance.
+const uiScales = [0.0, 1.0, 1.15, 1.3];
+
+/// The factor actually used for a choice.
+double effectiveScale(double chosen) => chosen > 0 ? chosen : (AppPlatform.isPhone ? 1.15 : 1.0);
+
+/// Draws [child] [scale] times larger: it is laid out at the screen size divided by [scale] and
+/// stretched to fill — text, icons and spacing grow together, so nothing has to be resized one
+/// widget at a time. Everything that comes from the screen in logical pixels (size, safe areas,
+/// the keyboard) is divided too, so layout and the keyboard still line up.
+class UiScale extends StatelessWidget {
+  const UiScale({super.key, required this.scale, required this.child});
+
+  final double scale;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (scale == 1) return child;
+    final mq = MediaQuery.of(context);
+    final size = mq.size / scale;
+    return MediaQuery(
+      data: mq.copyWith(
+        size: size,
+        devicePixelRatio: mq.devicePixelRatio * scale,
+        padding: mq.padding / scale,
+        viewPadding: mq.viewPadding / scale,
+        viewInsets: mq.viewInsets / scale,
+        systemGestureInsets: mq.systemGestureInsets / scale,
+      ),
+      child: SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.fill,
+          alignment: Alignment.topLeft,
+          child: SizedBox(width: size.width, height: size.height, child: child),
+        ),
+      ),
+    );
+  }
+}
+
 abstract final class AppTheme {
   static String? get mono => AppPlatform.monospaceFamily;
   static List<String> get monoFallback => AppPlatform.monospaceFallback;

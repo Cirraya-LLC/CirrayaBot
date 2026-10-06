@@ -24,9 +24,9 @@ const Map<String, List<String>> settingsStrings = {
   'setup.test': ['Test connection', '测试连接', '測試連線'],
   'setup.connect': ['Connect', '连接', '連線'],
   'setup.footer': [
-    'This client stores no chats — Agents, groups and history live in the\nserver\'s database, so another computer sees the same thing.',
-    '这个客户端不存任何聊天内容 —— Agent、群、记录都在服务器的\n数据库里，换台电脑打开还是同一份。',
-    '這個用戶端不存任何聊天內容 —— Agent、群組、紀錄都在伺服器的\n資料庫裡，換台電腦打開還是同一份。',
+    'This client stores no chats — Agents, groups and history live in the server\'s database, so another computer sees the same thing.',
+    '这个客户端不存任何聊天内容 —— Agent、群、记录都在服务器的数据库里，换台电脑打开还是同一份。',
+    '這個用戶端不存任何聊天內容 —— Agent、群組、紀錄都在伺服器的資料庫裡，換台電腦打開還是同一份。',
   ],
 
   // Providers

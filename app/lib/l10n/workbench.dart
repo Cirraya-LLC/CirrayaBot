@@ -87,6 +87,8 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.listSep': [', ', '、', '、'],
   'wb.back': ['Back to conversations', '返回对话列表', '返回對話列表'],
   'wb.retry': ['Try again', '重试', '重試'],
+  'ui.sizeAuto': ['Size: automatic', '大小：自动', '大小：自動'],
+  'ui.size': ['Size: {pct}%', '大小：{pct}%', '大小：{pct}%'],
   'wb.hideRight': ['Hide side panel', '收起右栏', '收合右欄'],
   'wb.resize': ['Drag to resize · double-click to reset', '拖动调整宽度 · 双击恢复默认', '拖曳調整寬度 · 按兩下還原預設'],
   'wb.collapseSidebar': ['Collapse sidebar', '收起侧栏', '收合側欄'],

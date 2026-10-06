@@ -742,15 +742,26 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     _footIcon(Icons.auto_awesome_outlined, tr('wb.skillLibrary'), () => _openSkills()),
                     _footIcon(Icons.dns_outlined, tr('wb.server'), widget.onEditServer),
                     // The app root persists these choices and rebuilds everything.
-                    PopupMenuButton<ThemeMode>(
+                    PopupMenuButton<Object>(
                       tooltip: tr('common.theme'),
-                      initialValue: currentTheme.value,
-                      onSelected: (m) => currentTheme.value = m,
+                      // Colours, then size — both are "how it looks".
+                      onSelected: (v) => v is ThemeMode ? currentTheme.value = v : currentScale.value = v as double,
                       itemBuilder: (_) => [
                         for (final m in ThemeMode.values)
-                          PopupMenuItem(
+                          CheckedPopupMenuItem<Object>(
                             value: m,
+                            checked: currentTheme.value == m,
                             child: Text(tr('theme.${m.name}'), style: const TextStyle(fontSize: 13)),
+                          ),
+                        const PopupMenuDivider(),
+                        for (final v in uiScales)
+                          CheckedPopupMenuItem<Object>(
+                            value: v,
+                            checked: currentScale.value == v,
+                            child: Text(
+                              v == 0 ? tr('ui.sizeAuto') : tr('ui.size', {'pct': (v * 100).round()}),
+                              style: const TextStyle(fontSize: 13),
+                            ),
                           ),
                       ],
                       child: _iconBox(C.isLight ? Icons.light_mode_outlined : Icons.dark_mode_outlined),
