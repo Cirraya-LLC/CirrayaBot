@@ -15,8 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        # The Dockerfile points apt at a mirror in China by default; from here Debian's own is faster.
-        run: docker build --build-arg APT_MIRROR=deb.debian.org -t agent-ci - < deploy/agent.Dockerfile
+        run: docker build -t agent-ci - < deploy/agent.Dockerfile
       - name: Runs as the agent, with no capabilities
         run: |
           docker run --rm --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges agent-ci \

@@ -8,9 +8,9 @@
 # network, the rules that keep agents off the host and the LAN (sandbox.mjs EGRESS_SCRIPT).
 FROM debian:trixie-slim
 
-# Where apt downloads from. A mirror in China by default; AGENT_APT_MIRROR=deb.debian.org (the
-# server passes it as this build argument) keeps Debian's own CDN, much faster outside China.
-ARG APT_MIRROR=mirrors.aliyun.com
+# Where apt downloads from: Debian's own CDN, unless AGENT_APT_MIRROR names a mirror (the server
+# passes it as this build argument).
+ARG APT_MIRROR=deb.debian.org
 RUN if [ "$APT_MIRROR" != deb.debian.org ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; fi
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq less file procps python3 iptables \

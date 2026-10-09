@@ -2237,8 +2237,8 @@ output masked; validation; tasks get no request_secret. `app/test/secret_test.da
 - Measured on the test box (Docker 26, iptables-nft): from an agent, example.com 200, DNS ok; the host's public
   IP, the bridge gateway, the app container, 10.0.0.1, 192.168.1.1 and 169.254.169.254 all time out — while a
   container on the default bridge reaches the host (200), so it is the rules. One jump each after two restarts.
-- **The agent image's apt mirror** is a build argument now (`AGENT_APT_MIRROR`; default the Aliyun mirror as
-  before, `deb.debian.org` = Debian's CDN). On the test box Aliyun ran at ~280 KB/s and Debian at ~100 MB/s.
+- **The agent image's apt mirror** is a build argument (`AGENT_APT_MIRROR`; default Debian's own CDN — the Aliyun
+  mirror it used to hard-code ran at ~280 KB/s on the test box against ~100 MB/s for Debian's).
 
 ### 2.36.9 CI, backup, restore, upgrade
 
@@ -2312,6 +2312,10 @@ Same day: 「客户端倒是不急 当前就desktop和android就够了」 (no iO
 **「我们只允许自己添加上游 不内置 也不预设AImodel」** — the person adds every upstream; the product ships no
 upstream, no model list, no per-model price table. What it may do is **read** what the person's own upstream
 reports (`/models`: context window, and price when the upstream lists one).
+
+**Not designing for mainland China** (the boss, 2026-10-09: 「不考虑国内 国内不配」). Don't pick defaults, mirrors
+or fallbacks for networks inside China (Google services blocked, a slow Debian CDN…), and don't count "works in
+China" as an advantage. The agent image's apt mirror defaults to Debian's own CDN since then.
 
 1. **Plug in the dsh runtime** to replace our own agent loop, gaining bwrap/Landlock sandboxing, session
    persistence and approvals (see 2.9.x)
