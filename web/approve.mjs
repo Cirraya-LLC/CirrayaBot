@@ -46,12 +46,29 @@ export function patternRe(p) {
  * Match against what the call does, never against the whole argument blob — otherwise writing a
  * file that happens to contain `git push` would trip the gate for a harmless write.
  */
-export function needsApproval(name, args, { mode = 'off', patterns = [] } = {}) {
-  if (!ACTING_TOOLS.includes(name)) return false
-  if (mode === 'all') return true
-  if (mode !== 'match') return false
+export function needsApproval(name, args, policy = {}) {
+  return gate(name, args, policy) != null
+}
+
+/**
+ * Whether this call has to wait for a person, given what the person has already said "always allow"
+ * to for this agent (`allowed`: [{tool, pattern}], pattern null = the whole tool). null = go ahead;
+ * otherwise { allow }, the allowances an "always allow" answer to this card would add.
+ *
+ * An allowance is narrow on purpose: from a card in "match" mode it covers the risky pattern this
+ * command tripped (this agent may `git push` from now on) — not the shell. From a card in "all" mode it
+ * covers the tool, and a command that trips a risky pattern still asks. A list of standing allowances
+ * nobody can see is how permission prompts stop meaning anything, so the settings list every one.
+ */
+export function gate(name, args, { mode = 'off', patterns = [] } = {}, allowed = []) {
+  if (!ACTING_TOOLS.includes(name) || (mode !== 'match' && mode !== 'all')) return null
   const subject = toolSubject(name, args)
-  return patterns.some(p => patternRe(p).test(subject))
+  const hits = [...new Set(patterns.filter(p => patternRe(p).test(subject)))]
+  const mine = allowed.filter(r => r.tool === name)
+  const uncovered = hits.filter(p => !mine.some(r => r.pattern === p))
+  if (uncovered.length) return { allow: uncovered.map(pattern => ({ tool: name, pattern })) }
+  if (mode === 'all' && !hits.length && !mine.some(r => r.pattern == null)) return { allow: [{ tool: name, pattern: null }] }
+  return null
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -79,5 +96,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.equal(needsApproval('bash', { command: 'echo ab' }, { mode: 'match', patterns: ['a(b'] }), false)
 
   a.equal(toolSubject('browser', { action: 'open', url: 'https://x' }), 'browser open https://x')
+
+  // Standing allowances ("always allow"): narrow, and per tool.
+  const push = String.raw`\bgit\s+push\b`, sudo = String.raw`\bsudo\b`
+  const cmd = c => ({ command: c })
+  a.deepEqual(gate('bash', cmd('git push origin main'), risky), { allow: [{ tool: 'bash', pattern: push }] })
+  a.equal(gate('bash', cmd('git push origin main'), risky, [{ tool: 'bash', pattern: push }]), null, 'allowed from now on')
+  a.deepEqual(gate('bash', cmd('sudo git push'), risky, [{ tool: 'bash', pattern: push }]), { allow: [{ tool: 'bash', pattern: sudo }] },
+    'only the pattern allowed is covered; another one in the same command still asks')
+  a.ok(gate('write_file', { path: 'x' }, { mode: 'all' }, [{ tool: 'bash', pattern: null }]), 'an allowance is per tool')
+  a.deepEqual(gate('bash', cmd('ls'), { mode: 'all', patterns: RISKY }), { allow: [{ tool: 'bash', pattern: null }] })
+  a.equal(gate('bash', cmd('ls'), { mode: 'all', patterns: RISKY }, [{ tool: 'bash', pattern: null }]), null)
+  a.ok(gate('bash', cmd('rm -rf /'), { mode: 'all', patterns: RISKY }, [{ tool: 'bash', pattern: null }]),
+    'the whole tool allowed in "all" mode still asks before a risky command')
+  a.equal(gate('bash', cmd('git push'), { mode: 'off', patterns: RISKY }), null)
   console.log('approve.mjs: ok')
 }

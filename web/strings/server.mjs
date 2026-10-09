@@ -39,6 +39,7 @@ export const serverStrings = {
 
   // Chat stream
   'chat.needTarget':  ['Pick an agent or a group, and do not send an empty message', '要选一个 Agent 或一个群，并且不能发空消息', '請選一個 Agent 或一個群組，而且不能傳送空白訊息'],
+  'approval.noAllowance': ['No such allowance (already taken back?)', '没有这条允许（已经撤销了？）', '沒有這條允許（已經撤銷了？）'],
   'chat.fallback':    ['{from} kept failing; switched to the backup model {model}', '{from} 一直失败，已切换到备用模型 {model}', '{from} 一直失敗，已切換到備用模型 {model}'],
   'chat.noImages':    ['This model does not accept images; screenshots are now sent as text', '这个模型不收图片，截图改成文字', '這個模型不接受圖片，截圖改成文字'],
   'chat.aborted':     ['Stopped', '已停止', '已停止'],

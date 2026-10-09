@@ -467,6 +467,12 @@
   .tev.stopped,.tev.answered{border-left-color:var(--line)}
   .tev .ask{display:flex;align-items:center;gap:8px;color:var(--warn)}
   .tev .ask button{padding:3px 12px;font-size:11.5px}
+  .aprow{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:4px 0;border-bottom:1px solid var(--line)}
+  .aprow>span{flex:1;min-width:0;overflow-wrap:anywhere}
+  .aprow .t{color:var(--dim)}
+  .aprow code{font-size:11.5px}
+  .aprow .x{background:none;color:var(--dim2);font-size:16px;padding:2px 6px}
+  .aprow .x:hover{color:var(--bad)}
   #rsched>div{margin-bottom:10px}
   .wd{display:flex;gap:6px;flex-wrap:wrap}
   .wd label{display:flex;gap:4px;align-items:center;font-size:12.5px;background:var(--field);border:1px solid var(--line);
@@ -497,6 +503,7 @@
   .brow>*{flex:1;min-width:0}
   .fbhead{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dim);margin:4px 0 8px}
   .fbhead .btn{padding:3px 10px;font-size:11.5px}
+  .fbhead[hidden]{display:none}
   .fbrow{display:flex;gap:8px;align-items:flex-start}
   .fbrow>select,.fbrow>input{flex:1;min-width:0}
   .fbrow>.x{flex:none;background:none;color:var(--dim2);font-size:16px;padding:9px 4px;line-height:1}
@@ -786,6 +793,8 @@
   </div>
   <textarea id="appat" rows="5" spellcheck="false" data-i18n-placeholder="ap.patternsPh"></textarea>
   <small class="rhint" data-i18n="ap.hint"></small>
+  <div class="fbhead" id="aplisthead" hidden><span data-i18n="ap.allowed"></span></div>
+  <div id="aplist"></div>
   <small class="phint" id="phint" data-i18n="p.hint"></small>
   <div class="acts">
     <button class="btn" style="margin-right:auto;color:var(--bad);display:none" id="pdel" data-i18n="common.delete"></button>

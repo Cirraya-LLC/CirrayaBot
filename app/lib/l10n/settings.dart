@@ -170,6 +170,12 @@ const Map<String, List<String>> settingsStrings = {
         '定時任務沒人可問，所以在那裡會直接拒絕。',
   ],
   'ap.saved': ['Approval settings saved', '审批设置已保存', '審批設定已儲存'],
+  'ap.allowed': ['Always allowed', '已设为总是允许', '已設為總是允許'],
+  'ap.allowPattern': ['{tool}, commands matching', '{tool}，匹配', '{tool}，符合'],
+  'ap.allowTool': ['every {tool} action (risky ones still ask)', '所有 {tool} 操作（危险的仍然会问）', '所有 {tool} 操作（危險的仍然會問）'],
+  'ap.allowExample': ['First allowed for: {example}', '第一次允许时是：{example}', '第一次允許時是：{example}'],
+  'ap.revoke': ['Take it back: ask again next time', '撤销：下次重新询问', '撤銷：下次重新詢問'],
+  'ap.revoked': ['Taken back — it will ask again', '已撤销，下次会重新询问', '已撤銷，下次會重新詢問'],
 
   // Reasoning effort, platform-wide
   'ef.title': [

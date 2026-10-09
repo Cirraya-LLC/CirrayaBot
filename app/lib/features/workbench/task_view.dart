@@ -10,6 +10,7 @@ import '../../l10n.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
 import 'attachments.dart';
+import 'message_view.dart' show alwaysWhat;
 
 TextStyle get _mono => TextStyle(
   fontFamily: AppTheme.mono,
@@ -128,6 +129,14 @@ class _ApproveRow extends StatelessWidget {
         children: [
           TextButton(onPressed: () => bench.answerTaskApproval(task, false), child: Text(tr('ap.deny'))),
           FilledButton(onPressed: () => bench.answerTaskApproval(task, true), child: Text(tr('ap.approve'))),
+          if (task.approvalAlways.isNotEmpty)
+            Tooltip(
+              message: alwaysWhat(task.approvalAlways),
+              child: OutlinedButton(
+                onPressed: () => bench.answerTaskApproval(task, true, true),
+                child: Text(tr('ap.always')),
+              ),
+            ),
         ],
       ),
     ],

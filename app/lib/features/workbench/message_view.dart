@@ -93,7 +93,7 @@ class EntryView extends StatelessWidget {
   final List<String> names;
 
   /// Answer a tool call that is waiting for a person. Null where nothing can wait.
-  final void Function(Ran card, bool ok)? onApprove;
+  final void Function(Ran card, bool ok, bool always)? onApprove;
 
   /// Agent name → colour, for the `@name` pills.
   final Color Function(String name) colorOf;
@@ -275,10 +275,15 @@ class MessageBody extends StatelessWidget {
   };
 }
 
+/// What an "always allow" answer would cover, said before anyone presses it: a risky pattern for
+/// this agent, or ('') the whole tool with risky commands still asking.
+String alwaysWhat(List<String> always) =>
+    always.any((p) => p.isEmpty) ? tr('ap.alwaysTool') : tr('ap.alwaysPattern', {'what': always.join('  ')});
+
 class _ToolCard extends StatelessWidget {
   const _ToolCard(this.ran, this.onApprove);
   final Ran ran;
-  final void Function(Ran card, bool ok)? onApprove;
+  final void Function(Ran card, bool ok, bool always)? onApprove;
 
   @override
   Widget build(BuildContext context) {
@@ -341,25 +346,35 @@ class _ToolCard extends StatelessWidget {
           ],
           if (ran.approvalId != null) ...[
             const SizedBox(height: 8),
-            Row(
+            Text(tr('ap.asks'), style: TextStyle(fontSize: 11.5, color: C.warn)),
+            const SizedBox(height: 4),
+            // A Wrap, not a Row: three buttons don't fit beside the label on a phone.
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
               children: [
-                Text(tr('ap.asks'), style: TextStyle(fontSize: 11.5, color: C.warn)),
-                const Spacer(),
                 TextButton(
-                  onPressed: onApprove == null ? null : () => onApprove!(ran, false),
+                  onPressed: onApprove == null ? null : () => onApprove!(ran, false, false),
                   child: Text(tr('ap.deny')),
                 ),
-                const SizedBox(width: 6),
                 FilledButton(
-                  onPressed: onApprove == null ? null : () => onApprove!(ran, true),
+                  onPressed: onApprove == null ? null : () => onApprove!(ran, true, false),
                   child: Text(tr('ap.approve')),
                 ),
+                if (ran.always.isNotEmpty)
+                  Tooltip(
+                    message: alwaysWhat(ran.always),
+                    child: OutlinedButton(
+                      onPressed: onApprove == null ? null : () => onApprove!(ran, true, true),
+                      child: Text(tr('ap.always')),
+                    ),
+                  ),
               ],
             ),
           ] else if (ran.approved != null) ...[
             const SizedBox(height: 6),
             Text(
-              tr(ran.approved! ? 'ap.approved' : 'ap.denied'),
+              tr(ran.alwaysAllowed ? 'ap.alwaysDone' : ran.approved! ? 'ap.approved' : 'ap.denied'),
               style: TextStyle(fontSize: 11.5, color: ran.approved! ? C.dim2 : C.warn),
             ),
           ],
