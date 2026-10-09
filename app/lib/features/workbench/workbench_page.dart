@@ -395,11 +395,19 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     final text = _input.text.trim();
     // A message may be only files; one still uploading holds the send until it's up.
     final hasFiles = bench.pending.any((p) => p.attachment != null);
-    if ((text.isEmpty && !hasFiles) || bench.busy) return;
+    if (text.isEmpty && !hasFiles) return;
     if (bench.uploading) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('att.waitUpload'))));
       return;
     }
+    // At work already: this goes into that turn rather than waiting for it to end.
+    if (bench.atWork) {
+      _input.clear();
+      _toBottom(force: true);
+      await bench.interject(text);
+      return;
+    }
+    if (bench.busy) return; // streaming another conversation; one stream at a time
     _input.clear();
     _toBottom(force: true);
     await bench.send(text);
@@ -1289,7 +1297,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
               children: [
                 IconButton(
                   tooltip: tr('att.attach'),
-                  onPressed: ready && !bench.busy ? _pickFiles : null,
+                  onPressed: ready && (!bench.busy || bench.busyHere) ? _pickFiles : null,
                   icon: Icon(Icons.attach_file, size: 19, color: C.dim),
                 ),
                 const SizedBox(width: 2),
@@ -1303,7 +1311,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       focusNode: _inputFocus,
                       onChanged: (_) => _updateMentions(),
                       onTap: () => WidgetsBinding.instance.addPostFrameCallback((_) => _updateMentions()),
-                      enabled: ready && !bench.busy,
+                      // Usable while this conversation is at work: what is typed then goes into the turn.
+                      enabled: ready && (!bench.busy || bench.busyHere),
                       maxLines: 6,
                       minLines: 1,
                       decoration: InputDecoration(
@@ -1312,7 +1321,11 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                         focusedBorder: InputBorder.none,
                         filled: false,
                         hintText: ready
-                            ? (bench.busy ? tr('wb.working') : tr('wb.sendTo', {'name': bench.current!.name}))
+                            ? (bench.atWork
+                                  ? tr('wb.interjectHint')
+                                  : bench.busy
+                                  ? tr('wb.working')
+                                  : tr('wb.sendTo', {'name': bench.current!.name}))
                             : tr('wb.pickFirst'),
                       ),
                       style: const TextStyle(fontSize: 14, height: 1.5),
@@ -1321,19 +1334,27 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                 ),
                 const SizedBox(width: 6),
                 // While a reply streams, this is Stop — in auto mode closing the app
-                // no longer stops a run, so stopping has to be a button.
-                bench.busy
-                    ? IconButton.filled(
-                        tooltip: tr('wb.stopTitle'),
-                        onPressed: bench.stop,
-                        icon: const Icon(Icons.stop_rounded, size: 18),
-                        style: IconButton.styleFrom(backgroundColor: C.chip, foregroundColor: C.ink),
-                      )
-                    : IconButton.filled(
-                        onPressed: ready ? _send : null,
-                        icon: const Icon(Icons.arrow_upward, size: 17),
-                        style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
-                      ),
+                // no longer stops a run, so stopping has to be a button. Once something is typed it
+                // sends again: into the turn at work.
+                ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: _input,
+                  builder: (_, v, _) {
+                    final draft = v.text.trim().isNotEmpty || bench.pending.any((p) => p.attachment != null);
+                    return bench.busy && !draft
+                        ? IconButton.filled(
+                            tooltip: tr('wb.stopTitle'),
+                            onPressed: bench.stop,
+                            icon: const Icon(Icons.stop_rounded, size: 18),
+                            style: IconButton.styleFrom(backgroundColor: C.chip, foregroundColor: C.ink),
+                          )
+                        : IconButton.filled(
+                            tooltip: bench.atWork ? tr('wb.interjectTitle') : null,
+                            onPressed: ready && (!bench.busy || bench.busyHere) ? _send : null,
+                            icon: const Icon(Icons.arrow_upward, size: 17),
+                            style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
+                          );
+                  },
+                ),
               ],
             ),
           ),

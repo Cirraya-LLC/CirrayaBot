@@ -1293,12 +1293,14 @@ class Api {
   /// work — tool calls, handoffs and text land as they happen, not in one
   /// block at the end.
   /// [session] null starts a new one; the server says which with a `session` event.
-  Stream<ChatEvent> chat(Conversation c, String text, {String? session, List<String> files = const []}) async* {
+  /// [interject]: the session is at work; this goes into the turn running there, at its next step.
+  Stream<ChatEvent> chat(Conversation c, String text, {String? session, List<String> files = const [], bool interject = false}) async* {
     final res = await _send('POST', '/api/chat', {
       'target': {'type': c.kind, 'id': c.id},
       'text': text,
       'session': session ?? 'new',
       if (files.isNotEmpty) 'files': files,
+      if (interject) 'interject': true,
     });
     if (res.statusCode >= 400) {
       final body = await res.transform(utf8.decoder).join();

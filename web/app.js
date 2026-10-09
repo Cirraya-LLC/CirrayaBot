@@ -677,17 +677,22 @@ input.addEventListener('input', () => { mSel = 0; renderMention() })
 input.addEventListener('click', renderMention)
 input.addEventListener('blur', () => setTimeout(() => $('#mention').classList.add('hide'), 150))
 $('#mention').onmousedown = e => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); pickMention(mOpts[+d.dataset.i]) } }
-$('#send').onclick = () => busy ? stopRun(streaming) : send()
+// While this conversation is being worked on, the button is Stop until something is typed; then it
+// sends, and what is sent goes into the turn at work (interject) instead of waiting for it to end.
+$('#send').onclick = () => busy && !hasDraft() ? stopRun(streaming) : send()
+input.addEventListener('input', () => sendMode())
 
 // ═══ Runs: still working, and Stop ═══
 const running = c => c && RUNS.some(r => r.kind === c.kind && r.id === c.id)
 
-/** The send button is Stop while this page is streaming a reply. */
+/** The send button is Stop while this page is streaming a reply — unless something is typed. */
+const hasDraft = () => !!input.value.trim() || PEND.some(p => p.att && cur && p.conv === convKey(cur))
 function sendMode() {
   const b = $('#send')
-  b.classList.toggle('stop', busy)
-  b.textContent = busy ? '■' : '↑'
-  b.title = busy ? t('run.stopTitle') : ''
+  const stop = busy && !hasDraft()
+  b.classList.toggle('stop', stop)
+  b.textContent = stop ? '■' : '↑'
+  b.title = stop ? t('run.stopTitle') : busy ? t('run.interjectTitle') : ''
   b.disabled = busy ? false : !cur
 }
 
@@ -735,7 +740,10 @@ async function loadRuns() {
 
 async function send() {
   const text = input.value.trim()
-  if (!cur || busy) return
+  if (!cur) return
+  // This conversation is at work — streaming here, or running elsewhere: say it to that turn.
+  if ((busy && streaming && streaming.kind === cur.kind && streaming.id === cur.id) || (!busy && running(cur))) return interject()
+  if (busy) return
   if (uploading()) { note(t('file.waitUpload')); return }
   const files = PEND.filter(p => p.att && p.conv === convKey(cur)).map(p => p.att)
   if (!text && !files.length) return
@@ -789,6 +797,8 @@ async function send() {
           }
           if (d.phase === 'trim') { note(t('note.trim', { n: d.dropped })); continue }
           if (d.phase === 'nudge') { bubs.delete(d.botId); note(t('note.nudge', { n: d.open })); continue }
+          // what was said meanwhile reached the model: what it writes next is a new bubble, below that message
+          if (d.phase === 'interject') { bubs.delete(d.botId); continue }
           const key = `${d.botId}:${d.name}:${JSON.stringify(d.args)}`
           if (d.phase === 'run') {
             // Close the current bubble when a tool starts; later text gets a new one, otherwise
@@ -819,6 +829,37 @@ async function send() {
   if (ticket !== shown && cur?.kind === target.kind && cur?.id === target.id) {
     const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id); if (c) openConv(c)
   }
+}
+
+/**
+ * Say something to a turn that is already working. Drawn at once like any message; the server
+ * hands it to the turn at its next step (or, if the turn has just ended, starts one for it). The
+ * reply comes through the stream already open here, or — when the turn runs elsewhere — through
+ * the history redraw that follows a running conversation.
+ */
+async function interject() {
+  const text = input.value.trim()
+  if (uploading()) { note(t('file.waitUpload')); return }
+  const files = PEND.filter(p => p.att && p.conv === convKey(cur)).map(p => p.att)
+  if (!text && !files.length) return
+  input.value = ''; input.style.height = 'auto'
+  for (const p of PEND) if (p.thumb) URL.revokeObjectURL(p.thumb)
+  PEND = []; renderPend(); sendMode()
+  const mine = bubble(null, true)
+  mine.innerHTML = fmt(text)
+  addAtts(mine, files)
+  try {
+    const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text,
+        session: curSession, files: files.map(f => f.id), interject: true }) })
+    if (!res.ok) throw new Error((await errText(res)).slice(0, 300))
+    for (const part of (await res.text()).split('\n\n')) {
+      const ev = part.match(/^event: (.+)$/m)?.[1]
+      if (ev === 'note') note(JSON.parse(part.match(/^data: (.+)$/m)?.[1] ?? '{}').text)
+      if (ev === 'error') note('⚠ ' + JSON.parse(part.match(/^data: (.+)$/m)?.[1] ?? '{}').message)
+    }
+  } catch (e) { note('⚠ ' + (e.message ?? e)) }
+  loadRuns()
 }
 
 // ═══ Groups ═══
@@ -1635,6 +1676,7 @@ const uploading = () => PEND.some(p => !p.att && !p.err)
 function renderPend() {
   const box = $('#pend')
   box.hidden = !PEND.length
+  sendMode()
   box.innerHTML = ''
   for (const p of PEND) {
     const el = document.createElement('div')
