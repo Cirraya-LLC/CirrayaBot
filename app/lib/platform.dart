@@ -115,6 +115,10 @@ abstract final class AppPlatform {
   static Directory get downloadRoot =>
       Platform.isAndroid ? Directory('${_androidCache ?? Directory.systemTemp.path}/shared') : Directory.systemTemp;
 
+  /// Speech on the device: the system recognizer and voices, a recorder and a player
+  /// (android/.../VoiceBridge.kt). Desktop has none of them without a plugin.
+  static bool get canVoice => Platform.isAndroid;
+
   /// A "save as" dialog exists (file_selector has none on Android; there it is Share instead).
   static bool get canSaveAs => !Platform.isAndroid && !Platform.isIOS;
 

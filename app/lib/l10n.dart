@@ -14,6 +14,7 @@ import 'l10n/editors.dart';
 import 'l10n/files.dart';
 import 'l10n/settings.dart';
 import 'l10n/state.dart';
+import 'l10n/voice.dart';
 import 'l10n/workbench.dart';
 
 enum Lang {
@@ -38,6 +39,7 @@ final List<Map<String, List<String>>> stringTables = [
   browserStrings,
   stateStrings,
   fileStrings,
+  voiceStrings,
 ];
 
 final Map<String, List<String>> _all = {for (final t in stringTables) ...t};

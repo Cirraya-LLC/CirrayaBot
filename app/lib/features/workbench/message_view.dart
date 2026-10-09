@@ -88,9 +88,15 @@ class EntryView extends StatelessWidget {
     this.onSecret,
     this.news,
     this.files,
+    this.onRead,
+    this.reading = false,
   });
 
   final Entry entry;
+
+  /// Read an agent's message aloud (where this device can speak); [reading] = it is being read now.
+  final void Function(Said said)? onRead;
+  final bool reading;
 
   /// Answer an agent's request for a credential: the value, or null for no.
   final void Function(Ran card, String? value)? onSecret;
@@ -122,18 +128,20 @@ class EntryView extends StatelessWidget {
     ),
     Ran r => _ToolCard(r, onApprove, onSecret),
     News n => news?.call(n) ?? const SizedBox.shrink(),
-    Said s => _Bubble(said: s, names: names, colorOf: colorOf, files: files),
+    Said s => _Bubble(said: s, names: names, colorOf: colorOf, files: files, onRead: onRead, reading: reading),
     SentFile f => _SentFile(sent: f, files: files),
   };
 }
 
 class _Bubble extends StatelessWidget {
-  const _Bubble({required this.said, required this.names, required this.colorOf, this.files});
+  const _Bubble({required this.said, required this.names, required this.colorOf, this.files, this.onRead, this.reading = false});
 
   final Said said;
   final List<String> names;
   final Color Function(String) colorOf;
   final Widget Function(List<Attachment> files, bool mine)? files;
+  final void Function(Said said)? onRead;
+  final bool reading;
 
   @override
   Widget build(BuildContext context) {
@@ -148,9 +156,33 @@ class _Bubble extends StatelessWidget {
         if (!said.mine)
           Padding(
             padding: const EdgeInsets.only(bottom: 3, left: 2),
-            child: Text(
-              said.speaker,
-              style: TextStyle(fontSize: 11.5, color: colour, fontWeight: FontWeight.w600),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    said.speaker,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11.5, color: colour, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                if (onRead != null && said.text.isNotEmpty && !said.streaming)
+                  Tooltip(
+                    message: tr(reading ? 'vo.stopReading' : 'vo.readThis'),
+                    child: InkWell(
+                      onTap: () => onRead!(said),
+                      borderRadius: BorderRadius.circular(6),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        child: Icon(
+                          reading ? Icons.stop_circle_outlined : Icons.volume_up_outlined,
+                          size: 15,
+                          color: reading ? C.accent : C.dim2,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
         // A message that is only files has no bubble, just the files.

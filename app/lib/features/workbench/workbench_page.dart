@@ -19,10 +19,14 @@ import '../../l10n.dart';
 import '../../platform.dart';
 import 'browser_view.dart';
 import 'editors.dart';
+import '../../data/speech.dart';
+import '../../state/voice.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
 import '../settings/providers_page.dart';
 import '../settings/skills_page.dart';
+import '../settings/voice_page.dart';
+import 'call_page.dart';
 import 'message_view.dart';
 import 'attachments.dart';
 import 'session_panel.dart';
@@ -55,9 +59,14 @@ class WorkbenchPage extends StatefulWidget {
     this.onResized,
     this.notify,
     this.onNotify,
+    this.voice,
   });
 
   final Workbench bench;
+
+  /// Speech (Android). Null = the page makes its own where the device can speak, none elsewhere;
+  /// tests pass one with a fake engine.
+  final VoiceController? voice;
 
   /// Background notifications (Android): null where there are none to switch.
   final bool? notify;
@@ -128,9 +137,22 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 
   Workbench get bench => widget.bench;
 
+  /// Speech: the composer's microphone, calls, reading aloud. Null where the device has none.
+  VoiceController? _voice;
+  bool _ownVoice = false;
+  String _voiceSig = '';
+
+  /// Send was pressed while dictating: send once the words are in.
+  bool _sendAfterDictation = false;
+
   @override
   void initState() {
     super.initState();
+    _voice = widget.voice ?? (AppPlatform.canVoice ? VoiceController(bench, ChannelVoice()) : null);
+    _ownVoice = widget.voice == null && _voice != null;
+    _voice?.onError = _snack;
+    _voice?.addListener(_onVoice);
+    if (_ownVoice) _voice!.init();
     bench.addListener(_onChange);
     AppPlatform.onOpenConversation(_openTarget);
     _boot();
@@ -265,8 +287,69 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     });
   }
 
+  /// Redraw for what the page shows of speech — not for every level tick of the microphone.
+  void _onVoice() {
+    final v = _voice!;
+    final sig = '${v.reading}|${v.dictating}|${v.transcribing}|${v.settings.stt.mode}|${v.settings.tts.mode}';
+    if (sig != _voiceSig && mounted) setState(() => _voiceSig = sig);
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// The composer's microphone: what is heard goes into the box (as it is heard, on the phone's
+  /// own recognizer), to be read over and sent. Tap again = done.
+  Future<void> _dictate() async {
+    final v = _voice;
+    if (v == null) return;
+    if (v.dictating) {
+      await v.stopDictation();
+      return;
+    }
+    if (bench.current == null) return;
+    final before = _input.text;
+    final sep = before.isNotEmpty && !before.endsWith(' ') && !before.endsWith('\n') ? ' ' : '';
+    void show(String t) {
+      final s = before + (t.isEmpty ? '' : sep + t);
+      _input.value = TextEditingValue(text: s, selection: TextSelection.collapsed(offset: s.length));
+    }
+
+    void partial() {
+      if (v.dictating && v.heard.isNotEmpty) show(v.heard);
+    }
+
+    v.addListener(partial);
+    final text = await v.dictate();
+    v.removeListener(partial);
+    if (!mounted) return;
+    show(text);
+    if (_sendAfterDictation) {
+      _sendAfterDictation = false;
+      await _send();
+    }
+  }
+
+  Future<void> _startCall() async {
+    final v = _voice;
+    final c = bench.current;
+    if (v == null || c == null) return;
+    final why = await v.startCall();
+    if (why != null) {
+      _snack(why);
+      return;
+    }
+    if (!mounted) return;
+    // Nothing to give focus back to when the call ends: otherwise the keyboard comes up over the transcript.
+    _inputFocus.unfocus();
+    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => CallPage(voice: v, conversation: c)));
+  }
+
   @override
   void dispose() {
+    _voice?.removeListener(_onVoice);
+    if (_ownVoice) _voice?.dispose();
     bench.removeListener(_onChange);
     _input.dispose();
     _inputFocus.dispose();
@@ -392,6 +475,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     // character's late update would then put the whole text back in the box.
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
+    // Still listening: finish hearing first, then this sends what was heard.
+    if (_voice?.dictating == true) {
+      _sendAfterDictation = true;
+      await _voice!.stopDictation();
+      return;
+    }
     final text = _input.text.trim();
     // A message may be only files; one still uploading holds the send until it's up.
     final hasFiles = bench.pending.any((p) => p.attachment != null);
@@ -828,6 +917,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     }),
                     _footIcon(Icons.auto_awesome_outlined, tr('wb.skillLibrary'), () => _openSkills()),
                     _footIcon(Icons.dns_outlined, tr('wb.server'), widget.onEditServer),
+                    if (_voice != null)
+                      _footIcon(Icons.record_voice_over_outlined, tr('vo.title'), () async {
+                        await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => VoicePage(voice: _voice!)));
+                      }),
                     if (widget.notify != null)
                       _footIcon(
                         widget.notify! ? Icons.notifications_active_outlined : Icons.notifications_off_outlined,
@@ -1194,6 +1287,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       onSecret: bench.answerSecret,
                       news: (n) => NewsCard(bench: bench, news: n),
                       files: (files, mine) => AttachmentList(api: bench.api, files: files, alignEnd: mine),
+                      onRead: _voice == null ? null : (said) => _voice!.readMessage(said.text, bench.agentByName(said.speaker)?.id),
+                      reading: _voice?.reading != null && e is Said && e.text == _voice!.reading,
                     );
                     return e.id != null && e.id == _flashId
                         ? _Flash(key: _flashKey, motion: _motion(context), child: view)
@@ -1293,6 +1388,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 
   Widget _composer() {
     final ready = bench.current != null;
+    // A phone's row holds attach, the text, the microphone and send: smaller targets leave room to type.
+    final dense = _phone(context) ? VisualDensity.compact : null;
     return Padding(
       padding: _phone(context) ? const EdgeInsets.fromLTRB(8, 4, 8, 8) : const EdgeInsets.fromLTRB(26, 6, 26, 18),
       child: Column(
@@ -1307,7 +1404,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
           // every key after the @ went nowhere.
           Container(
             key: const ValueKey('composer'),
-            padding: const EdgeInsets.fromLTRB(14, 6, 8, 6),
+            padding: _phone(context) ? const EdgeInsets.fromLTRB(4, 4, 6, 4) : const EdgeInsets.fromLTRB(14, 6, 8, 6),
             decoration: BoxDecoration(
               color: C.panel,
               borderRadius: BorderRadius.circular(14),
@@ -1317,6 +1414,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 IconButton(
+                  visualDensity: dense,
                   tooltip: tr('att.attach'),
                   onPressed: ready && (!bench.busy || bench.busyHere) ? _pickFiles : null,
                   icon: Icon(Icons.attach_file, size: 19, color: C.dim),
@@ -1353,6 +1451,21 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     ),
                   ),
                 ),
+                if (_voice != null)
+                  IconButton(
+                    key: const ValueKey('composer-mic'),
+                    visualDensity: dense,
+                    tooltip: tr(_voice!.transcribing
+                        ? 'vo.transcribing'
+                        : _voice!.dictating
+                        ? 'vo.dictateStop'
+                        : 'vo.dictate'),
+                    onPressed: ready && (!bench.busy || bench.busyHere) && !_voice!.transcribing ? _dictate : null,
+                    isSelected: _voice!.dictating,
+                    icon: _voice!.transcribing
+                        ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: C.dim))
+                        : Icon(_voice!.dictating ? Icons.mic : Icons.mic_none, size: 20, color: _voice!.dictating ? C.bad : C.dim),
+                  ),
                 const SizedBox(width: 6),
                 // While a reply streams, this is Stop — in auto mode closing the app
                 // no longer stops a run, so stopping has to be a button. Once something is typed it
@@ -1361,19 +1474,30 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   valueListenable: _input,
                   builder: (_, v, _) {
                     final draft = v.text.trim().isNotEmpty || bench.pending.any((p) => p.attachment != null);
-                    return bench.busy && !draft
-                        ? IconButton.filled(
-                            tooltip: tr('wb.stopTitle'),
-                            onPressed: bench.stop,
-                            icon: const Icon(Icons.stop_rounded, size: 18),
-                            style: IconButton.styleFrom(backgroundColor: C.chip, foregroundColor: C.ink),
-                          )
-                        : IconButton.filled(
-                            tooltip: bench.atWork ? tr('wb.interjectTitle') : null,
-                            onPressed: ready && (!bench.busy || bench.busyHere) ? _send : null,
-                            icon: const Icon(Icons.arrow_upward, size: 17),
-                            style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
-                          );
+                    if (bench.busy && !draft) {
+                      return IconButton.filled(
+                        tooltip: tr('wb.stopTitle'),
+                        onPressed: bench.stop,
+                        icon: const Icon(Icons.stop_rounded, size: 18),
+                        style: IconButton.styleFrom(backgroundColor: C.chip, foregroundColor: C.ink),
+                      );
+                    }
+                    // Nothing typed, on a phone that can speak: a call instead of an empty send.
+                    if (!draft && _voice != null && ready && !_voice!.dictating) {
+                      return IconButton.filled(
+                        key: const ValueKey('composer-call'),
+                        tooltip: tr('vo.call'),
+                        onPressed: _startCall,
+                        icon: const Icon(Icons.graphic_eq, size: 18),
+                        style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
+                      );
+                    }
+                    return IconButton.filled(
+                      tooltip: bench.atWork ? tr('wb.interjectTitle') : null,
+                      onPressed: ready && (!bench.busy || bench.busyHere) ? _send : null,
+                      icon: const Icon(Icons.arrow_upward, size: 17),
+                      style: IconButton.styleFrom(backgroundColor: C.accent, foregroundColor: C.onAccent),
+                    );
                   },
                 ),
               ],
