@@ -428,6 +428,15 @@
   .rt small{color:var(--dim2);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .rt .st{font-size:10.5px;padding:1px 6px;border-radius:5px;background:var(--on);color:var(--dim);font-weight:400}
   .rt .st.bad{background:var(--badbg);color:var(--bad)}
+  .rt.sec{cursor:default;flex-direction:row;align-items:center}
+  .rt.sec>div{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+  .rt.sec .x{background:none;color:var(--dim2);font-size:16px;padding:2px 6px}
+  .rt.sec .x:hover{color:var(--bad)}
+  .tool .secask{display:flex;flex-direction:column;gap:7px;margin-top:9px;color:var(--warn);font-size:12.5px}
+  .tool .secask .why{color:var(--ink)}
+  .tool .secask .row{display:flex;gap:8px;align-items:center}
+  .tool .secask input{flex:1;min-width:0;background:var(--field);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit}
+  .tool .secask button{padding:3px 12px;font-size:11.5px}
   .rt .st.run{background:var(--tint);color:var(--tintink)}
   .rt.off b{color:var(--dim)}
   .rt .st.warn,.tk .st.warn{background:var(--warnbg);color:var(--warn)}
@@ -501,6 +510,7 @@
   dialog textarea{resize:vertical;min-height:120px;line-height:1.7}
   .brow{display:flex;gap:8px}
   .brow>*{flex:1;min-width:0}
+  .brow[hidden]{display:none}
   .fbhead{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dim);margin:4px 0 8px}
   .fbhead .btn{padding:3px 10px;font-size:11.5px}
   .fbhead[hidden]{display:none}
@@ -630,6 +640,9 @@
   <div id="s2skills"><div class="s2h sub" data-i18n="s2.skills"></div>
   <div id="bskills"></div>
   <button class="addm" id="addsk"><b>＋</b> <span data-i18n="s2.addSkill"></span></button></div>
+  <div id="s2secrets"><div class="s2h sub" data-i18n="s2.secrets"></div>
+  <div id="bsecrets"></div>
+  <button class="addm" id="addsec"><b>＋</b> <span data-i18n="s2.addSecret"></span></button></div>
   <div class="s2h sub" data-i18n="s2.routines"></div>
   <div id="routines"></div>
   <button class="addm" id="addrt"><b>＋</b> <span data-i18n="s2.addRoutine"></span></button>
@@ -741,6 +754,26 @@
     <button class="btn" style="margin-right:auto;color:var(--bad)" id="bdel" data-i18n="common.delete"></button>
     <button class="btn" id="bcancel" data-i18n="common.cancel"></button>
     <button class="btn pri" id="bsave" data-i18n="common.save"></button>
+  </div>
+</dialog>
+
+<dialog id="secdlg">
+  <h4 data-i18n="sec.addTitle"></h4>
+  <input type="text" id="secname" data-i18n-placeholder="sec.namePh" autocomplete="off" spellcheck="false">
+  <select id="seckind">
+    <option value="header" data-i18n="sec.kindHeader"></option>
+    <option value="login" data-i18n="sec.kindLogin"></option>
+  </select>
+  <input type="text" id="secorigin" data-i18n-placeholder="sec.originPh" autocomplete="off" spellcheck="false">
+  <div class="brow" id="sechdr">
+    <input type="text" id="secheader" data-i18n-placeholder="sec.headerPh" autocomplete="off" spellcheck="false">
+    <input type="text" id="secformat" data-i18n-placeholder="sec.formatPh" autocomplete="off" spellcheck="false">
+  </div>
+  <input type="password" id="secvalue" data-i18n-placeholder="sec.valuePh" autocomplete="new-password">
+  <small class="rhint" data-i18n="sec.hint"></small>
+  <div class="acts">
+    <button class="btn" id="seccancel" data-i18n="common.cancel"></button>
+    <button class="btn pri" id="secsave" data-i18n="common.save"></button>
   </div>
 </dialog>
 

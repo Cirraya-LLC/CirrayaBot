@@ -418,6 +418,26 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     _toBottom(force: true);
   }
 
+  Future<void> _deleteSecret(Conversation c, Secret s) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        content: Text(tr('sec.deleteQ', {'name': s.name})),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr('common.cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(d, true), child: Text(tr('common.delete'))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await bench.api.deleteSecret(c.id, s.id);
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    }
+    await bench.loadSecrets();
+  }
+
   Future<void> _pickFiles() async {
     // A phone has a camera: offer it beside the file picker.
     if (AppPlatform.canCapture) {
@@ -1171,6 +1191,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       names: bench.agentNames,
                       colorOf: (n) => C.parse(bench.agentByName(n)?.color ?? ''),
                       onApprove: bench.answer,
+                      onSecret: bench.answerSecret,
                       news: (n) => NewsCard(bench: bench, news: n),
                       files: (files, mine) => AttachmentList(api: bench.api, files: files, alignEnd: mine),
                     );
@@ -1759,6 +1780,52 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                         onPressed: () => _openSkills(preselect: [c.id]),
                         icon: const Icon(Icons.add, size: 15),
                         label: Text(tr('wb.addSkill'), style: const TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ),
+                ],
+                // This agent's secrets: names and where they may be used. Never the values.
+                if (c != null && !c.isGroup) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('sec.title'))),
+                  for (final s in bench.secrets)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16, right: 4),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(s.name, style: const TextStyle(fontSize: 13)),
+                                Text(
+                                  '${tr(s.kind == 'login' ? 'sec.kindLogin' : 'sec.kindHeader')} · ${s.origin}',
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontSize: 11.5, color: C.dim2),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: tr('sec.delete'),
+                            icon: const Icon(Icons.close, size: 16),
+                            onPressed: () => _deleteSecret(c, s),
+                          ),
+                        ],
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 2, 8, 0),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () async {
+                          await showSecretEditor(context, bench, c.id);
+                          await bench.loadSecrets();
+                        },
+                        icon: const Icon(Icons.add, size: 15),
+                        label: Text(tr('sec.add'), style: const TextStyle(fontSize: 12)),
                       ),
                     ),
                   ),

@@ -61,6 +61,30 @@ class Conversation {
   );
 }
 
+/// A secret an agent uses by name. The value is never sent back by the server.
+class Secret {
+  const Secret({required this.id, required this.name, required this.kind, required this.origin, this.header = '', this.usedAt});
+  final String id;
+  final String name;
+
+  /// 'header' (sent with API requests) or 'login' (typed into a login page).
+  final String kind;
+
+  /// The only https site it may be used on.
+  final String origin;
+  final String header;
+  final int? usedAt;
+
+  static Secret fromJson(Map<String, Object?> j) => Secret(
+    id: (j['id'] as String?) ?? '',
+    name: (j['name'] as String?) ?? '',
+    kind: (j['kind'] as String?) ?? 'header',
+    origin: (j['origin'] as String?) ?? '',
+    header: (j['header'] as String?) ?? '',
+    usedAt: (j['used_at'] as num?)?.toInt(),
+  );
+}
+
 /// A backup model: tried, in order, when the agent's own keeps failing.
 /// [providerId] '' = the default upstream.
 class Fallback {
@@ -1154,6 +1178,22 @@ class Api {
   /// [always]: approve, and stop asking this agent for this kind of call (the server decides how narrow).
   Future<void> answerApproval(String id, bool ok, {bool always = false}) =>
       _json('POST', '/api/approvals/$id', {'ok': ok, 'always': always});
+
+  Future<List<Secret>> secrets(String agentId) async => [
+    for (final s in await _list('/api/bots/${Uri.encodeComponent(agentId)}/secrets'))
+      if (s is Map<String, Object?>) Secret.fromJson(s),
+  ];
+
+  /// [value] goes in once and never comes back out.
+  Future<void> addSecret(String agentId, Map<String, Object?> body) =>
+      _json('POST', '/api/bots/${Uri.encodeComponent(agentId)}/secrets', body);
+
+  Future<void> deleteSecret(String agentId, String id) =>
+      _json('DELETE', '/api/bots/${Uri.encodeComponent(agentId)}/secrets/${Uri.encodeComponent(id)}');
+
+  /// Answer an agent's request_secret card: the value, or null to decline.
+  Future<void> answerSecret(String id, String? value) =>
+      _json('POST', '/api/secrets/requests/${Uri.encodeComponent(id)}', value == null ? {'decline': true} : {'value': value});
 
   Future<void> revokeAllowance(String id) => _json('DELETE', '/api/approvals/allow/${Uri.encodeComponent(id)}');
 

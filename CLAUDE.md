@@ -2186,6 +2186,35 @@ model context per step would write the conversation again on every step.
 
 Tests: `test/e2e/restart.test.mjs` (SIGKILL between steps, during the first call, nothing left after a finished turn).
 
+### 2.36.7 Secrets: used by name, never seen
+
+Rules in `web/secrets.mjs` (`node web/secrets.mjs`). Table `secrets` per agent: name, kind (`header` = sent with API
+requests / `login` = typed into a login page), the one **https** origin it may be used on, header + format
+(`Bearer {value}`), `value_enc` = AES-256-GCM under `SECRET_KEY`, else a key generated into the workspace as
+`.secret-key` (0600; no agent container mounts the workspace root). **Lose the key = lose the secrets** — backups
+must take the workspace along with the database.
+
+- **In**: the person adds one in the side panel (web `#s2secrets` + dialog, Flutter section + `showSecretEditor`), or
+  the agent calls `request_secret` (front turns only — a task is told to ask the person to add it) → a card with a
+  password field showing the name, the purpose and **the origin** (an injected agent could ask for a token "for"
+  its own site; the person sees where it will go). The answer posts to `/api/secrets/requests/:id`; the agent hears
+  only "Saved as NAME". Detached runs / scheduled tasks can't ask (nobody to type).
+- **Use**: `http_request` (server-side https; the header added only when the URL's origin is the secret's; redirects
+  not followed; **internal addresses refused at connect time** via a guarded DNS lookup — the server can reach the
+  database and the LAN, an agent's machine can't; `HTTP_REQUEST_ALLOW` lets an operator open specific internal
+  https origins). Browser `fill_secret`: browserd checks the page's origin and types, under its own lock.
+- **Masking**: every tool result is checked for the agent's secret values (≥ 6 characters) and they become
+  `[secret NAME]` before the model, the stream or the transcript sees them. The API never returns a value.
+- **Not a wall**: an agent talked into exfiltrating can encode the value, or (for a login it can watch being typed)
+  read it from its own browser. Approvals (a write over http_request asks by default — seeded pattern
+  `^(POST|PUT|PATCH|DELETE)\s+https://`; saved pattern lists don't get it automatically) and egress are the controls.
+
+Tests: `test/e2e/secrets.test.mjs` (uses a local https API with a certificate made by `openssl` and trusted via
+`NODE_EXTRA_CA_CERTS`, opened with `HTTP_REQUEST_ALLOW`): header used + echo masked + nothing in model traffic,
+transcript or DB plaintext; wrong origin / internal / metadata / http refused; card saved and declined; command
+output masked; validation; tasks get no request_secret. `app/test/secret_test.dart`; web card + panel in Chromium.
+**fill_secret needs a real container — checked on the test box (2.36.9).**
+
 ## 3. What runs now
 
 ```bash

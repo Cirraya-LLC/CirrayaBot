@@ -19,8 +19,12 @@ import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT
 import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, attachmentNote, sendablePath,
   VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
+import { checkSecret, NEEDS, seal, open as unseal, parseKey, newKey, redact, headerFor, isPrivateAddress } from './secrets.mjs'
 import { createServer } from 'node:http'
-import { readFile, mkdir, readdir, rm, rename, realpath, open as openFile, copyFile } from 'node:fs/promises'
+import { request as httpsRequest } from 'node:https'
+import { lookup as dnsLookup } from 'node:dns'
+import { isIP } from 'node:net'
+import { readFile, writeFile, mkdir, readdir, rm, rename, realpath, open as openFile, copyFile } from 'node:fs/promises'
 import { existsSync, statSync, createReadStream, createWriteStream } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
 import { join, extname, posix } from 'node:path'
@@ -253,7 +257,7 @@ async function groupRecallFor(bot) {
  *   tools off — no machine, no tasks.
  */
 function systemFor(bot, memory, { peers = null, box = null, recall = '', skills = [], lead = null, auto = false,
-  groupId = null, task = null, byName = '', open = [], nameOf = id => id } = {}) {
+  groupId = null, task = null, byName = '', open = [], nameOf = id => id, secrets = [] } = {}) {
   const parts = [bot.persona]
   parts.push(`
 
@@ -271,6 +275,15 @@ You also have your own browser (the browser tool): open pages, click buttons, fi
 Files the user sends are copied to ${groupId ? `/groups/${groupId}/inbox` : '/work/inbox'} (the message says where each one is).
 To give the user a file — a report, an image, a document, an archive — make it, then send it with send_file;
 they can preview it right in the conversation. Don't paste a long file into your reply when you can send it.`)
+  if (box) parts.push(`
+
+--- Secrets ---
+You are never given passwords, keys or tokens in the clear; you use them by name, and they only work on the site
+each was saved for.${secrets.length ? '\n' + secrets.map(s => s.kind === 'login'
+    ? `- ${s.name}: a login for ${s.origin} — type it with the browser's fill_secret`
+    : `- ${s.name}: sent as the ${s.header} header to ${s.origin} — use http_request with secret "${s.name}"`).join('\n') : ''}
+${task ? 'If you need one you don\'t have, ask the user (ask_user) to add it under your Secrets in the side panel.'
+    : 'If you need one you don\'t have, ask with request_secret.'} Never ask for a password, key or code in the chat.`)
   if (task) parts.push(taskSection({ t: task, byName, groupDir: groupId && box ? `/groups/${groupId}` : '' }))
   else {
     if (auto && box) parts.push(`
@@ -750,7 +763,7 @@ const TOOL_SPECS = [
       'When you hit a CAPTCHA, a password or two-factor prompt, stop and ask the user to open your browser on the right side of the UI and do it themselves (they can see your browser and click and type in it directly); ' +
       'continue once they tell you they are done — don\'t guess and don\'t make things up.',
     parameters: { type: 'object', required: ['action'], properties: {
-      action: { type: 'string', enum: ['open', 'read', 'click', 'type', 'press', 'scroll', 'back', 'screenshot', 'eval'] },
+      action: { type: 'string', enum: ['open', 'read', 'click', 'type', 'press', 'scroll', 'back', 'screenshot', 'eval', 'fill_secret'] },
       url: { type: 'string', description: 'For open' },
       index: { type: 'integer', description: 'For click / type: the element number listed by read' },
       text: { type: 'string', description: 'For type: the text to enter; for click you may also give the text on the button' },
@@ -758,7 +771,20 @@ const TOOL_SPECS = [
       key: { type: 'string', description: 'For press, e.g. Enter, Tab, Escape' },
       dy: { type: 'integer', description: 'For scroll: positive scrolls down, default 600' },
       js: { type: 'string', description: 'For eval: a JS expression to run in the page; its value is returned to you' },
-      full_page: { type: 'boolean', description: 'For screenshot: capture the whole page, not just the current viewport' } } } } },
+      full_page: { type: 'boolean', description: 'For screenshot: capture the whole page, not just the current viewport' },
+      secret: { type: 'string', description: 'For fill_secret: the name of one of your login secrets. It is typed into element `index` ' +
+        'only while the page is on the site it was saved for — you never see it. submit presses Enter after.' } } } } },
+  { type: 'function', function: {
+    name: 'http_request',
+    description: 'An HTTPS request sent by the platform — the way to call an API with one of your secrets (secret = its name): the ' +
+      'platform adds the credential, only for the site it was saved for, and you never see it. Without a secret it is a plain ' +
+      'request (curl on your machine does the same). Redirects are not followed; internal addresses are refused.',
+    parameters: { type: 'object', required: ['url'], properties: {
+      method: { type: 'string', enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+      url: { type: 'string', description: 'https only' },
+      headers: { type: 'object', description: 'Extra request headers, as name: value' },
+      body: { type: 'string', description: 'The request body (send JSON as a string, with a content-type header)' },
+      secret: { type: 'string', description: 'The name of one of your header secrets to authenticate with' } } } } },
   { type: 'function', function: {
     name: 'bash',
     description: 'Run a shell command in the working directory; returns stdout / stderr / exit code. Use it for inspecting, building, testing, installing and running.',
@@ -811,9 +837,22 @@ const TASK_TOOLS = [
     'If you could not do it, say exactly why.',
     { result: { type: 'string', description: 'Your report' } }, ['result']),
 ]
+// Asking the person for a credential: only where a person can answer right away (not a background task).
+const REQUEST_SECRET = fn('request_secret', 'Ask the user for a credential you need — an API key, a token, a password — instead of ' +
+  'asking for it in the chat. They type it into a protected field; it is stored for you and you never see it. Then use it by name: ' +
+  'http_request (kind header) or the browser\'s fill_secret (kind login).',
+{ name: { type: 'string', description: 'A name for it, e.g. GITHUB_TOKEN' },
+  purpose: { type: 'string', description: 'One sentence the user reads: what you need it for' },
+  origin: { type: 'string', description: 'The https site it will be used on, e.g. https://api.github.com — it can be used nowhere else' },
+  kind: { type: 'string', enum: ['header', 'login'], description: 'header: sent with API requests; login: typed into a login page' },
+  header: { type: 'string', description: 'For header: which header, default Authorization' },
+  format: { type: 'string', description: 'For header: how the value is written, default "Bearer {value}"' } },
+['name', 'purpose', 'origin'])
+
 // What each kind of turn may call. Tools off means no machine: only the task tools, which need none.
 const specsFor = ({ task = false, group = false, dispatch = true } = {}) => [
   ...CFG.tools ? TOOL_SPECS : [],
+  ...CFG.tools && !task ? [REQUEST_SECRET] : [],
   ...task ? TASK_TOOLS : dispatch ? frontSpecs(group) : [],
 ]
 
@@ -886,13 +925,189 @@ async function runBrowser(c, args, ctx) {
   return `${head}\nDone. Use read or screenshot to see the result.`
 }
 
+
+// ---------- Secrets: used by name, never seen ----------
+// The rules are in secrets.mjs. Sealed with SECRET_KEY, else with a key generated into the workspace on
+// first use — a directory no agent's container mounts. Lose the key and every stored secret is lost with
+// it (they can't be opened), so backups take the workspace along with the database.
+let secretKeyCache = null
+async function secretKey() {
+  if (secretKeyCache) return secretKeyCache
+  if (env.SECRET_KEY) {
+    const k = parseKey(env.SECRET_KEY)
+    if (!k) throw new Say('secret.badKey', {}, 500)
+    return (secretKeyCache = k)
+  }
+  const file = join(LOCALWORK, '.secret-key')
+  let text = await readFile(file, 'utf8').catch(() => null)
+  if (!text) {
+    await mkdir(LOCALWORK, { recursive: true })
+    try { text = newKey(); await writeFile(file, text, { mode: 0o600, flag: 'wx' }) }
+    catch (e) { if (e.code !== 'EEXIST') throw e; text = await readFile(file, 'utf8') }
+  }
+  const k = parseKey(text)
+  if (!k) throw new Say('secret.badKey', {}, 500)
+  return (secretKeyCache = k)
+}
+
+/** The agent's secret values, opened once per turn: what tool output is masked against. */
+async function secretValues(ctx) {
+  if (!ctx.bot) return []
+  if (!ctx.secretValues) {
+    const rows = await db.secretsWithValues(ctx.bot.id)
+    const key = rows.length ? await secretKey() : null
+    ctx.secretValues = rows.map(r => { try { return { name: r.name, value: unseal(key, r.value_enc) } } catch { return null } }).filter(Boolean)
+  }
+  return ctx.secretValues
+}
+
+async function storeSecret(agentId, s) {
+  return db.saveSecret({ id: randomUUID().replace(/-/g, '').slice(0, 16), agent_id: agentId, name: s.name, kind: s.kind,
+    origin: s.origin, header: s.header, format: s.format, value_enc: seal(await secretKey(), s.value) })
+}
+
+// Origins an operator lets http_request reach although they resolve to internal addresses (a service on
+// the LAN). https only, comma-separated. Nothing else internal is ever reached from the server.
+const HTTP_ALLOW = new Set(String(env.HTTP_REQUEST_ALLOW ?? '').split(',').map(x => x.trim()).filter(Boolean)
+  .map(x => { try { return new URL(x).origin } catch { return '' } }).filter(Boolean))
+const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']
+const HTTP_BODY_MAX = 256 * 1024
+
+/** Resolve, and refuse an internal address at connect time — checking first and connecting later could be fooled by DNS. */
+function guardedLookup(hostname, opts, cb) {
+  dnsLookup(hostname, { ...opts, all: true }, (err, list) => {
+    if (err) return cb(err)
+    const bad = list.find(a => isPrivateAddress(a.address))
+    if (bad) return cb(Object.assign(new Error(`${hostname} is an internal address (${bad.address}) — refused`), { code: 'EINTERNAL' }))
+    return opts?.all ? cb(null, list) : cb(null, list[0].address, list[0].family)
+  })
+}
+
+function sendHttps(url, { method, headers, body }) {
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(url, { method, headers, timeout: 30_000, ...HTTP_ALLOW.has(url.origin) ? {} : { lookup: guardedLookup } }, res => {
+      const chunks = []
+      let size = 0
+      res.on('data', d => { if (size < HTTP_BODY_MAX) chunks.push(d); size += d.length })
+      res.on('end', () => resolve({ status: res.statusCode, statusText: res.statusMessage, headers: res.headers,
+        body: Buffer.concat(chunks).subarray(0, HTTP_BODY_MAX), size }))
+      res.on('error', reject)
+    })
+    req.on('timeout', () => req.destroy(new Error('no answer within 30 s')))
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+async function httpRequest(ctx, args) {
+  const method = String(args.method || 'GET').toUpperCase()
+  if (!HTTP_METHODS.includes(method)) return `Not sent: the method must be one of ${HTTP_METHODS.join(', ')}.`
+  let url
+  try { url = new URL(String(args.url ?? '')) } catch { return 'Not sent: that is not a URL.' }
+  if (url.protocol !== 'https:') return 'Not sent: only https URLs.'
+  const host = url.hostname.replace(/^\[|\]$/g, '')
+  if (isIP(host) && isPrivateAddress(host) && !HTTP_ALLOW.has(url.origin)) return `Not sent: ${host} is an internal address.`
+  const headers = {}
+  for (const [k, v] of Object.entries(args.headers && typeof args.headers === 'object' ? args.headers : {}))
+    if (/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(k) && typeof v === 'string' && !/[\r\n]/.test(v)) headers[k] = v
+  let secret = null
+  if (args.secret) {
+    secret = await db.secretByName(ctx.bot.id, String(args.secret))
+    if (!secret) {
+      const mine = (await db.listSecrets(ctx.bot.id)).map(s => s.name)
+      return `Not sent: you have no secret called "${args.secret}". Yours: ${mine.join(', ') || '(none)'} — ask for one with request_secret.`
+    }
+    if (secret.kind !== 'header') return `Not sent: "${secret.name}" is a login — it is for the browser's fill_secret.`
+    if (url.origin !== secret.origin) return `Not sent: "${secret.name}" may only be sent to ${secret.origin}, not ${url.origin}.`
+    for (const k of Object.keys(headers)) if (k.toLowerCase() === secret.header.toLowerCase()) delete headers[k]
+    const [h, v] = headerFor(secret, unseal(await secretKey(), secret.value_enc))
+    headers[h] = v
+  }
+  const body = method === 'GET' || method === 'HEAD' ? undefined : String(args.body ?? '')
+  let r
+  try { r = await sendHttps(url, { method, headers, body }) }
+  catch (e) { return `Request failed: ${e.message}` }
+  if (secret) db.touchSecret(secret.id).catch(() => {})
+  const type = String(r.headers['content-type'] ?? '')
+  const textual = !type || /^text\/|json|xml|javascript|x-www-form-urlencoded|csv/i.test(type)
+  const head = [`HTTP ${r.status} ${r.statusText ?? ''}`.trim(), type && `content-type: ${type}`,
+    r.headers.location && `location: ${r.headers.location} (redirects are not followed)`].filter(Boolean).join('\n')
+  if (method === 'HEAD' || !r.size) return `${head}\n(no body)`
+  if (!textual) return `${head}\n(${r.size} bytes of ${type} — not text)`
+  return clip(`${head}\n\n${r.body.toString('utf8')}${r.size > HTTP_BODY_MAX ? `\n… (cut at ${HTTP_BODY_MAX} of ${r.size} bytes)` : ''}`, 20_000)
+}
+
+// id -> { agent, spec, resolve }: a card in the conversation with a password field, until it is answered.
+const pendingSecrets = new Map()
+
+/** Ask the person for a credential. Waits on the card like an approval does; the value never comes back here. */
+async function requestSecret(ctx, args) {
+  const spec = checkSecret(args, { needValue: false })
+  if (spec.need) return `Not asked: give ${NEEDS[spec.need]}.`
+  if (ctx.task || ctx.unattended || ctx.run?.detached)
+    return `Nobody is here to type it right now. Tell the user to add a secret named ${spec.name} for ${spec.origin} under your ` +
+      'Secrets in the side panel, and carry on with what does not need it.'
+  const id = randomUUID()
+  const purpose = String(args.purpose ?? '').trim().slice(0, 300)
+  const answer = await new Promise(resolve => {
+    const done = v => {
+      if (!pendingSecrets.delete(id)) return
+      ctx.run?.asking.delete(id)
+      ctx.signal?.removeEventListener('abort', onAbort)
+      ctx.onTool?.({ phase: 'secret_done', id, ok: v === 'saved' })
+      resolve(v)
+    }
+    const onAbort = () => done('aborted')
+    pendingSecrets.set(id, { agent: ctx.bot.id, spec, resolve: done })
+    ctx.run?.asking.add(id)
+    ctx.signal?.addEventListener('abort', onAbort, { once: true })
+    ctx.onTool?.({ phase: 'secret', id, name: spec.name, purpose, origin: spec.origin, kind: spec.kind })
+  })
+  if (answer === 'saved') {
+    ctx.secretValues = null
+    return `Saved as ${spec.name}. Use it by name — ${spec.kind === 'login' ? 'the browser\'s fill_secret' : 'http_request with secret: "' + spec.name + '"'} — ` +
+      'it only works on ' + spec.origin + '. You will never see the value; don\'t ask for it.'
+  }
+  if (answer === 'aborted') return 'Stopped before the user answered.'
+  return 'The user did not give it. Do not ask for it in the chat; carry on without it, or say plainly what you cannot do.'
+}
+
+/** Type a login secret into the page — only while the page is on the secret's site (the daemon checks, under its own lock). */
+async function fillSecret(c, args, ctx) {
+  const s = args.secret ? await db.secretByName(ctx.bot.id, String(args.secret)) : null
+  if (!s) return `You have no secret called "${args.secret ?? ''}". Ask for one with request_secret (kind login).`
+  if (s.kind !== 'login') return `"${s.name}" is for API requests (http_request), not for typing into a page.`
+  const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
+  if (up.code !== 0) return `The browser would not start: ${(up.out + up.err).trim().slice(-600)}`
+  const j = await browserPost(c, { action: 'fill_secret', index: args.index, selector: args.selector, submit: !!args.submit,
+    origin: s.origin, text: unseal(await secretKey(), s.value_enc) })
+  if (!j.ok) return `Not typed: ${j.error}`
+  db.touchSecret(s.id).catch(() => {})
+  return `Typed ${s.name} into element ${args.index}${args.submit ? ' and pressed Enter' : ''}. Page: ${j.title || '(no title)'}  ${j.url}`
+}
+
 // The file tools all run inside the container, so path semantics are uniform (/work in the container, not a host path).
 // write_file goes over stdin instead of building a command line — quotes, newlines and $ in the content can't break anything.
+/**
+ * Run one tool call. Whatever comes back is read by the model, so a secret's value that shows up in
+ * it — echoed by a command, an API, a page — is masked first.
+ */
 async function runTool(name, args, ctx) {
+  const res = await runToolRaw(name, args, ctx)
+  const secrets = await secretValues(ctx)
+  if (!secrets.length) return res
+  if (typeof res === 'string') return redact(res, secrets)
+  return res?.text ? { ...res, text: redact(res.text, secrets) } : res
+}
+
+async function runToolRaw(name, args, ctx) {
   const c = ctx.container
   // Only what this turn was offered: a model that names a tool it wasn't given doesn't get to use it.
   if (ctx.specs && !ctx.specs.some(s => s.function.name === name)) return `You have no tool called ${name}.`
   if (TASK_TOOL_NAMES.has(name)) return runTaskTool(name, args, ctx)
+  if (name === 'http_request') return httpRequest(ctx, args)
+  if (name === 'request_secret') return requestSecret(ctx, args)
+  if (name === 'browser' && args.action === 'fill_secret') return fillSecret(c, args, ctx)
   if (name === 'browser') return runBrowser(c, args, ctx)
   if (name === 'read_skill') {
     const mine = await db.skillsFor(ctx.bot.id)
@@ -993,6 +1208,7 @@ const upstreamStatus = e => Number(e?.upstreamStatus) || 0
  * and trimming only at the entrance would overflow by step three or four.
  */
 async function runAgent(p, messages, onDelta, onTool, ctx) {
+  ctx.onTool = onTool                          // tools that talk to the person (request_secret) need the stream
   const limits = limitsFor(ctx.autonomy)
   const lang = ctx.lang ?? 'en'
   let text = '', nudged = 0
@@ -1250,7 +1466,7 @@ function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session, r
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
     const { open, nameOf } = await openTasksIn('dm', bot.id, session)
     const system = systemFor(bot, memory, { box: CFG.tools ? '/work' : null, recall: await groupRecallFor(bot),
-      skills: await db.skillsFor(bot.id), auto: gate.autonomy === 'auto', open, nameOf })
+      skills: await db.skillsFor(bot.id), auto: gate.autonomy === 'auto', open, nameOf, secrets: await db.listSecrets(bot.id) })
     const write = content => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content })
     const later = resume ? await forModel((await db.recent('dm', bot.id, FETCH_MAX, { session }))
       .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto))) : []
@@ -1270,7 +1486,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
     const { open, nameOf } = await openTasksIn('group', groupId, session)
     const system = systemFor(bot, memory, { peers, box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id),
-      lead, auto: gate.autonomy === 'auto', groupId, open, nameOf })
+      lead, auto: gate.autonomy === 'auto', groupId, open, nameOf, secrets: await db.listSecrets(bot.id) })
     const rows = readHistory(await db.recent('group', groupId, FETCH_MAX, { session, upto: resume?.read_upto ?? null }), session)
     const later = resume ? await forModel((await db.recent('group', groupId, FETCH_MAX, { session }))
       .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto)), bot) : []
@@ -1534,7 +1750,8 @@ async function runTask(id) {
     const system = systemFor(bot, {
       own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id),
       group: groupId ? await db.getMemory('group', groupId) : '',
-    }, { box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id), groupId, task: t, byName })
+    }, { box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id), groupId, task: t, byName,
+      secrets: await db.listSecrets(bot.id) })
     const policy = await approvalPolicy()
     // Always the auto limits: a background task has nobody to push it along by definition.
     const ctx = { container, signal: ac.signal, bot, lang: 'en', scope: t.scope, scopeId: t.scope_id, session: t.session_id,
@@ -1715,7 +1932,7 @@ function newRun() { return { detached: false, asking: new Set(), inbox: [] } }
 /** The page is gone. Cards still waiting can't be answered by anyone, so they are refused now. */
 function detachRun(run) {
   run.detached = true
-  for (const id of [...run.asking]) pendingApprovals.get(id)?.(false)
+  for (const id of [...run.asking]) { pendingApprovals.get(id)?.(false); pendingSecrets.get(id)?.resolve('declined') }
 }
 
 /** What a client needs to show "still working" and a Stop button. */
@@ -2495,6 +2712,34 @@ const server = createServer(async (req, res) => {
         await taskEvent(task, 'answered')
         return send(200, { ok: true })
       }
+    }
+
+    // ---- Secrets: an agent's, by name; the value goes in and never comes out ----
+    const sx = url.pathname.match(/^\/api\/bots\/([a-z0-9-]+)\/secrets(?:\/([\w-]+))?$/)
+    if (sx) {
+      if (!await db.getAgent(sx[1])) return send(404, { error: t('err.noAgent') })
+      if (!sx[2] && req.method === 'GET') return send(200, await db.listSecrets(sx[1]))
+      if (!sx[2] && req.method === 'POST') {
+        const s = checkSecret(await readBody(req))
+        if (s.need) return send(400, { error: t(`secret.need.${s.need}`) })
+        return send(200, await storeSecret(sx[1], s))
+      }
+      if (sx[2] && req.method === 'DELETE')
+        return await db.deleteSecret(sx[1], sx[2]) ? send(200, { ok: true }) : send(404, { error: t('secret.none') })
+    }
+    // Answering an agent's request_secret card: the value (stored, never shown to anyone), or no.
+    const sr = url.pathname.match(/^\/api\/secrets\/requests\/([\w-]+)$/)
+    if (sr && req.method === 'POST') {
+      const p = pendingSecrets.get(sr[1])
+      if (!p) return send(404, { error: t('approval.gone') })
+      const b = await readBody(req)
+      if (b.decline === true) { p.resolve('declined'); return send(200, { ok: true }) }
+      // What it is for and where it may go are the agent's request, shown on the card; the person only types the value.
+      const s = checkSecret({ ...p.spec, value: b.value })
+      if (s.need) return send(400, { error: t(`secret.need.${s.need}`) })
+      await storeSecret(p.agent, s)
+      p.resolve('saved')
+      return send(200, { ok: true })
     }
 
     // ---- Approvals ----

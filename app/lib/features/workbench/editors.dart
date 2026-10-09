@@ -997,3 +997,114 @@ class _RoutineEditorState extends State<_RoutineEditor> {
     );
   }
 }
+
+/// Give an agent a secret by hand. The value goes in once and is never shown again.
+Future<void> showSecretEditor(BuildContext context, Workbench bench, String agentId) =>
+    showDialog<void>(context: context, builder: (_) => _SecretEditor(bench: bench, agentId: agentId));
+
+class _SecretEditor extends StatefulWidget {
+  const _SecretEditor({required this.bench, required this.agentId});
+  final Workbench bench;
+  final String agentId;
+
+  @override
+  State<_SecretEditor> createState() => _SecretEditorState();
+}
+
+class _SecretEditorState extends State<_SecretEditor> {
+  final _name = TextEditingController();
+  final _origin = TextEditingController();
+  final _header = TextEditingController();
+  final _format = TextEditingController();
+  final _value = TextEditingController();
+  String _kind = 'header';
+  String _error = '';
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    for (final c in [_name, _origin, _header, _format, _value]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    try {
+      await widget.bench.api.addSecret(widget.agentId, {
+        'name': _name.text.trim(),
+        'kind': _kind,
+        'origin': _origin.text.trim(),
+        'header': _header.text.trim(),
+        'format': _format.text,
+        'value': _value.text,
+      });
+      _value.clear();
+      if (mounted) Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
+    title: Text(tr('sec.addTitle'), style: const TextStyle(fontSize: 16)),
+    content: SizedBox(
+      width: 420,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(controller: _name, autocorrect: false, decoration: InputDecoration(hintText: tr('sec.namePh'))),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: _kind,
+            isExpanded: true,
+            items: [
+              DropdownMenuItem(value: 'header', child: Text(tr('sec.kindHeader'), overflow: TextOverflow.ellipsis)),
+              DropdownMenuItem(value: 'login', child: Text(tr('sec.kindLogin'), overflow: TextOverflow.ellipsis)),
+            ],
+            onChanged: (v) => setState(() => _kind = v ?? 'header'),
+          ),
+          const SizedBox(height: 10),
+          TextField(controller: _origin, autocorrect: false, decoration: InputDecoration(hintText: tr('sec.originPh'))),
+          if (_kind == 'header') ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(child: TextField(controller: _header, autocorrect: false, decoration: InputDecoration(hintText: tr('sec.headerPh')))),
+                const SizedBox(width: 10),
+                Expanded(child: TextField(controller: _format, autocorrect: false, decoration: InputDecoration(hintText: tr('sec.formatPh')))),
+              ],
+            ),
+          ],
+          const SizedBox(height: 10),
+          TextField(
+            controller: _value,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(hintText: tr('sec.valuePh')),
+          ),
+          const SizedBox(height: 8),
+          Text(tr('sec.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+          if (_error.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(_error, style: TextStyle(fontSize: 12, color: C.code)),
+          ],
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: Text(tr('common.cancel'))),
+      FilledButton(onPressed: _busy ? null : _save, child: Text(tr('common.save'))),
+    ],
+  );
+}

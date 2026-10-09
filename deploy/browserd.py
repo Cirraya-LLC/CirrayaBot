@@ -15,7 +15,7 @@
 # /stream: Chromium's own screencast (CDP Page.startScreencast), a frame only when the page
 # changes, pushed as multipart/x-mixed-replace (MJPEG). A browser <img> plays it natively.
 import asyncio, base64, json, os, sys, traceback
-from urllib.parse import quote as urlquote
+from urllib.parse import quote as urlquote, urlsplit
 from playwright.async_api import async_playwright
 
 PORT = int(os.environ.get('BROWSERD_PORT', '9230'))
@@ -161,6 +161,17 @@ class Browser:
         async with self.lock:
             return await self._act(a)
 
+    @staticmethod
+    def origin_of(url):
+        # scheme://host[:port], default ports left out — the same form the server stores a secret's site in
+        s = urlsplit(url)
+        if not s.scheme or not s.hostname:
+            return ''
+        host = f'[{s.hostname}]' if ':' in s.hostname else s.hostname
+        port = s.port
+        default = {'https': 443, 'http': 80}.get(s.scheme)
+        return f'{s.scheme}://{host}' + (f':{port}' if port and port != default else '')
+
     async def _act(self, a):
         p = await self.page()
         kind = a.get('action')
@@ -178,6 +189,17 @@ class Browser:
             await self.settle(p)
         elif kind == 'type':
             # here text is what to type, not a way to find the element
+            el = await self.target(p, {k: a.get(k) for k in ('index', 'selector')})
+            await el.fill(str(a.get('text', '')))
+            if a.get('submit'):
+                await el.press('Enter')
+                await self.settle(p)
+        elif kind == 'fill_secret':
+            # A password typed only into the site it was saved for. Checked here, under the same lock as
+            # the typing, so the page can't move between the check and the fill. Never echoed back.
+            want, have = str(a.get('origin', '')), self.origin_of(p.url)
+            if not want or have != want:
+                raise ValueError(f'this page is on {have or p.url}, and the secret is only for {want}')
             el = await self.target(p, {k: a.get(k) for k in ('index', 'selector')})
             await el.fill(str(a.get('text', '')))
             if a.get('submit'):

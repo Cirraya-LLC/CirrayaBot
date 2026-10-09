@@ -63,6 +63,7 @@ const Map<String, List<String>> stateStrings = {
 
   // Tool card labels
   'tool.read': ['read {path}', '读 {path}', '讀 {path}'],
+  'tool.requestSecret': ['asks for a secret: {name}', '请求一个密钥：{name}', '請求一個密鑰：{name}'],
   'tool.plan': ['Plan · {done}/{n} done', '计划 · 已完成 {done}/{n}', '計畫 · 已完成 {done}/{n}'],
   'state.nudge': [
     "The plan isn't finished ({n} steps left) — carrying on",
