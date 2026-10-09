@@ -232,6 +232,10 @@ create table if not exists files (
 create index if not exists files_session_idx on files (session_id);
 create index if not exists files_conv_idx on files (scope, scope_id);
 alter table messages add column if not exists files jsonb not null default '[]';
+
+-- Backup models, tried in order when the agent's own model keeps failing: [{provider_id, model}],
+-- provider_id '' = the default upstream. Chosen by the person, like the main model; never shipped.
+alter table agents add column if not exists fallbacks jsonb not null default '[]';
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -281,18 +285,20 @@ export async function getAgent(id) {
 
 export async function upsertAgent(a) {
   const { rows } = await q(`
-    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy,
+                        fallbacks)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
-      approval = excluded.approval, autonomy = excluded.autonomy
+      approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
-     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? ''])
+     a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? '',
+     JSON.stringify(a.fallbacks ?? [])])
   return rows[0]
 }
 
@@ -468,8 +474,10 @@ export async function searchMessages(text, { scope = null, scopeId = null, limit
   return rows
 }
 
+/** Agents that name this upstream, as their own or as a backup: deleting it would quietly change what they use. */
 export async function agentsUsingProvider(id) {
-  return (await q('select name from agents where provider_id = $1', [id])).rows.map(r => r.name)
+  return (await q('select name from agents where provider_id = $1 or fallbacks @> $2::jsonb',
+    [id, JSON.stringify([{ provider_id: id }])])).rows.map(r => r.name)
 }
 
 /** The last message of each conversation. The conversation list sorts by it, in one query. */

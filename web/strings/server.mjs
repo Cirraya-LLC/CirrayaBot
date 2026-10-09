@@ -39,6 +39,7 @@ export const serverStrings = {
 
   // Chat stream
   'chat.needTarget':  ['Pick an agent or a group, and do not send an empty message', '要选一个 Agent 或一个群，并且不能发空消息', '請選一個 Agent 或一個群組，而且不能傳送空白訊息'],
+  'chat.fallback':    ['{from} kept failing; switched to the backup model {model}', '{from} 一直失败，已切换到备用模型 {model}', '{from} 一直失敗，已切換到備用模型 {model}'],
   'chat.noImages':    ['This model does not accept images; screenshots are now sent as text', '这个模型不收图片，截图改成文字', '這個模型不接受圖片，截圖改成文字'],
   'chat.aborted':     ['Stopped', '已停止', '已停止'],
   'run.queued':       ['Still working on the previous message in this session — this one is next', '这个会话还在处理上一条消息 —— 这条排在它后面', '這個會話還在處理上一則訊息 —— 這則排在它後面'],
@@ -73,6 +74,8 @@ export const serverStrings = {
   'agent.approval':     ['The approval mode must be empty or one of {list}', '审批模式只能留空，或者是 {list}', '審批模式只能留空，或是 {list}'],
   'agent.autonomy':     ['The autonomy setting must be empty or one of {list}', '自主模式只能留空，或者是 {list}', '自主模式只能留空，或是 {list}'],
   'approval.gone':      ['That request is no longer waiting for an answer', '这条请求已经不在等待回答了', '這條請求已經不在等待回答了'],
+  'agent.fallbacks':    ['Backup models: at most {max}, each with a model of its own, none the same as the main one',
+    '备用模型最多 {max} 个，每个都要选模型，而且不能和主模型相同', '備用模型最多 {max} 個，每個都要選模型，而且不能和主模型相同'],
   'agent.modelRequired': ['Pick a model', '要选一个模型', '請選一個模型'],
   'agent.modelLong':    ['The model name is too long', '模型名太长了', '模型名稱太長了'],
 

@@ -61,6 +61,19 @@ class Conversation {
   );
 }
 
+/// A backup model: tried, in order, when the agent's own keeps failing.
+/// [providerId] '' = the default upstream.
+class Fallback {
+  const Fallback({this.providerId = '', required this.model});
+  final String providerId;
+  final String model;
+
+  Map<String, Object?> toJson() => {'provider_id': providerId, 'model': model};
+
+  static Fallback fromJson(Map<String, Object?> j) =>
+      Fallback(providerId: (j['provider_id'] as String?) ?? '', model: (j['model'] as String?) ?? '');
+}
+
 class Agent {
   const Agent({
     required this.id,
@@ -74,6 +87,7 @@ class Agent {
     this.approval = '',
     this.autonomy = '',
     this.dailyCapMicro,
+    this.fallbacks = const [],
   });
 
   final String id;
@@ -99,6 +113,9 @@ class Agent {
   /// platform default applies.
   final int? dailyCapMicro;
 
+  /// Backup models, in the order they are tried.
+  final List<Fallback> fallbacks;
+
   static Agent fromJson(Map<String, Object?> j) => Agent(
     id: (j['id'] as String?) ?? '',
     name: (j['name'] as String?) ?? '',
@@ -111,6 +128,10 @@ class Agent {
     approval: (j['approval'] as String?) ?? '',
     autonomy: (j['autonomy'] as String?) ?? '',
     dailyCapMicro: (j['daily_cap_micro'] as num?)?.toInt(),
+    fallbacks: [
+      for (final f in (j['fallbacks'] as List?) ?? const [])
+        if (f is Map<String, Object?>) Fallback.fromJson(f),
+    ],
   );
 }
 

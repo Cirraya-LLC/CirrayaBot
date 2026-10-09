@@ -46,6 +46,23 @@ const _approvalModes = <MapEntry<String, String>>[
   MapEntry('all', 'ed.approvalAll'),
 ];
 
+/// One backup model being edited: an upstream, and a model from its list (or typed, when the
+/// upstream gives no list), with its own loading state.
+class _FallbackPick {
+  _FallbackPick(this.providerId, this.model) : manual = TextEditingController(text: model);
+  String providerId;
+  String model;
+  final TextEditingController manual;
+  final key = UniqueKey();
+  List<String> models = const [];
+  bool loading = true;
+  int seq = 0;
+
+  String get chosen => (models.isEmpty ? manual.text : model).trim();
+}
+
+const _maxFallbacks = 3;
+
 class _AgentEditor extends StatefulWidget {
   const _AgentEditor({required this.bench, this.agent});
   final Workbench bench;
@@ -78,6 +95,9 @@ class _AgentEditorState extends State<_AgentEditor> {
   int _modelsSeq = 0;
   String _error = '';
   bool _busy = false;
+  late final List<_FallbackPick> _fallbacks = [
+    for (final f in widget.agent?.fallbacks ?? const <Fallback>[]) _FallbackPick(f.providerId, f.model),
+  ];
 
   @override
   void initState() {
@@ -89,10 +109,114 @@ class _AgentEditorState extends State<_AgentEditor> {
         // An upstream deleted elsewhere: fall back to the default rather than
         // a dropdown with a value it cannot show.
         if (!list.any((p) => p.id == _providerId)) _providerId = '';
+        for (final f in _fallbacks) {
+          if (!list.any((p) => p.id == f.providerId)) f.providerId = '';
+        }
       });
+    }, onError: (_) {}).whenComplete(() {
+      // Whether or not the upstream list came: the model fields must stop "asking" either way —
+      // with no answer they fall back to typing the name, instead of spinning forever.
+      if (!mounted) return;
       _loadModels(_providerId, widget.agent?.model ?? '');
-    }, onError: (_) {});
+      for (final f in _fallbacks) {
+        _loadFallback(f, f.model);
+      }
+    });
   }
+
+  /// A backup row's model list. Unlike the main pick, nothing is preselected for a new row: the
+  /// list's first entry is most likely the main model, and a backup that is the main model would
+  /// only fail twice.
+  Future<void> _loadFallback(_FallbackPick f, String current) async {
+    final seq = ++f.seq;
+    setState(() => f.loading = true);
+    var models = const <String>[];
+    try {
+      models = (await widget.bench.api.models(f.providerId)).models;
+    } on ApiException {
+      // falls through to typing the name
+    }
+    if (!mounted || seq != f.seq || !_fallbacks.contains(f)) return;
+    setState(() {
+      f.loading = false;
+      f.models = current.isNotEmpty && models.isNotEmpty && !models.contains(current) ? [current, ...models] : models;
+      f.model = current;
+      f.manual.text = current;
+    });
+  }
+
+  Widget _fallbackRow(_FallbackPick f) => Padding(
+    key: f.key,
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: DropdownButtonFormField<String>(
+            key: ValueKey('${f.key}/${_providers.length}'),
+            initialValue: _providers.isEmpty ? '' : f.providerId,
+            isExpanded: true,
+            decoration: InputDecoration(labelText: tr('ed.provider')),
+            items: _providerItems(),
+            onChanged: (v) {
+              setState(() => f.providerId = v ?? '');
+              final old = widget.agent?.fallbacks.where((x) => x.providerId == f.providerId).firstOrNull;
+              _loadFallback(f, old?.model ?? '');
+            },
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: f.loading
+              ? InputDecorator(
+                  decoration: InputDecoration(labelText: tr('ed.model')),
+                  child: Text(tr('ed.askingProvider'), style: TextStyle(fontSize: 13, color: C.dim)),
+                )
+              : f.models.isEmpty
+              ? TextField(
+                  controller: f.manual,
+                  decoration: InputDecoration(labelText: tr('ed.model'), hintText: tr('ed.manualModelHint')),
+                )
+              : DropdownButtonFormField<String>(
+                  key: ValueKey('${f.key}/${f.providerId}/${f.models.length}'),
+                  initialValue: f.models.contains(f.model) ? f.model : null,
+                  isExpanded: true,
+                  hint: Text(tr('ed.fallbackPick'), overflow: TextOverflow.ellipsis),
+                  decoration: InputDecoration(labelText: tr('ed.model')),
+                  items: [
+                    for (final m in f.models)
+                      DropdownMenuItem(value: m, child: Text(m, overflow: TextOverflow.ellipsis)),
+                  ],
+                  onChanged: (v) => setState(() => f.model = v ?? ''),
+                ),
+        ),
+        IconButton(
+          tooltip: tr('ed.fallbackRemove'),
+          icon: const Icon(Icons.close, size: 18),
+          onPressed: () => setState(() {
+            _fallbacks.remove(f);
+            f.manual.dispose();
+          }),
+        ),
+      ],
+    ),
+  );
+
+  List<DropdownMenuItem<String>> _providerItems() => [
+    DropdownMenuItem(
+      value: '',
+      child: Text(
+        _providers.where((p) => p.isDefault).map((p) => tr('ed.defaultProviderNamed', {'name': p.name})).firstOrNull ??
+            tr('ed.defaultProvider'),
+        overflow: TextOverflow.ellipsis,
+      ),
+    ),
+    for (final p in _providers)
+      DropdownMenuItem(
+        value: p.id,
+        child: Text(p.name, overflow: TextOverflow.ellipsis),
+      ),
+  ];
 
   /// Ask the upstream what it offers. [current] is kept even when the list no
   /// longer has it — silently swapping in another model is worse than showing
@@ -136,6 +260,9 @@ class _AgentEditorState extends State<_AgentEditor> {
     _persona.dispose();
     _manualModel.dispose();
     _cap.dispose();
+    for (final f in _fallbacks) {
+      f.manual.dispose();
+    }
     super.dispose();
   }
 
@@ -181,6 +308,11 @@ class _AgentEditorState extends State<_AgentEditor> {
       'approval': _approval,
       'autonomy': _autonomy,
       'daily_cap_micro': cap.value,
+      // A row left without a model is not a backup; it is dropped rather than refused.
+      'fallbacks': [
+        for (final f in _fallbacks)
+          if (f.chosen.isNotEmpty) {'provider_id': f.providerId, 'model': f.chosen},
+      ],
     };
     await _run(() async {
       if (a == null) return widget.bench.api.createAgent(body);
@@ -202,6 +334,8 @@ class _AgentEditorState extends State<_AgentEditor> {
   Widget build(BuildContext context) {
     final editing = widget.agent != null;
     return AlertDialog(
+      // The form is taller than a phone (and than a short laptop window): it scrolls, title and all.
+      scrollable: true,
       title: Text(
         editing ? tr('ed.editTitle', {'name': widget.agent!.name}) : tr('wb.newAgent'),
         style: const TextStyle(fontSize: 16),
@@ -240,24 +374,7 @@ class _AgentEditorState extends State<_AgentEditor> {
                     initialValue: _providers.isEmpty ? '' : _providerId,
                     isExpanded: true,
                     decoration: InputDecoration(labelText: tr('ed.provider')),
-                    items: [
-                      DropdownMenuItem(
-                        value: '',
-                        child: Text(
-                          _providers
-                                  .where((p) => p.isDefault)
-                                  .map((p) => tr('ed.defaultProviderNamed', {'name': p.name}))
-                                  .firstOrNull ??
-                              tr('ed.defaultProvider'),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      for (final p in _providers)
-                        DropdownMenuItem(
-                          value: p.id,
-                          child: Text(p.name, overflow: TextOverflow.ellipsis),
-                        ),
-                    ],
+                    items: _providerItems(),
                     onChanged: (v) {
                       setState(() => _providerId = v ?? '');
                       // The old model name almost never belongs to another upstream;
@@ -312,6 +429,24 @@ class _AgentEditorState extends State<_AgentEditor> {
               padding: const EdgeInsets.only(top: 6),
               child: Text(tr('ed.effortHint'), style: TextStyle(fontSize: 11, color: C.dim)),
             ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(child: Text(tr('ed.fallbacks'), style: TextStyle(fontSize: 13, color: C.dim))),
+                if (_fallbacks.length < _maxFallbacks)
+                  TextButton.icon(
+                    onPressed: () {
+                      final f = _FallbackPick('', '');
+                      setState(() => _fallbacks.add(f));
+                      _loadFallback(f, '');
+                    },
+                    icon: const Icon(Icons.add, size: 16),
+                    label: Text(tr('ed.fallbackAdd')),
+                  ),
+              ],
+            ),
+            for (final f in _fallbacks) _fallbackRow(f),
+            Text(tr('ed.fallbackHint'), style: TextStyle(fontSize: 11, color: C.dim)),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
               initialValue: _approval,

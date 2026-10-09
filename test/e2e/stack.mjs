@@ -84,6 +84,7 @@ export async function startStack({ tools = false, env = {} } = {}) {
         DATABASE_URL: dbUrl(name), WEB_PORT: String(port), BIND_HOST: '127.0.0.1', ACCESS_TOKEN: token,
         AGENT_TOOLS: tools ? 'on' : 'off', CONTAINER_CLI: FAKE_DOCKER, FAKE_DOCKER_LOG: join(work, 'docker.log'),
         WORKSPACE_HOST_PATH: work, AGENT_PREFIX: `e2e${port}`,
+        MODEL_RETRY_WAITS: '0,20,40',      // the real backoff is 0/2/6 s per failing call
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],

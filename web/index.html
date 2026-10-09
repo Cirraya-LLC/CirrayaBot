@@ -494,6 +494,12 @@
   dialog textarea{resize:vertical;min-height:120px;line-height:1.7}
   .brow{display:flex;gap:8px}
   .brow>*{flex:1;min-width:0}
+  .fbhead{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dim);margin:4px 0 8px}
+  .fbhead .btn{padding:3px 10px;font-size:11.5px}
+  .fbrow{display:flex;gap:8px;align-items:flex-start}
+  .fbrow>select,.fbrow>input{flex:1;min-width:0}
+  .fbrow>.x{flex:none;background:none;color:var(--dim2);font-size:16px;padding:9px 4px;line-height:1}
+  .fbrow>.x:hover{color:var(--bad)}
   dialog .pick{display:flex;gap:9px;align-items:center;padding:7px 4px;font-size:13.5px;cursor:pointer;border-radius:8px}
   dialog .pick:hover{background:var(--raise)}
   dialog .pick input{accent-color:var(--accent);width:15px;height:15px}
@@ -718,6 +724,9 @@
     <select id="bauto" data-i18n-title="b.autoTitle"></select>
   </div>
   <small class="rhint" data-i18n="b.effortHint"></small>
+  <div class="fbhead"><span data-i18n="b.fallbacks"></span><button class="btn" id="bfbadd" data-i18n="b.fallbackAdd"></button></div>
+  <div id="bfb"></div>
+  <small class="rhint" data-i18n="b.fallbackHint"></small>
   <input type="text" id="bcap" data-i18n-placeholder="sp.capPh" autocomplete="off">
   <small class="rhint" id="bcaphint"></small>
   <div class="acts">

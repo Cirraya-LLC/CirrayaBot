@@ -44,6 +44,15 @@ const Map<String, List<String>> editorStrings = {
   'ed.askingProvider': ['Asking the provider…', '正在问上游…', '正在詢問上游…'],
   'ed.manualModelHint': ['This provider gives no list — type it', '这个上游不给列表，手填', '這個上游不提供清單，請手動填寫'],
   'ed.create': ['Create', '创建', '建立'],
+  'ed.fallbacks': ['Backup models', '备用模型', '備用模型'],
+  'ed.fallbackAdd': ['Add', '添加', '新增'],
+  'ed.fallbackRemove': ['Remove this backup model', '去掉这个备用模型', '移除這個備用模型'],
+  'ed.fallbackPick': ['— pick a model —', '— 选一个模型 —', '— 選一個模型 —'],
+  'ed.fallbackHint': [
+    'Tried in order when the model above keeps failing (down, overloaded, refusing the key). Up to 3, from your own upstreams.',
+    '上面的模型一直失败（挂了、过载、拒绝密钥）时，按顺序换用。最多 3 个，从你自己添加的上游里选。',
+    '上面的模型一直失敗（掛了、過載、拒絕金鑰）時，依序換用。最多 3 個，從你自己加入的上游裡選。',
+  ],
   // Group editor
   'ed.groupNeeds': ['A group needs a name and at least two members', '群要有名字，而且至少两个成员', '群組要有名稱，而且至少兩位成員'],
   'ed.disbandQ': ['Disband "{name}"?', '解散「{name}」？', '解散「{name}」？'],
