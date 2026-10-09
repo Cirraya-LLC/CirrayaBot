@@ -151,6 +151,31 @@ them**), `hooks` (Claude Code / Codex wire-protocol bridge), `sdk` (out-of-proce
 
 **Conclusion: don't write a framework from scratch, and don't fork. Write plugins.**
 
+### 2.6.1 Rakazo — the closest peer (checked 2026-10-09)
+
+`github.com/elie222/rakazo`, Apache-2.0, started 2026-08-13 by the Inbox Zero author, same pitch ("open-source
+Grok Bot alternative"). Two months in: ~380k lines of TypeScript, ~640 test files, web + Electron + Expo
+(iOS/Android), published multi-arch images, a paid hosted service, 3.5k stars. Agent loop and model adapters
+come from Pi (`@earendil-works/pi-agent-core` / `pi-ai`); tools, runs and computers are its own. Read from the
+source, not the README:
+
+- **Ahead of us**: models by ChatGPT / Claude / Copilot / SuperGrok subscription sign-in (`pi-oauth.ts`), Ollama /
+  LM Studio, fallback models; a full graphical desktop per bot (Xvfb + noVNC) with a terminal and file browser for
+  the person; secrets the model never sees (`request_secret` stores it encrypted, `secret_request` makes the HTTPS
+  call server-side and adds auth only for the saved origin, `fill_secret` types into a login page); Composio /
+  Pipedream / MCP / OpenAPI tools; Slack, Telegram, WhatsApp, iMessage (Sendblue), Feishu channels; webhook and
+  GitHub triggers; run leases + a reconciler + idempotency keys on external effects; steering a run mid-turn; a
+  model emulator for deterministic agent tests (`packages/testkit/src/model-emulator.ts`); voice.
+- **Weaker than us, verified in code**: approvals default to **allow** — `shell`, `write_file`, `browser_act` and
+  `computer_act` are exempt outright, and other "consequential" tools only ask once the operator adds a rule or
+  turns on the LLM Auto Review (`action-approval.test.ts`, "stays YOLO when auto review is off"); **no spending cap**
+  (cost is recorded per call, nothing limits on it); the default **Team computer is one container for every bot in
+  a space** (same user, files, X11 — their own docs say it is not a boundary); computer **egress open by default**,
+  LAN and 169.254.169.254 included; push only through Expo's hosted service (`exp.host` → FCM/APNs), so none where
+  Google is unavailable, and no web push.
+- Theirs is better on one isolation point: the computer runs as uid 1000 with no capabilities; ours is root with a
+  reduced set.
+
 ## 2.7 So what's left — after checking one by one, only one and a half items
 
 **Every item checked removed one thing to do. The below comes from reading the source item by item on
