@@ -2106,6 +2106,11 @@ desktop, Android, later iOS) and nothing that plugs the product into outside ser
 external event triggers** (webhooks, GitHub). Model upstreams stay — they are how the product works at all. When
 comparing with peers (2.6.1), their integrations are not gaps of ours.
 
+Same day: 「客户端倒是不急 当前就desktop和android就够了」 (no iOS, desktop notifications or packaging for now) and
+**「我们只允许自己添加上游 不内置 也不预设AImodel」** — the person adds every upstream; the product ships no
+upstream, no model list, no per-model price table. What it may do is **read** what the person's own upstream
+reports (`/models`: context window, and price when the upstream lists one).
+
 1. **Plug in the dsh runtime** to replace our own agent loop, gaining bwrap/Landlock sandboxing, session
    persistence and approvals (see 2.9.x)
 2. ~~**Per-Agent spending cap**~~ **done 2026-09-20, see 2.25** — usage rows, per-upstream

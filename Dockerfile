@@ -9,9 +9,10 @@ FROM node:24-slim
 COPY --from=cli /usr/local/bin/docker /usr/local/bin/docker
 
 WORKDIR /app
-# This image only runs web/ and needs none of dsh's heavy dependencies (507 packages plus build scripts).
-# Keep the version in sync with the root package.json; change one, change the other.
-RUN npm install --no-audit --no-fund --omit=dev pg@8.23.0
+# This image only runs web/ and needs none of dsh's heavy dependencies (507 packages plus build scripts):
+# the server's own dependencies are in web/package.json, installed exactly as locked.
+COPY web/package.json web/package-lock.json ./web/
+RUN npm ci --prefix web --no-audit --no-fund --omit=dev
 
 COPY web ./web
 COPY deploy ./deploy
