@@ -997,6 +997,15 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
   const lang = ctx.lang ?? 'en'
   let text = '', nudged = 0
   for (let step = 0; step < limits.steps; step++) {
+    // The person said something while this turn was working: it reaches the model now, before the
+    // next call — not after the whole turn has finished. Already stored when it arrived.
+    const said = ctx.run?.inbox?.splice(0) ?? []
+    if (said.length) {
+      const budget = { images: 0, text: 0 }
+      for (const m of said)
+        messages.push({ role: 'user', ...await withAttachments(ctx.peers ? `[User] ${m.text}` : m.text, m.files, true, budget) })
+      onTool?.({ phase: 'interject', n: said.length })
+    }
     await checkCap(ctx.bot, p)
     const fit = fitContext(messages, p.context_tokens)
     if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
@@ -1037,6 +1046,12 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     noteUsage(ctx, p, usage)
     if (content) text = content
     if (!calls.length) {
+      // Done — but the person said something meanwhile. This answer is kept as it is, and the turn
+      // goes on to the new message instead of leaving it for a turn of its own.
+      if (ctx.run?.inbox?.length) {
+        if (content) { await ctx.saveReply?.(content); messages.push({ role: 'assistant', content }); text = '' }
+        continue
+      }
       // Stopped with its own plan unfinished: in auto mode that is a pause, not the end. Send it back,
       // a few times at most — an agent that keeps stopping has a reason, and it should say it.
       // A front thread with work out in background tasks is waiting for news, not stopped: sending it
@@ -1213,7 +1228,7 @@ function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session) {
     const write = content => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content })
     const full = await stopNoted(write, signal, () => runAgent(p, [{ role: 'system', content: system }, ...history],
       onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, front: true,
-        specs: specsFor({ dispatch: CFG.tools }), ...gate }))
+        specs: specsFor({ dispatch: CFG.tools }), saveReply: write, ...gate }))
     await write(full)
     return full
   })
@@ -1231,7 +1246,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
     const write = content => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content })
     const reply = await stopNoted(write, signal, () => runAgent(p, messages, onDelta, onTool,
       { container, signal, bot, peers, lang, scope: 'group', scopeId: groupId, session, front: true,
-        specs: specsFor({ group: true }), ...gate }))
+        specs: specsFor({ group: true }), saveReply: write, ...gate }))
     await write(reply)
     return reply
   })
@@ -1271,7 +1286,7 @@ const waitingRuns = new Set()
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
 async function converse(bots, groupId, providers, text, emit, controller, lang = 'en',
-  { unattended = false, session: want = null, run = newRun(), wake = null, files: fileIds = [] } = {}) {
+  { unattended = false, session: want = null, run = newRun(), wake = null, files: fileIds = [], interject = false } = {}) {
   const signal = controller.signal
   const scope = groupId || bots.length > 1 ? 'group' : 'dm'
   const scopeId = groupId ?? (bots.length > 1 ? 'main' : bots[0].id)
@@ -1290,6 +1305,19 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
       const files = await deliverToInbox((await db.attachFiles(fileIds, scope, scopeId, session)).map(fileView),
         bots[0], scope === 'group' ? scopeId : null)
       await db.addMessage(scope, scopeId, session, { role: 'user', speaker: USER_SPEAKER, content: text, files })
+      // Interjecting: the turn at work in this session takes it at its next step. With none at work
+      // any more (it just ended), a turn of its own answers it — nobody waits on this request for it.
+      if (interject) {
+        const live = runs.get(session)
+        if (live) {
+          live.inbox.push({ text, files })
+          emit('note', { text: tr(lang, 'run.interjected') })
+        } else {
+          followUp(bots, groupId, providers, session)
+          emit('note', { text: tr(lang, 'run.interjectedLate') })
+        }
+        return
+      }
     }
     const key = `session:${session}`
     // One turn per session at a time — a second message would race the first for the same history. It waits instead.
@@ -1305,6 +1333,9 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
       Object.assign(run, { session, scope, scopeId, abort: () => controller.abort(), startedAt: Date.now() })
       runs.set(session, run)
       try { await turn() } finally { if (runs.get(session) === run) runs.delete(session) }
+      // Something arrived after the turn's last look at its inbox: answer it rather than drop it.
+      // Not after Stop — that stops what was sent along with it.
+      if (run.inbox.length && !signal.aborted) { run.inbox.length = 0; followUp(bots, groupId, providers, session) }
     })
   } catch (e) {
     emit('error', { botId: bots[0].id, message: errorText(e, lang).slice(0, 300), capped: e?.capped === true })
@@ -1490,6 +1521,19 @@ async function runTask(id) {
   }
 }
 
+/**
+ * A turn nobody is streaming, for messages already stored in `session` and not answered yet (an
+ * interjection that came just too late for the turn it was meant for). Shows up as a run, with Stop.
+ */
+function followUp(bots, groupId, providers, session) {
+  const run = newRun()
+  run.detached = true
+  converse(bots, groupId, providers, null,
+    (ev, d) => { if (ev === 'error') console.warn(`[interject] follow-up turn in ${session} failed: ${d.message}`) },
+    new AbortController(), 'en', { session, run })
+    .catch(e => console.warn(`[interject] follow-up turn in ${session}: ${errorText(e, 'en')}`))
+}
+
 // A session's front thread waking up to tell the person what a task reported. Several pieces of news
 // arriving while it is busy make one wake-up, not several: the flag clears when the turn actually starts.
 const wakeQueued = new Set()
@@ -1599,8 +1643,11 @@ async function recoverTasks() {
 // conversations are still working) and stoppable from anywhere, not just by closing a tab.
 const runs = new Map()
 
-/** detached: the page that started it is gone. asking: approval cards open right now. */
-function newRun() { return { detached: false, asking: new Set() } }
+/**
+ * detached: the page that started it is gone. asking: approval cards open right now.
+ * inbox: messages sent to the session while this turn works — fed into it at its next step.
+ */
+function newRun() { return { detached: false, asking: new Set(), inbox: [] } }
 
 /** The page is gone. Cards still waiting can't be answered by anyone, so they are refused now. */
 function detachRun(run) {
@@ -2518,7 +2565,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       // target: {type:'agent'|'group', id}. botIds is the old field, kept for compatibility.
-      const { target, botIds = [], text = '', session = null, files: fileIds = [] } = await readBody(req)
+      const { target, botIds = [], text = '', session = null, files: fileIds = [], interject = false } = await readBody(req)
       const all = await loadBots()
       let bots, groupId = null
       if (target?.type === 'group') {
@@ -2564,7 +2611,7 @@ const server = createServer(async (req, res) => {
       res.on('close', () => { if (!res.writableEnded) auto ? detachRun(run) : ac.abort() })
 
       try {
-        await converse(bots, groupId, providers, str(text), emit, ac, lang, { session: want, run, files: ids })
+        await converse(bots, groupId, providers, str(text), emit, ac, lang, { session: want, run, files: ids, interject: interject === true })
       } finally { clearInterval(ping) }
       emit('done', {})
       return res.end()

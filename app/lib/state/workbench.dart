@@ -198,6 +198,13 @@ class Workbench extends ChangeNotifier {
 
   bool isRunning(Conversation c) => runs.any((r) => r.isFor(c));
 
+  /// This app is streaming a reply for the open conversation right now.
+  bool get busyHere => busy && _streaming?.id == current?.id && _streaming?.kind == current?.kind;
+
+  /// The open conversation is at work — streamed here or running elsewhere — so a message sent now
+  /// goes into that turn (interject) instead of starting one.
+  bool get atWork => busyHere || (!busy && current != null && isRunning(current!));
+
   /// Look at what is running, and follow the open conversation closely while it
   /// runs: its history is redrawn as the work lands, and once more when it ends.
   Future<void> loadRuns() async {
@@ -614,6 +621,33 @@ class Workbench extends ChangeNotifier {
     _pendingFor = null;
   }
 
+  /// Say something to the turn at work in the open conversation. Drawn at once like any message;
+  /// the server hands it to that turn at its next step (or, if it has just ended, starts one). The
+  /// answer arrives through the stream already open here, or the history redraw of a running one.
+  Future<void> interject(String text) async {
+    final c = current;
+    final files = [for (final p in pending) if (p.attachment != null) p.attachment!];
+    if (c == null || (text.trim().isEmpty && files.isEmpty) || uploading) return;
+    final ticket = _shown;
+    void add(Entry e) {
+      if (ticket == _shown) entries.add(e);
+    }
+
+    add(Said(mine: true, speaker: userSpeaker, color: '', text: text.trim(), files: files));
+    pending.removeWhere((p) => p.attachment != null);
+    notifyListeners();
+    try {
+      await for (final ev in api.chat(c, text.trim(), session: session, files: [for (final f in files) f.id], interject: true)) {
+        if (ev.name == 'note') add(Note(ev.text));
+        if (ev.name == 'error') add(Note('⚠ ${ev.data['message'] ?? ''}'));
+      }
+    } on ApiException catch (e) {
+      add(Note('⚠ ${e.message}'));
+    }
+    notifyListeners();
+    unawaited(loadRuns());
+  }
+
   /// Sends and streams the reply. Returns when the turn is over.
   Future<void> send(String text) async {
     final c = current;
@@ -693,6 +727,13 @@ class Workbench extends ChangeNotifier {
             }
             if (phase == 'trim') {
               add(Note(tr('state.trimmed', {'n': ev.data['dropped']})));
+              break;
+            }
+            if (phase == 'interject') {
+              // What the person said meanwhile reached the model: what it writes next is a
+              // new bubble, below that message.
+              live?.streaming = false;
+              live = null;
               break;
             }
             if (phase == 'nudge') {

@@ -43,6 +43,8 @@ export const serverStrings = {
   'chat.fallback':    ['{from} kept failing; switched to the backup model {model}', '{from} 一直失败，已切换到备用模型 {model}', '{from} 一直失敗，已切換到備用模型 {model}'],
   'chat.noImages':    ['This model does not accept images; screenshots are now sent as text', '这个模型不收图片，截图改成文字', '這個模型不接受圖片，截圖改成文字'],
   'chat.aborted':     ['Stopped', '已停止', '已停止'],
+  'run.interjected':  ['Passed on — it sees this at its next step', '已送达，它下一步就会看到', '已送達，它下一步就會看到'],
+  'run.interjectedLate': ['It had just finished — answering this in a turn of its own', '它刚好做完了，会另起一轮回答这条', '它剛好做完了，會另起一輪回答這則'],
   'run.queued':       ['Still working on the previous message in this session — this one is next', '这个会话还在处理上一条消息 —— 这条排在它后面', '這個會話還在處理上一則訊息 —— 這則排在它後面'],
   'run.none':         ['Nothing is running there', '那里没有正在进行的任务', '那裡沒有正在進行的任務'],
   'group.tooSmall':   ['"{name}" has only {n} member(s) left — add people in the group settings first (at least two)',

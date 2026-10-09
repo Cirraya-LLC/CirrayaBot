@@ -141,9 +141,9 @@ export async function startStack({ tools = false, env = {} } = {}) {
      * Send a message and read the whole stream. `onEvent(ev, data)` sees each event as it arrives
      * (to answer an approval card, say). Resolves to { events, text, session, error }.
      */
-    async chat(target, text, { session = null, files = [], onEvent, signal } = {}) {
+    async chat(target, text, { session = null, files = [], onEvent, signal, interject = false } = {}) {
       const body = { target: target.group ? { type: 'group', id: target.group } : { type: 'agent', id: target.agent },
-        text, session, files }
+        text, session, files, ...interject ? { interject: true } : {} }
       const r = await fetch(url + '/api/chat', { method: 'POST', signal,
         headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) })
       if (r.status !== 200) return { status: r.status, error: (await r.json()).error, events: [] }

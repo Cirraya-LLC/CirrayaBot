@@ -219,6 +219,7 @@ const M = {
   'ap.denied': ['Denied', '已拒绝', '已拒絕'],
   'ap.gone': ['Too late \u2014 that request is no longer waiting', '来不及了，这条请求已经不在等了', '來不及了，這條請求已經不在等了'],
   'ap.always': ['Always allow', '总是允许', '總是允許'],
+  'run.interjectTitle': ['Send — it reaches the agent at its next step', '发送——它下一步就会看到', '傳送——它下一步就會看到'],
   'ap.alwaysPattern': ['Approve, and from now on let this Agent run commands matching {what} without asking',
     '批准，并且以后这个 Agent 运行匹配 {what} 的命令都不再问', '批准，並且以後這個 Agent 執行符合 {what} 的命令都不再詢問'],
   'ap.alwaysTool': ['Approve, and from now on don’t ask this Agent before this kind of action (risky commands still ask)',

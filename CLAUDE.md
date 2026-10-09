@@ -2148,6 +2148,25 @@ example, at}`):
 Tests: `test/e2e/approvals.test.mjs` (narrowness, other agent, revoke, "no" not kept, all-mode, routine, agent
 deleted), `node web/approve.mjs`, `app/test/approval_test.dart`; web card + list driven in headless Chromium.
 
+### 2.36.5 Interjecting while an agent works
+
+A message sent to a session whose turn is at work goes **into that turn**, at its next step, instead of waiting
+for the turn to end (the old `run.queued` path stays for plain sends, e.g. from a client that doesn't know).
+
+- Clients send `interject: true` when the open conversation is at work — streaming on this page, or running
+  elsewhere (the run bar). The composer stays usable; its button is Stop while empty and Send once something is
+  typed (web `hasDraft()`, Flutter `ValueListenableBuilder` on the controller — not a page-wide setState per key).
+- Server: the message is stored at once, then pushed onto the run's `inbox` (`newRun()`); `runAgent` drains the
+  inbox at the top of every step (`[User] …` in a group, attachments as on a fresh message) and emits
+  `tool {phase:'interject'}` so the streaming client starts a new bubble below the message.
+- **It arrived while the final answer was being written**: that answer is saved as it is (`ctx.saveReply`), and the
+  turn goes on to the new message — the transcript keeps both answers in the order they were written.
+- **Too late** (the turn ended): a `followUp` turn answers it — nobody streams it, it shows as a run with Stop. The
+  same happens for anything left in the inbox when a turn ends. **Not after Stop**: Stop drops what came with it.
+
+Tests: `test/e2e/interject.test.mjs` (next step, during the final answer, too late, Stop),
+`app/test/interject_test.dart`; web composer driven in headless Chromium.
+
 ## 3. What runs now
 
 ```bash

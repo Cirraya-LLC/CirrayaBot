@@ -106,6 +106,8 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.showRight': ['Show side panel', '展开右栏', '展開右欄'],
   'wb.sayTo': ['Say something to {name}', '和 {name} 说点什么', '和 {name} 說點什麼'],
   'wb.working': ["They're working…", '他们正在干活…', '他們正在工作…'],
+  'wb.interjectHint': ['Add something — it reaches them at their next step', '补充点什么——它下一步就会看到', '補充些什麼——它下一步就會看到'],
+  'wb.interjectTitle': ['Send — it reaches the agent at its next step', '发送——它下一步就会看到', '傳送——它下一步就會看到'],
   'wb.stop': ['Stop', '停止', '停止'],
   'wb.stopTitle': ['Stop working on this message', '停止处理这条消息', '停止處理這則訊息'],
   'wb.runWorking': ['Working', '正在工作', '正在工作'],
