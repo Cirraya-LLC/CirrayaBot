@@ -233,6 +233,20 @@ create index if not exists files_session_idx on files (session_id);
 create index if not exists files_conv_idx on files (scope, scope_id);
 alter table messages add column if not exists files jsonb not null default '[]';
 
+-- A conversation turn at work, saved after every step so a restart can pick it up (tasks have their own
+-- transcript). read_upto = the newest message the turn read when it started; tail = the model messages
+-- the turn added since (tool calls and results, what was said meanwhile), no system prompt, no images.
+create table if not exists front_runs (
+  session_id text primary key,
+  scope      text not null check (scope in ('dm','group')),
+  scope_id   text not null,
+  speaker    text not null,
+  read_upto  bigint not null default 0,
+  tail       jsonb not null default '[]',
+  started_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 -- Backup models, tried in order when the agent's own model keeps failing: [{provider_id, model}],
 -- provider_id '' = the default upstream. Chosen by the person, like the main model; never shipped.
 alter table agents add column if not exists fallbacks jsonb not null default '[]';
@@ -428,16 +442,29 @@ export async function addTool(scope, scopeId, session, speaker, { name, args, ou
  * and feeding these back would hand it a second, malformed copy of its own work.
  * With `session`, only that session; without, the whole conversation (group recall reads that way).
  */
-export async function recent(scope, scopeId, limit = 200, { tools = false, events = true, session = null } = {}) {
+export async function recent(scope, scopeId, limit = 200, { tools = false, events = true, session = null, upto = null } = {}) {
   const skip = [...tools ? [] : ["'tool'"], ...events ? [] : ["'event'"]]
+  const params = [scope, scopeId, limit]
+  const where = []
+  if (session) { params.push(session); where.push(`and session_id = $${params.length}`) }
+  if (upto != null) { params.push(upto); where.push(`and id <= $${params.length}`) }
   const { rows } = await q(
     `select id, role, speaker, content, files, at from messages
-     where scope = $1 and scope_id = $2 ${skip.length ? `and role not in (${skip.join(',')})` : ''}
-       ${session ? 'and session_id = $4' : ''}
-     order by id desc limit $3`,
-    session ? [scope, scopeId, limit, session] : [scope, scopeId, limit])
+     where scope = $1 and scope_id = $2 ${skip.length ? `and role not in (${skip.join(',')})` : ''} ${where.join(' ')}
+     order by id desc limit $3`, params)
   return rows.reverse()
 }
+
+// ---------- conversation turns at work ----------
+export async function saveFrontRun(r) {
+  await q(`insert into front_runs (session_id, scope, scope_id, speaker, read_upto, tail)
+           values ($1,$2,$3,$4,$5,$6)
+           on conflict (session_id) do update set speaker = excluded.speaker, read_upto = excluded.read_upto,
+             tail = excluded.tail, updated_at = now()`,
+    [r.session, r.scope, r.scope_id, r.speaker, r.read_upto ?? 0, JSON.stringify(r.tail ?? [])])
+}
+export async function dropFrontRun(session) { await q('delete from front_runs where session_id = $1', [session]) }
+export async function listFrontRuns() { return (await q('select * from front_runs order by started_at')).rows }
 
 /** An imported history becomes a session of its own, in one transaction. */
 export async function importMessages(scope, scopeId, rows, title = '') {

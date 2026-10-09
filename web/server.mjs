@@ -1199,6 +1199,30 @@ async function forModel(rows, self = null) {
   return out.reverse()
 }
 
+/** Model messages as kept for a restart: no screenshots (they are never stored). */
+const storable = messages => messages.map(({ images, ...m }) =>
+  images ? { ...m, content: `${m.content ?? ''}\n(a screenshot was here)` } : m)
+
+const RESTART_NOTE = '[Platform] The server restarted while you were working on this turn. What you did before that is above; ' +
+  'a command that was running may or may not have finished. Check where things stand before redoing anything, then carry on.'
+
+/**
+ * The model messages for a front turn, and how to save it after every step. A fresh turn reads the
+ * session's history; a resumed one (after a restart) reads it only as far as it had then, adds what the
+ * turn had done (`tail`), and a note saying the server restarted. `history` is that history as rows.
+ */
+function frontTurn(system, history, rowsRead, { session, scope, scopeId, speaker, resume, later = [] }) {
+  const read_upto = resume ? Number(resume.read_upto) : Number(rowsRead.at(-1)?.id ?? 0)
+  // Said during the turn but after its last saved step: not in the tail, so not lost either.
+  const tail = resume?.tail ?? []
+  const missed = later.filter(m => !tail.some(t => t.role === 'user' && t.content === m.content))
+  const messages = [{ role: 'system', content: system }, ...history,
+    ...resume ? [...tail, { role: 'user', content: RESTART_NOTE }, ...missed] : []]
+  const base = 1 + history.length
+  const save = msgs => db.saveFrontRun({ session, scope, scope_id: scopeId, speaker, read_upto, tail: storable(msgs.slice(base)) })
+  return { messages, save }
+}
+
 // session -> the newest message id its last front turn read. News that lands mid-turn (a quick task
 // can finish before the turn that started it has replied) is newer than that, so it still wakes it.
 const frontRead = new Map()
@@ -1216,37 +1240,46 @@ async function openTasksIn(scope, scopeId, session) {
 }
 
 // One-on-one. The user's message is already stored (converse does that before waiting its turn).
-function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session) {
+function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session, resume = null) {
   return withAgent(bot.id, async () => {
-    // Only this session's history: a new session is a clean slate for the model, not a new view of the old one
-    const history = await forModel(readHistory(await db.recent('dm', bot.id, FETCH_MAX, { session }), session))
+    // Only this session's history: a new session is a clean slate for the model, not a new view of the old one.
+    // Resumed after a restart: only as far as the turn had read when it started.
+    const rows = readHistory(await db.recent('dm', bot.id, FETCH_MAX, { session, upto: resume?.read_upto ?? null }), session)
+    const history = await forModel(rows)
     // With tools off there's no use for a container — and don't tell the persona it "has its own machine"
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
     const { open, nameOf } = await openTasksIn('dm', bot.id, session)
     const system = systemFor(bot, memory, { box: CFG.tools ? '/work' : null, recall: await groupRecallFor(bot),
       skills: await db.skillsFor(bot.id), auto: gate.autonomy === 'auto', open, nameOf })
     const write = content => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content })
-    const full = await stopNoted(write, signal, () => runAgent(p, [{ role: 'system', content: system }, ...history],
+    const later = resume ? await forModel((await db.recent('dm', bot.id, FETCH_MAX, { session }))
+      .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto))) : []
+    const turn = frontTurn(system, history, rows, { session, scope: 'dm', scopeId: bot.id, speaker: bot.id, resume, later })
+    await turn.save(turn.messages)
+    const full = await stopNoted(write, signal, () => runAgent(p, turn.messages,
       onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, front: true,
-        specs: specsFor({ dispatch: CFG.tools }), saveReply: write, ...gate }))
+        specs: specsFor({ dispatch: CFG.tools }), saveReply: write, onStep: turn.save, ...gate }))
     await write(full)
     return full
   })
 }
 
 // One person speaking once in a group chat: he sees the session's whole log, other people's words prefixed by name
-function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate, session) {
+function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signal, lang, gate, session, resume = null) {
   return withAgent(bot.id, async () => {
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
     const { open, nameOf } = await openTasksIn('group', groupId, session)
     const system = systemFor(bot, memory, { peers, box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id),
       lead, auto: gate.autonomy === 'auto', groupId, open, nameOf })
-    const messages = [{ role: 'system', content: system },
-      ...await forModel(readHistory(await db.recent('group', groupId, FETCH_MAX, { session }), session), bot)]
+    const rows = readHistory(await db.recent('group', groupId, FETCH_MAX, { session, upto: resume?.read_upto ?? null }), session)
+    const later = resume ? await forModel((await db.recent('group', groupId, FETCH_MAX, { session }))
+      .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto)), bot) : []
+    const turn = frontTurn(system, await forModel(rows, bot), rows, { session, scope: 'group', scopeId: groupId, speaker: bot.id, resume, later })
+    await turn.save(turn.messages)
     const write = content => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content })
-    const reply = await stopNoted(write, signal, () => runAgent(p, messages, onDelta, onTool,
+    const reply = await stopNoted(write, signal, () => runAgent(p, turn.messages, onDelta, onTool,
       { container, signal, bot, peers, lang, scope: 'group', scopeId: groupId, session, front: true,
-        specs: specsFor({ group: true }), saveReply: write, ...gate }))
+        specs: specsFor({ group: true }), saveReply: write, onStep: turn.save, ...gate }))
     await write(reply)
     return reply
   })
@@ -1286,7 +1319,8 @@ const waitingRuns = new Set()
  * Errors aren't thrown; they're reported via emit('error') (the UI shows them, scheduled tasks record them).
  */
 async function converse(bots, groupId, providers, text, emit, controller, lang = 'en',
-  { unattended = false, session: want = null, run = newRun(), wake = null, files: fileIds = [], interject = false } = {}) {
+  { unattended = false, session: want = null, run = newRun(), wake = null, files: fileIds = [], interject = false,
+    resume = null } = {}) {
   const signal = controller.signal
   const scope = groupId || bots.length > 1 ? 'group' : 'dm'
   const scopeId = groupId ?? (bots.length > 1 ? 'main' : bots[0].id)
@@ -1332,7 +1366,11 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
       if (wake && !await db.unseenTaskNews(session, frontRead.get(session) ?? null)) return
       Object.assign(run, { session, scope, scopeId, abort: () => controller.abort(), startedAt: Date.now() })
       runs.set(session, run)
-      try { await turn() } finally { if (runs.get(session) === run) runs.delete(session) }
+      try { await turn() } finally {
+        if (runs.get(session) === run) runs.delete(session)
+        // Finished one way or another (answered, failed, stopped): nothing for a restart to pick up.
+        await db.dropFrontRun(session).catch(e => console.warn(`[resume] could not clear ${session}: ${e.message}`))
+      }
       // Something arrived after the turn's last look at its inbox: answer it rather than drop it.
       // Not after Stop — that stops what was sent along with it.
       if (run.inbox.length && !signal.aborted) { run.inbox.length = 0; followUp(bots, groupId, providers, session) }
@@ -1358,7 +1396,7 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
       emit('start', { botId: bot.id })
       const reply = await askSolo(providers.get(bot.id), bot,
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
-        d => emit('delta', { botId: bot.id, text: d }), tool(bot.id), signal, lang, gateFor(bot), session)
+        d => emit('delta', { botId: bot.id, text: d }), tool(bot.id), signal, lang, gateFor(bot), session, resume)
       emit('end', { botId: bot.id })
       notify({ kind: 'reply', conv: { kind: 'agent', id: bot.id, name: bot.name }, session, agent: bot.name, text: reply })
       return
@@ -1367,14 +1405,15 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
     // Someone always coordinates a group: the lead, else whoever sorts first (Chief of Staff is 0).
     const coordinator = bots.find(b => b.id === g?.lead) ?? bots[0]
     // Woken by a task: whoever started it hears the news, if they're still here.
-    const speaker = (wake && bots.find(b => b.id === wake.speaker)) || (text != null && findMention(text, bots)) || coordinator
+    const speaker = (resume && bots.find(b => b.id === resume.speaker)) || (wake && bots.find(b => b.id === wake.speaker)) ||
+      (text != null && findMention(text, bots)) || coordinator
     run.speaker = speaker.id
     emit('start', { botId: speaker.id })
     const reply = await askInGroup(providers.get(speaker.id), speaker, bots.filter(b => b.id !== speaker.id), coordinator,
       { own: await db.getMemory('agent', speaker.id), self: await db.getSelfMemory(speaker.id),
         group: await db.getMemory('group', scopeId) },
       d => emit('delta', { botId: speaker.id, text: d }), tool(speaker.id),
-      scopeId, signal, lang, gateFor(speaker), session)
+      scopeId, signal, lang, gateFor(speaker), session, resume)
     notify({ kind: 'reply', conv: { kind: 'group', id: scopeId, name: g?.name ?? scopeId }, session, agent: speaker.name, text: reply })
     emit('end', { botId: speaker.id })
   }
@@ -1621,6 +1660,30 @@ async function startTaskFrom(ctx, args) {
  * After a restart: a task that was running carries on from its last saved step, and one that was
  * waiting for an approval learns it was not run (that card's answer lived in memory). Queued ones queue.
  */
+/**
+ * After a restart: a conversation turn that was at work carries on from its last saved step, as a run
+ * nobody is streaming (it shows as "still working", with Stop). One whose agent or group is gone is dropped.
+ */
+async function recoverFrontRuns() {
+  for (const row of await db.listFrontRuns()) {
+    try {
+      const { bots, groupId } = await resolveTarget(row.scope === 'group' ? 'group' : 'agent', row.scope_id)
+      const providers = new Map()
+      for (const b of bots) providers.set(b.id, await providerFor(b))
+      const run = newRun()
+      run.detached = true
+      console.log(`Carrying on with the turn in session ${row.session_id} after the restart`)
+      converse(bots, groupId, providers, null,
+        (ev, d) => { if (ev === 'error') console.warn(`[resume] ${row.session_id}: ${d.message}`) },
+        new AbortController(), 'en', { session: row.session_id, run, resume: row })
+        .catch(e => console.warn(`[resume] ${row.session_id}: ${errorText(e, 'en')}`))
+    } catch (e) {
+      console.warn(`[resume] dropping the turn in ${row.session_id}: ${errorText(e, 'en')}`)
+      await db.dropFrontRun(row.session_id)
+    }
+  }
+}
+
 async function recoverTasks() {
   let n = 0
   for (const t of await db.tasksWithStatus(OPEN)) {
@@ -2734,6 +2797,7 @@ await mkdir(join(LOCALWORK, 'agents'), { recursive: true })
 await mkdir(join(LOCALWORK, 'groups'), { recursive: true })
 await mkdir(FILES_DIR, { recursive: true })
 await recoverTasks()
+await recoverFrontRuns()
 
 // Keep idle keep-alive connections for 65 seconds (Node's default is 5). Connections in a client's pool
 // outlive the server's, so the next request lands on a socket that's already been closed.
