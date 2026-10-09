@@ -15,7 +15,7 @@ import { APPROVAL_MODES, RISKY, gate, toolSubject } from './approve.mjs'
 import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
   taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText } from './tasks.mjs'
-import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD } from './sandbox.mjs'
+import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD, EGRESS_SCRIPT, AGENT_UID } from './sandbox.mjs'
 import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, attachmentNote, sendablePath,
   VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
@@ -267,7 +267,8 @@ Reply in the language the user writes in.`)
 
 --- Your work environment ---
 You have your own machine (a container) with working directory /work; only you can get in.
-You are root — install and write whatever you like; it stays on your own machine.${groupId ? `
+You work there as an ordinary user. System packages (apt) are installed for you with install_packages;
+pip and npm install into your home, /work. What you install stays on your own machine.${groupId ? `
 This group's shared drive is /groups/${groupId}: everyone in the group sees it. To hand a colleague a file,
 put it there; what colleagues give you is there too. (Other directories under /groups belong to your other groups.)` : ''}
 Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).
@@ -360,7 +361,9 @@ ${recall.trim()}`)
 // network of ours with container-to-container traffic off, and a short capability list.
 // The platform's code and .env aren't in there; it can't reach them.
 const CLI = env.CONTAINER_CLI || 'docker'
-const IMAGE = env.AGENT_IMAGE || 'multi-agent-worker:1'
+// The agent image. :1 and :2 (agents ran as root) are named in older .env files; they are taken as
+// the current one, since the container rules now assume the image's `agent` account.
+const IMAGE = !env.AGENT_IMAGE || /^multi-agent-worker:[12]$/.test(env.AGENT_IMAGE) ? 'multi-agent-worker:3' : env.AGENT_IMAGE
 const EXEC_TIMEOUT = Number(env.AGENT_EXEC_TIMEOUT || 120) * 1000
 const OUT_MAX = 12_000
 // Container names are global on the whole host. Two deployments on the same machine that don't change the prefix
@@ -409,7 +412,8 @@ async function buildImage() {
   if ((await cliRun(['image', 'inspect', IMAGE], null, 30_000)).code === 0) { imageReady = true; return }
   const df = await readFile(join(ROOT, 'deploy', 'agent.Dockerfile'), 'utf8')
   console.log(`First run: building the agent image ${IMAGE} (a minute or two, only once)…`)
-  const r = await cliRun(['build', '-t', IMAGE, '-'], df, 900_000)
+  const mirror = env.AGENT_APT_MIRROR ? ['--build-arg', `APT_MIRROR=${env.AGENT_APT_MIRROR}`] : []
+  const r = await cliRun(['build', ...mirror, '-t', IMAGE, '-'], df, 1_800_000)
   if (r.code !== 0) throw new Say('container.buildFailed', { image: IMAGE, detail: (r.err || r.out).slice(-500) }, 500)
   console.log(`Image ${IMAGE} is ready`)
   imageReady = true
@@ -423,18 +427,41 @@ let networkReady = null
  */
 function ensureNetwork() {
   networkReady ??= (async () => {
-    if ((await cliRun(['network', 'inspect', NETWORK], null, 30_000)).code === 0) return
-    let r = await cliRun(['network', 'create', '--driver', 'bridge',
-      '-o', 'com.docker.network.bridge.enable_icc=false', NETWORK], null, 60_000)
-    if (r.code !== 0 && !/already exists/i.test(r.err)) {
-      console.warn(`[sandbox] could not make ${NETWORK} with container-to-container traffic off (${(r.err || r.out).trim()}); ` +
-        'making it without — agents on this engine can reach each other')
-      r = await cliRun(['network', 'create', NETWORK], null, 60_000)
+    if ((await cliRun(['network', 'inspect', NETWORK], null, 30_000)).code !== 0) {
+      let r = await cliRun(['network', 'create', '--driver', 'bridge',
+        '-o', 'com.docker.network.bridge.enable_icc=false', NETWORK], null, 60_000)
+      if (r.code !== 0 && !/already exists/i.test(r.err)) {
+        console.warn(`[sandbox] could not make ${NETWORK} with container-to-container traffic off (${(r.err || r.out).trim()}); ` +
+          'making it without — agents on this engine can reach each other')
+        r = await cliRun(['network', 'create', NETWORK], null, 60_000)
+      }
+      if (r.code !== 0 && !/already exists/i.test(r.err))
+        throw new Say('container.startFailed', { id: NETWORK, detail: (r.err || r.out).slice(0, 300) }, 500)
     }
-    if (r.code !== 0 && !/already exists/i.test(r.err))
-      throw new Say('container.startFailed', { id: NETWORK, detail: (r.err || r.out).slice(0, 300) }, 500)
+    // Every time this process starts, not only when the network is new: the rules live in the host's
+    // kernel and are gone after a reboot, while the network and the containers are still there.
+    await guardEgress()
   })().catch(e => { networkReady = null; throw e })
   return networkReady
+}
+
+/**
+ * Keep the agents off the host and the LAN (AGENT_EGRESS=internet, the default), or let them reach
+ * everything (open). The rules are made by a short-lived root container on the host's network, matching
+ * only this deployment's bridge. Where that can't be done (rootless podman, no iptables on the host) the
+ * agents still run, and the log says plainly that the host and the LAN are reachable from them.
+ */
+async function guardEgress() {
+  const mode = env.AGENT_EGRESS === 'open' ? 'off' : 'on'
+  const id = (await cliRun(['network', 'inspect', '-f', '{{.Id}}', NETWORK], null, 30_000)).out.trim()
+  if (!id) return
+  const bridge = `br-${id.slice(0, 12)}`
+  const chain = `MAE-${PREFIX}`.slice(0, 24)
+  const r = await cliRun(['run', '--rm', '--network', 'host', '--user', '0', '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN',
+    '--cap-add', 'NET_RAW', '--entrypoint', 'bash', IMAGE, '-c', EGRESS_SCRIPT, '_', bridge, chain, mode], null, 120_000)
+  if (r.code === 0) console.log(`[sandbox] ${r.out.trim()}`)
+  else console.warn(`[sandbox] could not set the egress rules for ${bridge} (${(r.err || r.out).trim().slice(-300)}); ` +
+    'agents on this engine can reach the host and the LAN')
 }
 
 // name -> the sandbox it was checked against (work|image|groups). A change in any of them — above all
@@ -484,6 +511,7 @@ async function ensureContainerNow(botId, groupId) {
   const want = { work, image: IMAGE, groups: groupsLabel(groups) }
   const sig = `${want.work}|${want.image}|${want.groups}`
   if (containerReady.get(name) !== sig) {
+    await ensureNetwork()                  // once per process: the network, and the egress rules on it
     // The host directories have to exist first, or docker makes them itself, owned by root.
     await mkdir(join(LOCALWORK, 'agents', botId), { recursive: true })
     for (const g of groups) await mkdir(join(LOCALWORK, 'groups', g), { recursive: true })
@@ -498,14 +526,17 @@ async function ensureContainerNow(botId, groupId) {
     }
     if (d.action === 'start') await cliRun(['start', name], null, 60_000)
     if (d.action === 'create' || d.action === 'recreate') {
-      await ensureNetwork()
       const r = await cliRun(runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups, network: NETWORK,
         memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2' }), null, 120_000)
       if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
     }
-    // Containers from before group drives were reached by path still have the old symlink. It would
-    // point at whichever group used it last, so it goes.
-    await cliRun(['exec', name, 'rm', '-f', '/work/group'], null, 30_000)
+    // The agent works as uid 1000: its desk and its group drives must be its own — they may have been
+    // made by this server (as root) or by an agent from before it stopped running as root. And containers
+    // from before group drives were reached by path still have the old symlink, pointing at whichever
+    // group used it last, so it goes.
+    if (d.action !== 'reuse')
+      await cliRun(['exec', '-u', '0', name, 'sh', '-c', 'rm -f /work/group; chown -R "$0:$0" /work "$@"', AGENT_UID,
+        ...groups.map(g => `/groups/${g}`)], null, 300_000)
     containerReady.set(name, sig)
   }
   return name
@@ -807,6 +838,13 @@ const TOOL_SPECS = [
       'a screenshot, a document, an archive. Only files in /work, or in this group\'s shared drive, can be sent.',
     parameters: { type: 'object', required: ['path'], properties: {
       path: { type: 'string', description: 'The file, e.g. /work/report.pdf, or report.pdf (relative to /work)' } } } } },
+  { type: 'function', function: {
+    name: 'install_packages',
+    description: 'Install Debian packages (apt) on your machine. You work as an ordinary user, so this is how system packages ' +
+      'get installed — ffmpeg, build-essential, poppler-utils and the like. Python and Node packages you install yourself ' +
+      '(pip install / npm install -g), into your home.',
+    parameters: { type: 'object', required: ['packages'], properties: {
+      packages: { type: 'array', items: { type: 'string' }, description: 'Package names, e.g. ["ffmpeg"]' } } } } },
 ]
 
 // The front of a conversation hands work out with these. In a DM a task is always the agent itself,
@@ -865,14 +903,14 @@ const BROWSERD = await readFile(join(ROOT, 'deploy', 'browserd.py'), 'utf8')
 // ⚠️ Can't use pkill -f browserd: this script's own command line contains that word, so it would kill itself (2.9.5)
 const BROWSERD_UP = `
 cat > /tmp/browserd.new
-if ! cmp -s /tmp/browserd.new /opt/browserd.py; then
-  mv /tmp/browserd.new /opt/browserd.py
+if ! cmp -s /tmp/browserd.new /tmp/browserd.py; then
+  mv /tmp/browserd.new /tmp/browserd.py
   if [ -f /tmp/browserd.pid ]; then kill "$(cat /tmp/browserd.pid)" 2>/dev/null; sleep 1; fi
   rm -f /tmp/browserd.pid
 fi
 curl -sf http://127.0.0.1:9230/ >/dev/null && exit 0
 command -v chromium >/dev/null || { echo "this machine's image has no browser (old image)"; exit 3; }
-setsid nohup python3 /opt/browserd.py >/tmp/browserd.log 2>&1 </dev/null &
+setsid nohup python3 /tmp/browserd.py >/tmp/browserd.log 2>&1 </dev/null &
 echo $! > /tmp/browserd.pid
 for i in $(seq 60); do curl -sf http://127.0.0.1:9230/ >/dev/null && exit 0; sleep 0.5; done
 tail -n 20 /tmp/browserd.log; exit 1
@@ -925,6 +963,19 @@ async function runBrowser(c, args, ctx) {
   return `${head}\nDone. Use read or screenshot to see the result.`
 }
 
+
+/**
+ * apt-get install, run as root in the agent's container — the one thing it can't do itself any more.
+ * Names only (optionally =version): nothing that reads as an option or a path gets to apt.
+ */
+async function installPackages(c, args) {
+  const names = (Array.isArray(args.packages) ? args.packages : []).map(x => String(x).trim()).filter(Boolean)
+  if (!names.length || names.length > 30 || names.some(n => !/^[a-z0-9][a-z0-9+.-]{0,62}(=[A-Za-z0-9.+~:-]{1,40})?$/.test(n)))
+    return 'Not installed: give Debian package names, e.g. ["ffmpeg", "poppler-utils"] (at most 30).'
+  const r = await cliRun(['exec', '-u', '0', '-e', 'DEBIAN_FRONTEND=noninteractive', c, 'bash', '-c',
+    'apt-get update -qq >/dev/null 2>&1; apt-get install -y -q --no-install-recommends -- "$@" 2>&1 | tail -n 15', '_', ...names], null, 900_000)
+  return clip(`${r.out}${r.err ? `\n--- stderr ---\n${r.err}` : ''}\n--- exit ${r.code} ---`, 4000)
+}
 
 // ---------- Secrets: used by name, never seen ----------
 // The rules are in secrets.mjs. Sealed with SECRET_KEY, else with a key generated into the workspace on
@@ -1106,6 +1157,7 @@ async function runToolRaw(name, args, ctx) {
   if (ctx.specs && !ctx.specs.some(s => s.function.name === name)) return `You have no tool called ${name}.`
   if (TASK_TOOL_NAMES.has(name)) return runTaskTool(name, args, ctx)
   if (name === 'http_request') return httpRequest(ctx, args)
+  if (name === 'install_packages') return installPackages(c, args)
   if (name === 'request_secret') return requestSecret(ctx, args)
   if (name === 'browser' && args.action === 'fill_secret') return fillSecret(c, args, ctx)
   if (name === 'browser') return runBrowser(c, args, ctx)

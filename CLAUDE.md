@@ -2213,7 +2213,45 @@ Tests: `test/e2e/secrets.test.mjs` (uses a local https API with a certificate ma
 `NODE_EXTRA_CA_CERTS`, opened with `HTTP_REQUEST_ALLOW`): header used + echo masked + nothing in model traffic,
 transcript or DB plaintext; wrong origin / internal / metadata / http refused; card saved and declined; command
 output masked; validation; tasks get no request_secret. `app/test/secret_test.dart`; web card + panel in Chromium.
-**fill_secret needs a real container — checked on the test box (2.36.9).**
+**fill_secret checked in a real container on the test box (2.36.8).**
+
+### 2.36.8 Agents as an ordinary user, kept off the host and the LAN
+
+- **Image `multi-agent-worker:3`**: user `agent` (uid 1000, home `/work`), `iptables` (for the egress helper
+  below), `/etc/profile.d/agent-path.sh` (⚠️ commands run in `bash -lc`, and Debian's `/etc/profile` **resets
+  PATH** — an `ENV PATH` in the image is lost there), `PIP_USER=1 PIP_BREAK_SYSTEM_PACKAGES=1`,
+  `NPM_CONFIG_PREFIX=/work/.npm-global`. `AGENT_IMAGE=multi-agent-worker:1/2` in an old .env is taken as :3.
+- `docker run --user 1000:1000`; the container keeps the short CAPS list only for what the platform runs as root
+  (`docker exec -u 0`): **`install_packages`** (apt-get install; names validated, nothing that reads as an option
+  reaches apt) and the ownership fix after (re)creation (`chown -R 1000 /work /groups/<each>` — desks made by the
+  server or by an agent from before are root's). Measured: `CapEff 0`, `CapBnd 0x4fb`, plain `apt-get` refused.
+  The browser daemon now lives at `/tmp/browserd.py` (it ran from `/opt`, which uid 1000 can't write).
+  `SANDBOX_VERSION` 3: old containers are recreated on their next turn.
+- **Egress** (`AGENT_EGRESS`, default `internet`; `open` takes the rules out): `guardEgress` runs `EGRESS_SCRIPT`
+  in a throwaway root container from the agent image on the **host's** network, once per server process (every
+  start, not only for a new network — the rules are gone after a reboot). Chains `MAE-<prefix>` (hooked into
+  DOCKER-USER, or FORWARD without it) and `MAE-<prefix>-IN` (INPUT), matching only `-i br-<agents network id>`:
+  established/related and DNS pass; 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 224/4, 0/8 dropped;
+  to the host itself everything new dropped. Idempotent (flush + refill, jumps added once). Rootless podman /
+  no iptables: a warning in the log, agents still run. IPv6 is not covered (the agents network is v4-only).
+- Measured on the test box (Docker 26, iptables-nft): from an agent, example.com 200, DNS ok; the host's public
+  IP, the bridge gateway, the app container, 10.0.0.1, 192.168.1.1 and 169.254.169.254 all time out — while a
+  container on the default bridge reaches the host (200), so it is the rules. One jump each after two restarts.
+- **The agent image's apt mirror** is a build argument now (`AGENT_APT_MIRROR`; default the Aliyun mirror as
+  before, `deb.debian.org` = Debian's CDN). On the test box Aliyun ran at ~280 KB/s and Debian at ~100 MB/s.
+
+### 2.36.9 CI, backup, restore, upgrade
+
+- `.github/workflows/ci.yml`: self-tests + `check-bots.py` + the e2e suite against a postgres service, Flutter
+  analyze + test (3.47.1), the server image builds. `agent-image.yml` (only when the agent Dockerfile or
+  browserd change): builds with Debian's CDN, checks uid 1000 / CapEff 0, a root apt install, and that
+  browserd refuses `fill_secret` off its site.
+- `./start.sh backup [dir]` → `db.dump` (pg_dump -Fc) + `workspace.tgz` (desks, drives, files **and
+  `.secret-key`**) + `env`, mode 700/600. `./start.sh restore <dir> --yes` → pg_restore --clean, the current
+  workspace moved aside (`.before-restore-<time>`), agent containers removed (they'd still mount the moved
+  directory), up again; without `--yes` it only explains. `./start.sh upgrade` → backup, `git pull --ff-only`,
+  redeploy (refuses outside a git checkout). Verified on the test box: backup, a marker agent and file added,
+  restore → both gone, the four original agents back.
 
 ## 3. What runs now
 

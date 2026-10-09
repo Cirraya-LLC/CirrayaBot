@@ -1,0 +1,34 @@
+# The agent image is big (chromium) and slow to build, so it is only built when its Dockerfile
+# changes — and then it is checked the way the server uses it: as an ordinary user, with no
+# capabilities, able to start the browser and to install a package as root.
+name: agent-image
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/agent.Dockerfile", "deploy/browserd.py", ".github/workflows/agent-image.yml"]
+  pull_request:
+    paths: ["deploy/agent.Dockerfile", "deploy/browserd.py", ".github/workflows/agent-image.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        # The Dockerfile points apt at a mirror in China by default; from here Debian's own is faster.
+        run: docker build --build-arg APT_MIRROR=deb.debian.org -t agent-ci - < deploy/agent.Dockerfile
+      - name: Runs as the agent, with no capabilities
+        run: |
+          docker run --rm --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges agent-ci \
+            sh -c 'id -u | grep -qx 1000 && grep -q "^CapEff:\s*0000000000000000" /proc/self/status && echo ok'
+      - name: The platform can install a package as root
+        run: docker run --rm --user 0 agent-ci sh -c 'apt-get update -qq >/dev/null && apt-get install -y -q cowsay >/dev/null && /usr/games/cowsay ok'
+      - name: The browser daemon starts and fills only on its own site
+        run: |
+          docker run -d --name ag --user 1000:1000 agent-ci sleep 600
+          docker cp deploy/browserd.py ag:/tmp/browserd.py
+          docker exec -d ag python3 /tmp/browserd.py
+          for i in $(seq 60); do docker exec ag curl -sf http://127.0.0.1:9230/ >/dev/null && break; sleep 1; done
+          docker exec ag sh -c 'curl -s -X POST -H "content-type: application/json" -d "{\"action\":\"open\",\"url\":\"data:text/html,<input>\"}" http://127.0.0.1:9230/' | grep -q '"ok": *true'
+          docker exec ag sh -c 'curl -s -X POST -H "content-type: application/json" -d "{\"action\":\"fill_secret\",\"index\":1,\"origin\":\"https://example.com\",\"text\":\"x\"}" http://127.0.0.1:9230/' | grep -q 'only for https://example.com'
+          echo ok
