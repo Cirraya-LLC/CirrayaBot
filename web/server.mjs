@@ -389,6 +389,9 @@ function cliRun(argv, input, timeout = EXEC_TIMEOUT) {
     p.stderr.on('data', d => { err += d })
     p.on('close', code => { clearTimeout(timer); done({ code, out, err }) })
     p.on('error', e => { clearTimeout(timer); done({ code: 127, out, err: String(e.message) }) })
+    // ⚠️ A command that exits without reading its input (docker inspect, a container that's gone)
+    // makes this write fail with EPIPE — and an 'error' nobody listens for takes the whole server down.
+    p.stdin.on('error', () => {})
     p.stdin.end(input ?? '')
   })
 }
@@ -653,6 +656,7 @@ function execStream(argv, { from = null, to = null, max = Infinity } = {}) {
     })
     p.stderr.on('data', d => { err += d })
     p.on('error', e => { err += e.message })
+    p.stdin.on('error', () => {})                     // EPIPE when it exits first; see cliRun
     p.on('close', code => {
       clearTimeout(timer)
       const finish = () => done({ code: over ? 413 : code, out, err: err.trim(), size })
