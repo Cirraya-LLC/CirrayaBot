@@ -36,7 +36,7 @@ test('settings are checked: an upstream voice needs a model and a voice name, no
   const put = b => s.api('PUT', '/api/settings/voice', b)
   a.equal((await put({ stt: { mode: 'upstream' } })).status, 400)
   const noVoice = await put({ tts: { mode: 'upstream', model: 'tts-1' } })
-  a.equal(noVoice.status, 400); a.match(noVoice.body.error, /voice name/)
+  a.equal(noVoice.status, 400); a.match(noVoice.body.error, /voice name/); a.doesNotMatch(noVoice.body.error, /alloy|tts-1/, 'no model or voice is suggested')
   a.equal((await put({ stt: { mode: 'upstream', provider_id: 'nope', model: 'whisper-1' } })).status, 400)
   const ok = await put({ stt: { mode: 'upstream', provider_id: pid, model: 'whisper-1' }, tts: { mode: 'upstream', provider_id: pid, model: 'tts-1', voice: 'nova' } })
   a.equal(ok.status, 200, JSON.stringify(ok.body))
