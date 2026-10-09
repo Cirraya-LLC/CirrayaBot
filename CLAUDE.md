@@ -2252,6 +2252,24 @@ output masked; validation; tasks get no request_secret. `app/test/secret_test.da
   directory), up again; without `--yes` it only explains. `./start.sh upgrade` → backup, `git pull --ff-only`,
   redeploy (refuses outside a git checkout). Verified on the test box: backup, a marker agent and file added,
   restore → both gone, the four original agents back.
+- ⚠️ **CI found a crash the Mac never showed**: `cliRun` wrote to the stdin of a docker command that had already
+  exited (inspect, a container that's gone) → EPIPE → an unhandled 'error' event → **the server process died**.
+  `p.stdin.on('error', () => {})` in `cliRun` and `execStream`. Timing-dependent: green locally, red on Linux.
+
+### 2.36.10 What was checked where
+
+- **Local** (`npm run test:e2e`, 29 tests; Flutter 69; every `node web/*.mjs`) and **CI** (both workflows green).
+- **Test box, real containers** (`/opt/cirrayabot-test`, scripted model `/tmp/cbfake.mjs` on the host at
+  `172.22.0.1:9917`, upstream "fakebox", agents Probe / Probe2): uid/caps, install_packages, pip into home, PATH,
+  egress (with the default-bridge comparison), fill_secret on httpbin.org and refused on example.com, masking of
+  an eval and an echo, an old :2 container recreated and its files handed to uid 1000, a real-model turn (gpt-5.6-sol).
+- **Test box, web UI in headless Chromium over HTTPS**: always-allow card → no second card → the allowance listed
+  and revoked; the secret card → saved → listed (the value nowhere in the page or the model traffic); interjecting
+  during a 20 s command (button Stop/Send, "passed on" note, the answer acknowledging it); backup-model rows.
+- ⚠️ A fake model that counts "this turn's tool results" as those after the last user message re-runs a step after
+  an interjection (the interjection IS the last user message). That was the fake, not the server — e2e asserts it.
+- **Not verified**: the Android build of these screens on the phone (it was unplugged; the release APK is built,
+  `app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`); the macOS/Windows builds; podman.
 
 ## 3. What runs now
 
@@ -2267,6 +2285,9 @@ node web/memory.mjs        # self-test for an agent's self-notes (cap, duplicate
 node web/autonomy.mjs      # self-test for auto mode: limits, the plan, nudges
 node web/tasks.mjs         # self-test for background tasks: input, who gets it, what the front thread is told
 node web/files.mjs         # self-test for attachments: types, what they're served as, names, what send_file may read
+node web/secrets.mjs       # self-test for secrets: sealing, origins, masking, internal addresses
+npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
+./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
