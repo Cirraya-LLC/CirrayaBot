@@ -2113,6 +2113,23 @@ agent's own model again. Background tasks and routines go through the same loop.
 Tests: `test/e2e/fallback.test.mjs` (switch + note, rest of turn on the backup, 400 not retried, dead upstream,
 validation + 409), `app/test/editor_test.dart`; web editor driven in headless Chromium (add, save, reopen, 3 max).
 
+### 2.36.3 Prices read from the upstream, never shipped
+
+No price table in the code (scope, 3.1). `modelInfo` (model.mjs) asks the person's upstream's `/models` once for
+both the context window and the price of **exactly** this model id (a near match may guess a window, never a price):
+OpenRouter `pricing.prompt/completion` ($/token), LiteLLM `input_cost_per_token`, Together `pricing.input/output`
+($/M). Negative = "varies" (OpenRouter's routers) = no price; 0 is a real price (free).
+
+- **A listed price wins over one typed on the upstream** — it is per model, and one typed price on an upstream
+  with several models is right for one of them at best. The typed price covers models the upstream doesn't price.
+- Cached per (upstream, model): an hour, "said nothing" ten minutes. `/api/usage` (polled every 15 s) only reads the
+  cache (`infoKnown`) and fills it in the background, so the panel never waits on an upstream.
+- `/api/usage` per agent now has `price_source` ('upstream' / 'manual' / '') and the price; both clients show
+  "priced from the upstream's model list: $3.00 in / $15.00 out per M tokens" or why it can't be priced.
+
+Tests: `test/e2e/prices.test.mjs` (listed price → cost, near match not priced, typed price as fallback, cap holds
+on a listed price), `node web/model.mjs`.
+
 ## 3. What runs now
 
 ```bash

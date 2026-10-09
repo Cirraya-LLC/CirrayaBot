@@ -6,7 +6,7 @@
 // Auth: put ?k=<ACCESS_TOKEN> in the URL once, then a cookie carries it. Without a token we only listen on 127.0.0.1.
 import { env, ROOT } from './env.mjs'
 import * as db from './db.mjs'
-import { fitContext, listModels, probeContext } from './model.mjs'
+import { fitContext, listModels, modelInfo, guessContext } from './model.mjs'
 import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
@@ -1729,17 +1729,40 @@ async function requireProvider() {
   return p
 }
 
-// The context window is a property of the model, and the model now follows the agent, so probe per (upstream, model), cached for an hour.
-// Only cache real answers: caching the fallback would mean never asking again after the upstream is fixed.
-const ctxCache = new Map()
+// What the upstream's /models says about a model — its context window, and its price when it lists
+// one. A property of the model, and the model follows the agent, so per (upstream, model). Answers
+// are kept an hour; "it said nothing" ten minutes, so a fixed upstream is asked again soon but a
+// silent one isn't asked on every turn.
+const infoCache = new Map()
+const infoKey = (base, model) => `${base.id}|${base.base_url}|${model}`
+async function infoFor(base, model) {
+  const key = infoKey(base, model)
+  const hit = infoCache.get(key)
+  if (hit && hit.until > Date.now()) return hit.info
+  const info = await modelInfo({ ...base, model })
+  infoCache.set(key, { info, until: Date.now() + (info.tokens || info.price ? 3600_000 : 600_000) })
+  return info
+}
+/** Only what is already known — for the usage panel, polled every 15 s, which must not wait on an upstream. */
+function infoKnown(base, model) {
+  const hit = infoCache.get(infoKey(base, model))
+  if (!hit || hit.until <= Date.now()) infoFor(base, model).catch(() => {})
+  return hit?.info ?? null
+}
+
 async function contextFor(base, model) {
   if (!base.auto_context) return base.context_tokens
-  const key = `${base.id}|${base.base_url}|${model}`
-  const hit = ctxCache.get(key)
-  if (hit && hit.until > Date.now()) return hit.tokens
-  const r = await probeContext({ ...base, model })
-  if (r.tokens) ctxCache.set(key, { tokens: r.tokens, until: Date.now() + 3600_000 })
-  return r.tokens ?? 128_000
+  return (await infoFor(base, model)).tokens ?? guessContext(model) ?? 128_000
+}
+
+/**
+ * The price a call is charged at: what the upstream's /models lists for this model, else the prices
+ * typed on the upstream, else none. A listed price wins because it is per model — one price typed on
+ * an upstream with several models is right for one of them at best. Nothing is ever built in.
+ */
+function priceFor(base, info) {
+  if (info?.price) return { price_in_micro: info.price.in, price_out_micro: info.price.out, price_source: 'upstream' }
+  return { price_source: db.isPriced(base) ? 'manual' : '' }
 }
 
 /** Which upstream and model this agent uses. Without its own upstream it follows the default; the model must be its own choice. */
@@ -1750,7 +1773,8 @@ async function providerFor(bot, choice = bot) {
   // An agent's own effort wins; empty means "whatever the platform says", and the
   // platform's own empty means send nothing — what every model got before this existed.
   const effort = normEffort(bot.effort) || normEffort(await db.defaultEffort())
-  return { ...base, model: choice.model, effort, context_tokens: await contextFor(base, choice.model) }
+  const context_tokens = await contextFor(base, choice.model)
+  return { ...base, model: choice.model, effort, context_tokens, ...priceFor(base, await infoFor(base, choice.model)) }
 }
 
 const MAX_FALLBACKS = 3
@@ -2198,14 +2222,19 @@ const server = createServer(async (req, res) => {
       const def = providers.find(p => p.is_default) ?? providers[0] ?? null
       const zero = { tokens: 0, cost_micro: 0, calls: 0, unpriced: 0 }
       const per = agents.map(a => {
-        const p = (a.provider_id ? providers.find(x => x.id === a.provider_id) : def) ?? null
+        const base = (a.provider_id ? providers.find(x => x.id === a.provider_id) : def) ?? null
+        const p = base && { ...base, ...priceFor(base, a.model ? infoKnown(base, a.model) : null) }
         const u = byId.get(a.id)
         return { id: a.id, name: a.name,
           day: u?.day ?? zero, month: u?.month ?? zero,
           // The cap actually in force, and whether it can be enforced at all.
           cap_micro: a.daily_cap_micro != null ? Number(a.daily_cap_micro) : (fallback == null ? null : Number(fallback)),
           own_cap: a.daily_cap_micro != null,
-          priced: db.isPriced(p) }
+          priced: db.isPriced(p),
+          // Where the price comes from ('upstream': its model list, 'manual': typed on the upstream) and what it is.
+          price_source: p?.price_source ?? '',
+          price_in_micro: db.isPriced(p) ? Number(p.price_in_micro) : null,
+          price_out_micro: db.isPriced(p) ? Number(p.price_out_micro) : null }
       })
       // The total sums the raw rows, not the per-agent list: spend by an agent deleted
       // mid-month was still spent, and a month total that quietly shrinks is the kind of

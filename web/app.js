@@ -1193,7 +1193,9 @@ function renderSpend(c) {
     el.innerHTML = `${full.kind === 'group' ? `<b>${esc(u.name)}</b> · ` : ''}` +
       `${esc(t('sp.today'))} <b>${esc(money(u.day.cost_micro))}</b> · ${esc(t('sp.month'))} <b>${esc(money(u.month.cost_micro))}</b>` +
       `<br>${esc(t('sp.tokens', { n: tokens(u.month.tokens) }))} · ${esc(cap)}` +
-      (u.priced ? '' : `<br><span class="w">${esc(t('sp.unpricedWhy'))}</span>`)
+      (u.priced ? `<br><span class="d">${esc(t(u.price_source === 'upstream' ? 'sp.priceUpstream' : 'sp.priceManual',
+        { in: money(u.price_in_micro), out: money(u.price_out_micro) }))}</span>`
+        : `<br><span class="w">${esc(t('sp.unpricedWhy'))}</span>`)
     box.appendChild(el)
   }
 }
