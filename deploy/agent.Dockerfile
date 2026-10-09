@@ -30,7 +30,8 @@ ENV CHROMIUM=/usr/bin/chromium
 
 # The Agent's account. Its home is its desk, so what it installs for itself (pip --user, npm -g)
 # lands in /work and survives the container being recreated.
-RUN useradd --uid 1000 --home-dir /work --no-create-home --shell /bin/bash agent
+RUN useradd --uid 1000 --home-dir /work --no-create-home --shell /bin/bash agent \
+ && install -d -o agent -g agent /work
 # Commands run in a login shell (bash -lc), and Debian's /etc/profile resets PATH there — this puts
 # what the agent installs for itself back on it.
 RUN printf 'export PATH=/work/.local/bin:/work/.npm-global/bin:$PATH\n' > /etc/profile.d/agent-path.sh
