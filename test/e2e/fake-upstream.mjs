@@ -34,6 +34,17 @@ export function describe(body) {
   }
 }
 
+/** A WAV of `seconds` of a quiet tone — something a browser can actually play. */
+export function wav(seconds = 0.25, rate = 8000) {
+  const n = Math.round(seconds * rate), data = Buffer.alloc(n * 2)
+  for (let i = 0; i < n; i++) data.writeInt16LE(Math.round(Math.sin(i / rate * 2 * Math.PI * 440) * 3000), i * 2)
+  const h = Buffer.alloc(44)
+  h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVE', 8); h.write('fmt ', 12)
+  h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(rate, 24)
+  h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(data.length, 40)
+  return Buffer.concat([h, data])
+}
+
 export async function fakeUpstream({ models = [{ id: 'fake' }], name = 'fake' } = {}) {
   const requests = []
   let handler = () => ({ text: 'ok' })
@@ -47,6 +58,20 @@ export async function fakeUpstream({ models = [{ id: 'fake' }], name = 'fake' } 
     if (req.url.endsWith('/models')) {
       res.writeHead(200, { 'content-type': 'application/json' })
       return res.end(JSON.stringify({ data: up.models }))
+    }
+    if (req.url.endsWith('/audio/transcriptions') || req.url.endsWith('/audio/speech')) {
+      if (up.noAudio) { res.writeHead(404); return res.end('404 page not found') }
+      if (req.url.endsWith('/audio/speech')) {
+        up.spoken.push({ body: JSON.parse(raw || '{}'), auth: req.headers.authorization ?? null })
+        res.writeHead(200, { 'content-type': 'audio/wav' })
+        return res.end(wav(0.25))
+      }
+      // multipart: the fields are read by name; the file is only measured
+      const field = name => new RegExp(`name="${name}"\r\n\r\n([^\r]*)`).exec(raw)?.[1] ?? null
+      up.heard.push({ type: req.headers['content-type'], size: raw.length, model: field('model'), language: field('language'),
+        filename: /filename="([^"]+)"/.exec(raw)?.[1] ?? null, auth: req.headers.authorization ?? null })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ text: up.transcript }))
     }
     if (!req.url.endsWith('/chat/completions')) { res.writeHead(404); return res.end() }
     const body = JSON.parse(raw || '{}')
@@ -80,6 +105,10 @@ export async function fakeUpstream({ models = [{ id: 'fake' }], name = 'fake' } 
     url: `http://127.0.0.1:${server.address().port}/v1`,
     requests,
     models,
+    transcript: 'hello from the microphone',
+    heard: [],
+    spoken: [],
+    noAudio: false,
     on(fn) { handler = fn; return up },
     /** Requests the server made after this point. */
     mark() { const at = requests.length; return () => requests.slice(at) },

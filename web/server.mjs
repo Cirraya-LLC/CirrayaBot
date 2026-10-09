@@ -19,6 +19,7 @@ import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT
 import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, attachmentNote, sendablePath,
   VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
+import { checkVoice, DEFAULT_VOICE, SPEAK_MAX, AUDIO_MAX } from './voice.mjs'
 import { checkSecret, NEEDS, seal, open as unseal, parseKey, newKey, redact, headerFor, isPrivateAddress } from './secrets.mjs'
 import { createServer } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -54,6 +55,8 @@ const toBot = (r, lang = 'en') => ({
   order: r.ord, color: r.color, provider_id: r.provider_id ?? '', model: r.model ?? '',
   // Tried in order when its own model keeps failing. [{provider_id, model}], '' = the default upstream.
   fallbacks: Array.isArray(r.fallbacks) ? r.fallbacks : [],
+  // The voice it speaks with on an upstream voice; '' = the default one in the voice settings.
+  voice: r.voice ?? '',
   // Money is micro-dollars everywhere in the API (1 dollar = 1e6); null = no cap of its own.
   daily_cap_micro: r.daily_cap_micro == null ? null : Number(r.daily_cap_micro),
   // How hard this agent's model should think. '' = say nothing, which is what it did before.
@@ -979,6 +982,45 @@ async function installPackages(c, args) {
   const r = await cliRun(['exec', '-u', '0', '-e', 'DEBIAN_FRONTEND=noninteractive', c, 'bash', '-c',
     'apt-get update -qq >/dev/null 2>&1; apt-get install -y -q --no-install-recommends -- "$@" 2>&1 | tail -n 15', '_', ...names], null, 900_000)
   return clip(`${r.out}${r.err ? `\n--- stderr ---\n${r.err}` : ''}\n--- exit ${r.code} ---`, 4000)
+}
+
+// ---------- Voice ----------
+// Speech in and out (voice.mjs has the rules). On "device" the page or the phone does it all and the server
+// only keeps the setting; on "upstream" the server asks one of the person's own upstreams — the key never
+// leaves the server — at its OpenAI-style /audio/transcriptions and /audio/speech.
+const VOICE_KEY = 'voice'
+async function voiceSettings() {
+  const c = checkVoice(await db.getSetting(VOICE_KEY, null) ?? {})
+  return c.need ? DEFAULT_VOICE : c
+}
+async function voiceUpstream(part) {
+  const base = part.provider_id ? await db.getProvider(part.provider_id) : await db.activeProvider()
+  if (!base) throw new Say('voice.noUpstream', {}, 400)
+  if (base.protocol === 'messages') throw new Say('voice.anthropic', { name: base.name }, 400)
+  return base
+}
+const voiceUrl = (base, path) => `${base.base_url.replace(/\/+$/, '')}${path}`
+const voiceAuth = base => (base.api_key ? { authorization: `Bearer ${base.api_key}` } : {})
+/** fetch to the voice upstream; not reaching it at all (DNS, refused, timed out) is the upstream's failure too, not ours. */
+async function voiceFetch(base, path, init) {
+  try { return await fetch(voiceUrl(base, path), { ...init, signal: AbortSignal.timeout(120_000) }) }
+  catch (e) { throw new Say('voice.unreachable', { name: base.name, detail: String(e.cause?.code ?? e.cause?.message ?? e.message).slice(0, 120) }, 424) }
+}
+async function voiceFailed(r, base) {
+  const detail = (await r.text().catch(() => '')).slice(0, 200)
+  return r.status === 404 ? new Say('voice.noEndpoint', { name: base.name }, 424)
+    : new Say('voice.upstreamFailed', { status: r.status, detail }, 424)
+}
+/** The request body as bytes, refused past `max` (413) rather than read whole. */
+async function readBytes(req, max) {
+  const parts = []
+  let size = 0
+  for await (const c of req) {
+    size += c.length
+    if (size > max) throw new Say('voice.tooBig', { mb: Math.round(max / 1048576) }, 413)
+    parts.push(c)
+  }
+  return Buffer.concat(parts)
 }
 
 // ---------- Secrets: used by name, never seen ----------
@@ -2349,6 +2391,11 @@ async function checkAgent(b, selfId = null, cur = null) {
     if (model.length > 200) throw new Say('agent.modelLong')
     out.model = model
   }
+  if (b.voice !== undefined) {
+    const v = str(b.voice).trim()
+    if (v.length > 100) throw new Say('voice.need.voice')
+    out.voice = v
+  }
   // Backup models: the person's own picks from their own upstreams, tried in order. Not the main
   // model again — "falling back" to the thing that just failed would only fail twice.
   if (b.fallbacks !== undefined) {
@@ -2768,6 +2815,60 @@ const server = createServer(async (req, res) => {
         await taskEvent(task, 'answered')
         return send(200, { ok: true })
       }
+    }
+
+    // ---- Voice ----
+    if (url.pathname === '/api/settings/voice' && req.method === 'GET') return send(200, await voiceSettings())
+    if (url.pathname === '/api/settings/voice' && req.method === 'PUT') {
+      const v = checkVoice(await readBody(req))
+      if (v.need) return send(400, { error: t(`voice.need.${v.need}`) })
+      for (const part of [v.stt, v.tts]) {
+        if (part.mode !== 'upstream') continue
+        if (part.provider_id && !await db.getProvider(part.provider_id)) return send(400, { error: t('err.noProvider') })
+        try { await voiceUpstream(part) } catch (e) { return send(e.status ?? 400, { error: errorText(e, lang) }) }
+      }
+      await db.setSetting(VOICE_KEY, v)
+      return send(200, v)
+    }
+    // A recording in (raw bytes; its type in content-type), its words out. Only on an upstream voice —
+    // a device listens for itself.
+    if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') {
+      const v = await voiceSettings()
+      if (v.stt.mode !== 'upstream') return send(400, { error: t('voice.sttDevice') })
+      const base = await voiceUpstream(v.stt)
+      const audio = await readBytes(req, AUDIO_MAX)
+      if (!audio.length) return send(400, { error: t('voice.empty') })
+      const type = String(req.headers['content-type'] || 'audio/webm').split(';')[0].trim()
+      const ext = /ogg/.test(type) ? 'ogg' : /mp4|m4a|aac/.test(type) ? 'm4a' : /wav/.test(type) ? 'wav' : /mpeg|mp3/.test(type) ? 'mp3' : 'webm'
+      const form = new FormData()
+      form.append('file', new Blob([audio], { type }), `speech.${ext}`)
+      form.append('model', v.stt.model)
+      form.append('response_format', 'json')
+      const language = (url.searchParams.get('language') ?? '').trim()
+      if (/^[a-z]{2}$/.test(language)) form.append('language', language)
+      const r = await voiceFetch(base, '/audio/transcriptions', { method: 'POST', headers: voiceAuth(base), body: form })
+      if (!r.ok) throw await voiceFailed(r, base)
+      const j = await r.json().catch(() => ({}))
+      return send(200, { text: String(j.text ?? '').trim() })
+    }
+    // Text in, speech out — streamed as the upstream sends it, so playing starts before the end.
+    if (url.pathname === '/api/voice/speak' && req.method === 'POST') {
+      const v = await voiceSettings()
+      if (v.tts.mode !== 'upstream') return send(400, { error: t('voice.ttsDevice') })
+      const b = await readBody(req)
+      const text = str(b.text).trim()
+      if (!text) return send(400, { error: t('voice.empty') })
+      if (text.length > SPEAK_MAX) return send(400, { error: t('voice.tooLong', { n: SPEAK_MAX }) })
+      const base = await voiceUpstream(v.tts)
+      const agent = b.agent ? await db.getAgent(str(b.agent)) : null
+      const r = await voiceFetch(base, '/audio/speech', { method: 'POST',
+        headers: { 'content-type': 'application/json', ...voiceAuth(base) },
+        body: JSON.stringify({ model: v.tts.model, input: text, voice: agent?.voice || v.tts.voice, response_format: 'mp3' }) })
+      if (!r.ok) throw await voiceFailed(r, base)
+      res.writeHead(200, { 'content-type': r.headers.get('content-type') || 'audio/mpeg', 'cache-control': 'no-store' })
+      // Past the header a failure can only cut the audio short; the player sees it end early.
+      try { for await (const chunk of r.body) { if (res.destroyed) break; res.write(chunk) } } catch { res.destroy(); return }
+      return res.end()
     }
 
     // ---- Secrets: an agent's, by name; the value goes in and never comes out ----
