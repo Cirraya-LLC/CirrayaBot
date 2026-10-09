@@ -29,6 +29,8 @@ jobs:
           docker cp deploy/browserd.py ag:/tmp/browserd.py
           docker exec -d ag python3 /tmp/browserd.py
           for i in $(seq 60); do docker exec ag curl -sf http://127.0.0.1:9230/ >/dev/null && break; sleep 1; done
-          docker exec ag sh -c 'curl -s -X POST -H "content-type: application/json" -d "{\"action\":\"open\",\"url\":\"data:text/html,<input>\"}" http://127.0.0.1:9230/' | grep -q '"ok": *true'
-          docker exec ag sh -c 'curl -s -X POST -H "content-type: application/json" -d "{\"action\":\"fill_secret\",\"index\":1,\"origin\":\"https://example.com\",\"text\":\"x\"}" http://127.0.0.1:9230/' | grep -q 'only for https://example.com'
+          post() { docker exec ag curl -s -X POST -H 'content-type: application/json' -d "$1" http://127.0.0.1:9230/; }
+          post '{"action":"open","url":"https://example.com"}' | tee /dev/stderr | grep -q '"ok": *true'
+          post '{"action":"fill_secret","index":1,"origin":"https://elsewhere.example","text":"x"}' | tee /dev/stderr \
+            | grep -q 'this page is on https://example.com, and the secret is only for https://elsewhere.example'
           echo ok
