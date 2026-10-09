@@ -170,9 +170,11 @@ source, not the README:
   `computer_act` are exempt outright, and other "consequential" tools only ask once the operator adds a rule or
   turns on the LLM Auto Review (`action-approval.test.ts`, "stays YOLO when auto review is off"); **no spending cap**
   (cost is recorded per call, nothing limits on it); the default **Team computer is one container for every bot in
-  a space** (same user, files, X11 — their own docs say it is not a boundary); computer **egress open by default**,
-  LAN and 169.254.169.254 included; push only through Expo's hosted service (`exp.host` → FCM/APNs), so none where
-  Google is unavailable, and no web push.
+  a space** (same user, files, X11 — their own docs say it is not a boundary); phone push only through Expo's hosted
+  service (`exp.host` → FCM/APNs), so none where Google is unavailable.
+- **Same as us, not a difference** (I first listed these as their weaknesses — wrong): egress open by default, LAN
+  and 169.254.169.254 included (they at least ship an opt-in `restrict-computer-egress.sh`; we have nothing); no web
+  push (both only notify while a tab is open).
 - Theirs is better on one isolation point: the computer runs as uid 1000 with no capabilities; ours is root with a
   reduced set.
 
