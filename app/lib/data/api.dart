@@ -243,6 +243,7 @@ class Task {
     required this.status,
     required this.question,
     required this.approvalId,
+    this.approvalAlways = const [],
     required this.approvalSubject,
     required this.result,
     required this.createdAt,
@@ -262,6 +263,7 @@ class Task {
       question: (j['question'] as String?) ?? '',
       approvalId: a?['id'] as String?,
       approvalSubject: (a?['subject'] as String?) ?? '',
+      approvalAlways: [for (final p in (a?['always'] as List?) ?? const []) '$p'],
       result: (j['result'] as String?) ?? '',
       createdAt: (j['created_at'] as num?)?.toInt() ?? 0,
       updatedAt: (j['updated_at'] as num?)?.toInt() ?? 0,
@@ -284,6 +286,9 @@ class Task {
   /// Set while it waits for a command to be allowed.
   final String? approvalId;
   final String approvalSubject;
+
+  /// What "always allow" would cover: risky patterns, or '' for the whole tool. Empty = not offered.
+  final List<String> approvalAlways;
   final String result;
   final int createdAt;
   final int updatedAt;
@@ -379,14 +384,40 @@ class Run {
 }
 
 class ApprovalPolicy {
-  const ApprovalPolicy({this.mode = 'match', this.patterns = const []});
+  const ApprovalPolicy({this.mode = 'match', this.patterns = const [], this.allow = const []});
 
   final String mode;
   final List<String> patterns;
 
+  /// Everything someone said "always allow" to.
+  final List<Allowance> allow;
+
   static ApprovalPolicy fromJson(Map<String, Object?> j) => ApprovalPolicy(
     mode: (j['mode'] as String?) ?? 'match',
     patterns: ((j['patterns'] as List?) ?? const []).map((e) => '$e').toList(),
+    allow: [
+      for (final r in (j['allow'] as List?) ?? const [])
+        if (r is Map<String, Object?>) Allowance.fromJson(r),
+    ],
+  );
+}
+
+/// One "always allow": this agent may do this without asking. [pattern] null = the whole tool
+/// (a risky command still asks).
+class Allowance {
+  const Allowance({required this.id, required this.agentName, required this.tool, this.pattern, this.example = ''});
+  final String id;
+  final String agentName;
+  final String tool;
+  final String? pattern;
+  final String example;
+
+  static Allowance fromJson(Map<String, Object?> j) => Allowance(
+    id: (j['id'] as String?) ?? '',
+    agentName: (j['agent_name'] as String?) ?? (j['agent'] as String?) ?? '',
+    tool: (j['tool'] as String?) ?? '',
+    pattern: j['pattern'] as String?,
+    example: (j['example'] as String?) ?? '',
   );
 }
 
@@ -1120,7 +1151,11 @@ class Api {
 
   /// Answer one waiting call. The id only exists while the stream that asked is open,
   /// so a late click gets an ApiException rather than a silent yes.
-  Future<void> answerApproval(String id, bool ok) => _json('POST', '/api/approvals/$id', {'ok': ok});
+  /// [always]: approve, and stop asking this agent for this kind of call (the server decides how narrow).
+  Future<void> answerApproval(String id, bool ok, {bool always = false}) =>
+      _json('POST', '/api/approvals/$id', {'ok': ok, 'always': always});
+
+  Future<void> revokeAllowance(String id) => _json('DELETE', '/api/approvals/allow/${Uri.encodeComponent(id)}');
 
   // ---- Files ----
   // The same network failures _send turns into ApiException, for calls that

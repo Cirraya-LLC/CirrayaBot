@@ -41,6 +41,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
   /// The platform-wide approval rule, and the pattern list "match" uses.
   final _patterns = TextEditingController();
   String _approvalMode = 'match';
+  List<Allowance> _allow = const [];
 
   /// The platform-wide reasoning effort. '' = send nothing at all.
   String _effort = '';
@@ -74,6 +75,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       final policy = await widget.api.approvalPolicy();
       _approvalMode = policy.mode;
       _patterns.text = policy.patterns.join('\n');
+      _allow = policy.allow;
       _effort = await widget.api.defaultEffort();
       _autonomy = await widget.api.defaultAutonomy();
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
@@ -203,6 +205,18 @@ class _ProvidersPageState extends State<ProvidersPage> {
         _patterns.text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList(),
       );
       _say(tr('ap.saved'), good: true);
+    });
+  }
+
+  Future<void> _revoke(Allowance r) async {
+    await _act(tr('prov.saving'), () async {
+      try {
+        await widget.api.revokeAllowance(r.id);
+      } on ApiException {
+        // already gone elsewhere: the list below is refreshed either way
+      }
+      _allow = (await widget.api.approvalPolicy()).allow;
+      _say(tr('ap.revoked'), good: true);
     });
   }
 
@@ -437,6 +451,38 @@ class _ProvidersPageState extends State<ProvidersPage> {
                     ),
                     const SizedBox(height: 6),
                     Text(tr('ap.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+                    // Everything someone said "always allow" to, each one takeable back.
+                    if (_allow.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(tr('ap.allowed'), style: TextStyle(fontSize: 12.5, color: C.dim)),
+                      for (final r in _allow)
+                        Tooltip(
+                          message: tr('ap.allowExample', {'example': r.example}),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text.rich(
+                                  TextSpan(children: [
+                                    TextSpan(text: r.agentName, style: const TextStyle(fontWeight: FontWeight.w600)),
+                                    TextSpan(
+                                      text: ' · ${r.pattern != null ? tr('ap.allowPattern', {'tool': r.tool}) : tr('ap.allowTool', {'tool': r.tool})} ',
+                                      style: TextStyle(color: C.dim),
+                                    ),
+                                    if (r.pattern != null)
+                                      TextSpan(text: r.pattern, style: const TextStyle(fontFamily: 'monospace', fontSize: 11.5)),
+                                  ]),
+                                  style: const TextStyle(fontSize: 12.5),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: tr('ap.revoke'),
+                                icon: const Icon(Icons.close, size: 16),
+                                onPressed: _busy ? null : () => _revoke(r),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
                     const SizedBox(height: 10),
                     Text(_hint, style: TextStyle(fontSize: 11.5, color: _hintColor)),
                     const SizedBox(height: 16),

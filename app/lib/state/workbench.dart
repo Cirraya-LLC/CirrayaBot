@@ -67,8 +67,14 @@ class Ran extends Entry {
   /// only good for as long as the stream that asked is open.
   String? approvalId;
 
+  /// What "always allow" would cover (risky patterns, '' = the whole tool). Empty = not offered.
+  List<String> always = const [];
+
   /// What the person answered, once they have. Shown instead of the buttons.
   bool? approved;
+
+  /// They answered "always allow".
+  bool alwaysAllowed = false;
 }
 
 class Note extends Entry {
@@ -450,11 +456,11 @@ class Workbench extends ChangeNotifier {
   }
 
   /// Allow or refuse the command a task is waiting on.
-  Future<void> answerTaskApproval(Task x, bool ok) async {
+  Future<void> answerTaskApproval(Task x, bool ok, [bool always = false]) async {
     final id = x.approvalId;
     if (id == null) return;
     try {
-      await api.answerApproval(id, ok);
+      await api.answerApproval(id, ok, always: always);
     } on ApiException catch (e) {
       error = e.message;
     }
@@ -709,7 +715,9 @@ class Workbench extends ChangeNotifier {
               cards[key] = card;
               add(card);
             } else if (phase == 'ask') {
-              cards[key]?.approvalId = ev.data['id'] as String?;
+              cards[key]
+                ?..approvalId = ev.data['id'] as String?
+                ..always = [for (final p in (ev.data['always'] as List?) ?? const []) '$p'];
             } else if (phase == 'answered') {
               cards[key]
                 ?..approvalId = null
@@ -766,14 +774,15 @@ class Workbench extends ChangeNotifier {
 
   /// Allow or refuse a waiting call. The buttons go the moment we answer, so the
   /// same card can't be answered twice while the request is in flight.
-  Future<void> answer(Ran card, bool ok) async {
+  Future<void> answer(Ran card, bool ok, [bool always = false]) async {
     final id = card.approvalId;
     if (id == null) return;
     card.approvalId = null;
     notifyListeners();
     try {
-      await api.answerApproval(id, ok);
+      await api.answerApproval(id, ok, always: always);
       card.approved = ok;
+      card.alwaysAllowed = ok && always;
     } on ApiException catch (e) {
       entries.add(Note('⚠ ${e.message}'));
     }

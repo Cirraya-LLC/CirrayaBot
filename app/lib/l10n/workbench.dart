@@ -190,6 +190,16 @@ const Map<String, List<String>> workbenchStrings = {
 
   // A tool call waiting for a person
   'ap.asks': ['Waiting for you', '等你决定', '等你決定'],
+  'ap.always': ['Always allow', '总是允许', '總是允許'],
+  'ap.alwaysPattern': [
+    'Approve, and from now on let this Agent run commands matching {what} without asking',
+    '批准，并且以后这个 Agent 运行匹配 {what} 的命令都不再问',
+    '批准，並且以後這個 Agent 執行符合 {what} 的命令都不再詢問'],
+  'ap.alwaysTool': [
+    'Approve, and from now on don’t ask this Agent before this kind of action (risky commands still ask)',
+    '批准，并且以后这个 Agent 的这类操作都不再问（命中危险清单的仍然会问）',
+    '批准，並且以後這個 Agent 的這類操作都不再詢問（命中危險清單的仍然會問）'],
+  'ap.alwaysDone': ['Approved — and won’t ask again for this', '已批准，以后这类不再问', '已批准，以後這類不再詢問'],
   'ap.approve': ['Approve', '批准', '批准'],
   'ap.deny': ['Deny', '拒绝', '拒絕'],
   'ap.approved': ['Approved', '已批准', '已批准'],

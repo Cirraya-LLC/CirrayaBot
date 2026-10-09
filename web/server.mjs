@@ -11,7 +11,7 @@ import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './pr
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
-import { APPROVAL_MODES, RISKY, needsApproval, toolSubject } from './approve.mjs'
+import { APPROVAL_MODES, RISKY, gate, toolSubject } from './approve.mjs'
 import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
   taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText } from './tasks.mjs'
@@ -177,26 +177,50 @@ async function approvalPolicy() {
   }
 }
 
-// id -> the function that answers it. A pending approval only exists while its stream is open.
+// id -> the function that answers it: (ok, always) => Promise. A pending approval only exists while
+// its stream is open (or, for a background task, while the process lives).
 const pendingApprovals = new Map()
+
+// "Always allow": standing allowances, per agent. [{id, agent, tool, pattern, example, at}] in settings;
+// pattern null = the whole tool (made from an "all"-mode card). Listed in the approval settings, where
+// each can be taken back — an allowance nobody can see is how permission prompts stop meaning anything.
+const ALLOW_KEY = 'approvals.allow'
+const allowList = async () => { const v = await db.getSetting(ALLOW_KEY, []); return Array.isArray(v) ? v : [] }
+const allowedFor = async agentId => (await allowList()).filter(r => r.agent === agentId)
+function addAllowances(agentId, allow, example) {
+  return withLock('settings:allow', async () => {
+    const list = await allowList()
+    for (const r of allow)
+      if (!list.some(x => x.agent === agentId && x.tool === r.tool && x.pattern === r.pattern))
+        list.push({ id: randomUUID().slice(0, 8), agent: agentId, tool: r.tool, pattern: r.pattern,
+          example: String(example).slice(0, 200), at: Date.now() })
+    await db.setSetting(ALLOW_KEY, list)
+  })
+}
+const dropAllowances = test => withLock('settings:allow', async () =>
+  db.setSetting(ALLOW_KEY, (await allowList()).filter(r => !test(r))))
 
 /**
  * Ask, and wait. Nothing times out on its own: the client hanging up aborts the turn, which is the
  * only way an interactive approval can end unanswered. A scheduled task has nobody to ask, so it is
  * refused straight away rather than stalling a task nobody is watching.
  */
-function askApproval(ctx, onTool, name, args) {
+function askApproval(ctx, onTool, name, args, allow = []) {
   // Nobody to ask: a scheduled task, or an auto-mode run whose page was closed. A background task is
   // different: nobody watches it either, but its card waits in the conversation for whenever they look.
   if (!ctx.task && (ctx.unattended || ctx.run?.detached)) return Promise.resolve(false)
   const id = randomUUID()
-  onTool?.({ phase: 'ask', id, name, args })
-  if (ctx.task) taskWaitsForApproval(ctx.task, { id, name, args }).catch(e => console.error('[task] approval card:', e.message))
+  // `always`: what an "always allow" answer would cover, so the card can say it before anyone clicks.
+  const always = allow.map(r => r.pattern ?? '')
+  onTool?.({ phase: 'ask', id, name, args, always })
+  if (ctx.task) taskWaitsForApproval(ctx.task, { id, name, args, always }).catch(e => console.error('[task] approval card:', e.message))
   return new Promise(resolve => {
-    const answer = ok => {
+    const answer = async (ok, forever = false) => {
       if (!pendingApprovals.delete(id)) return
       ctx.run?.asking.delete(id)
       ctx.signal?.removeEventListener('abort', onAbort)
+      // Written before the turn carries on: the next call in this very turn must already see it.
+      if (ok && forever && allow.length) await addAllowances(ctx.bot.id, allow, toolSubject(name, args))
       onTool?.({ phase: 'answered', id, name, args, ok })
       if (ctx.task) db.updateTask(ctx.task.id, { status: 'running', approval: null }, { from: ['waiting'] }).catch(() => {})
       resolve(ok)
@@ -1038,8 +1062,8 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       let args = {}
       try { args = JSON.parse(c.args || '{}') } catch { args = {} }
       onTool?.({ phase: 'run', name: c.name, args })
-      const allowed = !needsApproval(c.name, args, ctx.approval ?? { mode: 'off' })
-        || await askApproval(ctx, onTool, c.name, args)
+      const need = gate(c.name, args, ctx.approval ?? { mode: 'off' }, await allowedFor(ctx.bot.id))
+      const allowed = !need || await askApproval(ctx, onTool, c.name, args, need.allow)
       // Hanging up while a card waits is not a refusal — recording one would leave the transcript
       // saying the user said no to something they never saw an answer for.
       if (ctx.signal?.aborted) throw new Say('chat.aborted')
@@ -1365,7 +1389,8 @@ const taskQueued = new Set()      // ids queued in this process, so one isn't qu
 const taskView = t => ({
   id: Number(t.id), session: t.session_id, agent_id: t.agent_id, by_agent: t.by_agent, title: t.title, brief: t.brief,
   status: t.status, question: t.question,
-  approval: t.approval ? { id: t.approval.id, name: t.approval.name, subject: toolSubject(t.approval.name, t.approval.args ?? {}) } : null,
+  approval: t.approval ? { id: t.approval.id, name: t.approval.name, subject: toolSubject(t.approval.name, t.approval.args ?? {}),
+    always: t.approval.always ?? [] } : null,
   result: t.result, created_at: t.created_at, updated_at: t.updated_at, finished_at: t.finished_at,
 })
 
@@ -2091,6 +2116,7 @@ const server = createServer(async (req, res) => {
       for (const x of await db.tasksWithStatus(OPEN))
         if (x.agent_id === bm[1] || (x.scope === 'dm' && x.scope_id === bm[1])) await stopTask(x, '', { quiet: true })
       await dropBlobs(await db.deleteAgent(bm[1]))
+      await dropAllowances(r => r.agent === bm[1])
       // Delete the container too — an ownerless container only wastes memory,
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
       await removeContainer(bm[1]).catch(() => {})
@@ -2363,8 +2389,18 @@ const server = createServer(async (req, res) => {
 
     // ---- Approvals ----
     // The platform default, and the pattern list "match" uses.
-    if (url.pathname === '/api/approvals/policy' && req.method === 'GET')
-      return send(200, { ...await approvalPolicy(), modes: APPROVAL_MODES, seeded: RISKY })
+    if (url.pathname === '/api/approvals/policy' && req.method === 'GET') {
+      const names = new Map((await db.listAgents()).map(a => [a.id, a.name]))
+      const allow = (await allowList()).map(r => ({ ...r, agent_name: names.get(r.agent) ?? r.agent }))
+      return send(200, { ...await approvalPolicy(), modes: APPROVAL_MODES, seeded: RISKY, allow })
+    }
+    // Taking back one "always allow".
+    const al = url.pathname.match(/^\/api\/approvals\/allow\/([\w-]+)$/)
+    if (al && req.method === 'DELETE') {
+      if (!(await allowList()).some(r => r.id === al[1])) return send(404, { error: t('approval.noAllowance') })
+      await dropAllowances(r => r.id === al[1])
+      return send(200, { ok: true })
+    }
 
     if (url.pathname === '/api/approvals/policy' && req.method === 'PUT') {
       const b = await readBody(req)
@@ -2383,7 +2419,8 @@ const server = createServer(async (req, res) => {
     if (ap && req.method === 'POST') {
       const answer = pendingApprovals.get(ap[1])
       if (!answer) return send(404, { error: t('approval.gone') })
-      answer((await readBody(req)).ok === true)
+      const b = await readBody(req)
+      await answer(b.ok === true, b.ok === true && b.always === true)
       return send(200, { ok: true })
     }
 

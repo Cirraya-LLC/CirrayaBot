@@ -1647,9 +1647,8 @@ transcript, agent wrote up what happened), a per-agent `all` override asking for
 stale id → 404, and a bad mode → 400. In the browser the waiting card is amber with Deny/Approve
 and the whole flow runs with zero console errors.
 
-**Not done**: no "always allow this one" — it would need somewhere to keep the decision, and a list
-of standing allowances nobody re-reads is how permission prompts stop meaning anything. The gate
-also doesn't cover the human-driven browser takeover (2.22.2), which is a person acting already.
+~~No "always allow this one"~~ — **done in 2.36.4**, narrow and listed where it can be taken back. The gate
+doesn't cover the human-driven browser takeover (2.22.2), which is a person acting already.
 
 ## 2.28 Isolation, audited (2026-09-26)
 
@@ -2129,6 +2128,25 @@ OpenRouter `pricing.prompt/completion` ($/token), LiteLLM `input_cost_per_token`
 
 Tests: `test/e2e/prices.test.mjs` (listed price → cost, near match not priced, typed price as fallback, cap holds
 on a listed price), `node web/model.mjs`.
+
+### 2.36.4 "Always allow", narrow and revocable
+
+A third button on every approval card (live tool cards, task cards, task event cards). `gate()` in approve.mjs
+decides, given the agent's standing allowances (`settings` key `approvals.allow`: `{id, agent, tool, pattern,
+example, at}`):
+
+- From a **"match"** card the allowance is **the risky pattern(s) this command tripped, for this agent** —
+  `git push` from now on, not the shell. Another pattern in the same command still asks.
+- From an **"all"** card it is **the tool** (`pattern: null`), and a command that trips a risky pattern still asks.
+- Per agent; deleting the agent deletes its allowances. A "no" is never remembered (`always` only counts with ok).
+- The `ask` event and a task's `approval` carry `always` (what it would cover; '' = the whole tool), so the
+  button's tooltip says it before anyone clicks. It is written **before** the turn continues — the next call in
+  the same turn already sees it. Writes go through `withLock('settings:allow')` (read-modify-write on one row).
+- Listed in the approvals settings (web `#aplist`, Flutter providers page) with ×; `DELETE /api/approvals/allow/:id`.
+- Scheduled tasks follow it too: an allowed command runs unattended, anything else is still refused.
+
+Tests: `test/e2e/approvals.test.mjs` (narrowness, other agent, revoke, "no" not kept, all-mode, routine, agent
+deleted), `node web/approve.mjs`, `app/test/approval_test.dart`; web card + list driven in headless Chromium.
 
 ## 3. What runs now
 

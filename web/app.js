@@ -583,20 +583,24 @@ function toolLabel(name, args = {}) {
  * The card is waiting for a person. The buttons only answer; whether the command then runs is the
  * server's business, so a stale click (the stream already gone) just says so instead of pretending.
  */
-function askOn(el, id) {
+function askOn(el, id, always = []) {
   if (el.querySelector('.ask')) return
   const box = document.createElement('div')
   box.className = 'ask'
+  // "Always": what it would cover is said on the button's tooltip before anyone clicks — a risky
+  // pattern for this agent, or ('') the whole tool, risky commands still asking.
+  const what = always?.length ? always.some(p => !p) ? t('ap.alwaysTool') : t('ap.alwaysPattern', { what: always.join('  ') }) : ''
   box.innerHTML = `<span>${esc(t('ap.asks'))}</span>
     <button class="btn" data-ok="0">${esc(t('ap.deny'))}</button>
-    <button class="btn pri" data-ok="1">${esc(t('ap.approve'))}</button>`
+    <button class="btn pri" data-ok="1">${esc(t('ap.approve'))}</button>` +
+    (what ? `<button class="btn" data-ok="2" title="${esc(what)}">${esc(t('ap.always'))}</button>` : '')
   box.onclick = async e => {
     const b = e.target.closest('button'); if (!b) return
     box.querySelectorAll('button').forEach(x => x.disabled = true)
     const r = await fetch(api(`/api/approvals/${id}`), { method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ ok: b.dataset.ok === '1' }) })
+      body: JSON.stringify({ ok: b.dataset.ok !== '0', always: b.dataset.ok === '2' }) })
     if (!r.ok) { box.textContent = t('ap.gone'); return }
-    box.textContent = b.dataset.ok === '1' ? t('ap.approved') : t('ap.denied')
+    box.textContent = b.dataset.ok === '2' ? t('ap.alwaysDone') : b.dataset.ok === '1' ? t('ap.approved') : t('ap.denied')
   }
   el.appendChild(box)
   el.scrollIntoView({ block: 'nearest' })
@@ -793,7 +797,7 @@ async function send() {
             tools.set(key, toolLine(d.botId, toolLabel(d.name, d.args)))
           } else if (d.phase === 'ask') {
             const el = tools.get(key)
-            if (el) askOn(el, d.id)
+            if (el) askOn(el, d.id, d.always)
           } else if (d.phase === 'answered') {
             tools.get(key)?.querySelector('.ask')?.remove()
           } else {
@@ -1106,6 +1110,27 @@ async function loadPolicy() {
     .map(m => `<option value="${m}">${esc(t(`ap.mode${m[0].toUpperCase()}${m.slice(1)}`))}</option>`).join('')
   $('#apmode').value = pol.mode
   $('#appat').value = (pol.patterns ?? []).join('\n')
+  paintAllowances(pol.allow ?? [])
+}
+// Everything someone said "always allow" to, each one takeable back.
+function paintAllowances(list) {
+  const box = $('#aplist'); box.innerHTML = ''
+  $('#aplisthead').hidden = !list.length
+  for (const r of list) {
+    const row = document.createElement('div'); row.className = 'aprow'
+    row.innerHTML = `<span><b></b> · <span class="t"></span> <code></code></span><button class="x" type="button" title="${esc(t('ap.revoke'))}">×</button>`
+    row.querySelector('b').textContent = r.agent_name
+    row.querySelector('.t').textContent = r.pattern ? t('ap.allowPattern', { tool: r.tool }) : t('ap.allowTool', { tool: r.tool })
+    row.querySelector('code').textContent = r.pattern ?? ''
+    row.title = t('ap.allowExample', { example: r.example ?? '' })
+    row.querySelector('.x').onclick = async () => {
+      const res = await fetch(api(`/api/approvals/allow/${encodeURIComponent(r.id)}`), { method: 'DELETE' })
+      if (!res.ok && res.status !== 404) { hint(await errText(res), 'bad'); return }
+      row.remove(); $('#aplisthead').hidden = !box.children.length
+      hint(t('ap.revoked'), 'good')
+    }
+    box.append(row)
+  }
 }
 $('#apsave').onclick = async () => {
   const r = await fetch(api('/api/approvals/policy'), { method:'PUT', headers:{'content-type':'application/json'},
@@ -1794,7 +1819,7 @@ function taskDetail(x) {
     const a = document.createElement('div')
     a.innerHTML = `<small class="lbl">${esc(t('tk.wantsRun', { name: bot(x.agent_id)?.name ?? '' }))}</small><code></code>`
     a.querySelector('code').textContent = x.approval.subject
-    d.appendChild(a); askOn(a, x.approval.id)
+    d.appendChild(a); askOn(a, x.approval.id, x.approval.always)
   }
   if (x.result) d.insertAdjacentHTML('beforeend', `<small class="lbl">${esc(t('tk.result'))}</small><pre>${esc(x.result)}</pre>`)
   // What it ran: fetched only when someone opens it
@@ -1858,7 +1883,7 @@ function eventCard(e) {
     else el.insertAdjacentHTML('beforeend', `<div class="q"></div><small>${esc(t('ev.over'))}</small>`), el.querySelector('.q').textContent = e.text
   } else if (e.kind === 'approval') {
     el.insertAdjacentHTML('beforeend', '<code></code>'); el.querySelector('code').textContent = e.text
-    if (x?.status === 'waiting' && x.approval?.id === e.approval) askOn(el, e.approval)
+    if (x?.status === 'waiting' && x.approval?.id === e.approval) askOn(el, e.approval, x.approval.always)
   } else if (e.kind === 'done' || e.kind === 'failed') {
     el.insertAdjacentHTML('beforeend', '<pre></pre>'); el.querySelector('pre').textContent = e.text
     if (e.files?.length) el.appendChild(attsEl(e.files))
