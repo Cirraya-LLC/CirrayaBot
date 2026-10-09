@@ -2167,6 +2167,25 @@ for the turn to end (the old `run.queued` path stays for plain sends, e.g. from 
 Tests: `test/e2e/interject.test.mjs` (next step, during the final answer, too late, Stop),
 `app/test/interject_test.dart`; web composer driven in headless Chromium.
 
+### 2.36.6 Conversation turns survive a restart
+
+Background tasks already did (2.31); a conversation's own turn now does too. Table `front_runs` (one row per
+session at work): `read_upto` = the newest message the turn read when it started, `tail` = the model messages the
+turn has added since (tool calls and results, interjections, saved answers), saved after every step (`onStep`)
+and once at the start. **Only the tail is stored** — the history is in `messages` already; storing the whole
+model context per step would write the conversation again on every step.
+
+- On startup (`recoverFrontRuns`, after `recoverTasks`) each row resumes as a detached run (shows as working,
+  Stop works): history up to `read_upto` + tail + a `[Platform]` note that the server restarted and a command
+  may or may not have finished — "check before redoing anything". Killed before its first step = starts over
+  from the history, with the same note.
+- A user message stored after `read_upto` that isn't in the tail (an interjection after the last save) is added
+  after the note — otherwise it would never be answered.
+- The row is deleted when the turn ends any way (answered, failed, stopped). Covers wake-ups, follow-ups and
+  routines too — they all go through `converse`.
+
+Tests: `test/e2e/restart.test.mjs` (SIGKILL between steps, during the first call, nothing left after a finished turn).
+
 ## 3. What runs now
 
 ```bash
