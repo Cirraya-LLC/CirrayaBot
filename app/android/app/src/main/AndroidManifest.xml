@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <!-- Voice: the microphone, asked for the first time someone taps it (VoiceBridge). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- usesCleartextTraffic: a self-hosted server often sits on a LAN or behind an SSH/USB tunnel
          on plain http. Android refuses that by default; HTTPS is still what a public server should use. -->
     <application
@@ -69,6 +71,14 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <!-- Since Android 11 the speech recognizer and the text-to-speech engine are invisible to an
+             app that doesn't declare them: isRecognitionAvailable() says false and TTS never binds. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

@@ -15,6 +15,7 @@ import '../l10n.dart';
 import 'mjpeg.dart';
 import 'settings.dart';
 import 'sse.dart';
+import 'voice.dart';
 
 /// A row in the left column. Groups and one-to-ones are mixed and sorted by
 /// recency — the server decides the order, the client does not re-sort.
@@ -112,6 +113,7 @@ class Agent {
     this.autonomy = '',
     this.dailyCapMicro,
     this.fallbacks = const [],
+    this.voice = '',
   });
 
   final String id;
@@ -140,6 +142,9 @@ class Agent {
   /// Backup models, in the order they are tried.
   final List<Fallback> fallbacks;
 
+  /// The voice it speaks with when replies are read by an upstream; '' = the default one.
+  final String voice;
+
   static Agent fromJson(Map<String, Object?> j) => Agent(
     id: (j['id'] as String?) ?? '',
     name: (j['name'] as String?) ?? '',
@@ -156,6 +161,7 @@ class Agent {
       for (final f in (j['fallbacks'] as List?) ?? const [])
         if (f is Map<String, Object?>) Fallback.fromJson(f),
     ],
+    voice: (j['voice'] as String?) ?? '',
   );
 }
 
@@ -1273,6 +1279,43 @@ class Api {
       // fall through
     }
     throw ApiException(ApiFailure.server, tr('api.badShape'));
+  }
+
+  // ── Voice ──
+
+  Future<VoiceSettings> voiceSettings() async => VoiceSettings.fromJson(await _map('GET', '/api/settings/voice'));
+
+  Future<VoiceSettings> saveVoiceSettings(VoiceSettings v) async =>
+      VoiceSettings.fromJson(await _map('PUT', '/api/settings/voice', v.toJson()));
+
+  /// A recording's words, heard by the upstream chosen in the voice settings. [language]: two
+  /// letters, or '' to let the upstream detect it.
+  Future<String> transcribe(String path, String mime, {String language = ''}) async {
+    final bytes = await File(path).readAsBytes();
+    final res = await _net(() async {
+      final req = await _client.openUrl('POST', _uri('/api/voice/transcribe${language.isEmpty ? '' : '?language=$language'}'));
+      req.headers.set('X-Lang', currentLang.value.code);
+      req.headers.contentType = ContentType.parse(mime);
+      req.contentLength = bytes.length;
+      req.add(bytes);
+      return req.close();
+    });
+    if (res.statusCode >= 400) await _fail(res);
+    try {
+      final j = jsonDecode(await res.transform(utf8.decoder).join());
+      if (j is Map && j['text'] is String) return (j['text'] as String).trim();
+    } on FormatException {
+      // fall through
+    }
+    throw ApiException(ApiFailure.server, tr('api.badShape'));
+  }
+
+  /// [text] spoken by the upstream chosen in the voice settings, in [agent]'s voice if it has one.
+  Future<Uint8List> speech(String text, {String? agent}) async {
+    final res = await _send('POST', '/api/voice/speak', {'text': text, 'agent': ?agent});
+    if (res.statusCode >= 400) await _fail(res);
+    final bytes = await res.fold<BytesBuilder>(BytesBuilder(copy: false), (b, d) => b..add(d));
+    return bytes.takeBytes();
   }
 
   /// Take back an upload that was never sent.

@@ -82,6 +82,7 @@ class _AgentEditorState extends State<_AgentEditor> {
 
   /// Daily spend cap, in dollars as typed. Empty = the platform default.
   late final _cap = TextEditingController(text: dollarsText(widget.agent?.dailyCapMicro));
+  late final _voiceName = TextEditingController(text: widget.agent?.voice ?? '');
   late String _providerId = widget.agent?.providerId ?? '';
 
   /// '' = send nothing, which is what every model got before this setting existed.
@@ -260,6 +261,7 @@ class _AgentEditorState extends State<_AgentEditor> {
     _persona.dispose();
     _manualModel.dispose();
     _cap.dispose();
+    _voiceName.dispose();
     for (final f in _fallbacks) {
       f.manual.dispose();
     }
@@ -308,6 +310,7 @@ class _AgentEditorState extends State<_AgentEditor> {
       'approval': _approval,
       'autonomy': _autonomy,
       'daily_cap_micro': cap.value,
+      'voice': _voiceName.text.trim(),
       // A row left without a model is not a backup; it is dropped rather than refused.
       'fallbacks': [
         for (final f in _fallbacks)
@@ -481,6 +484,16 @@ class _AgentEditorState extends State<_AgentEditor> {
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(tr('wb.unpriced'), style: TextStyle(fontSize: 11, color: C.warn)),
               ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _voiceName,
+              autocorrect: false,
+              decoration: InputDecoration(labelText: tr('vo.agentVoice')),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(tr('vo.agentVoiceHint'), style: TextStyle(fontSize: 11, color: C.dim2)),
+            ),
             if (_error.isNotEmpty) ...[
               const SizedBox(height: 10),
               Text(_error, style: TextStyle(fontSize: 12, color: C.code)),

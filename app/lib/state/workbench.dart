@@ -198,6 +198,12 @@ class Workbench extends ChangeNotifier {
 
   /// The conversation this app is streaming a reply for right now.
   Conversation? _streaming;
+
+  /// What a reply streaming here says, as it arrives — for reading it aloud (VoiceController).
+  /// kind: `begin` (a turn starts) / `start` / `delta` / `flush` (that agent's bubble closed) /
+  /// `drop` (a retry repeats it) / `interject` (what was said meanwhile reached it) / `end` (the
+  /// stream is over) / `sent` (a message was handed to a turn already at work).
+  void Function(String kind, String botId, String text)? onSpeech;
   Timer? _runTimer;
 
   /// The run in [c] that isn't being streamed here — shown as "still working", with Stop.
@@ -665,17 +671,18 @@ class Workbench extends ChangeNotifier {
   /// Say something to the turn at work in the open conversation. Drawn at once like any message;
   /// the server hands it to that turn at its next step (or, if it has just ended, starts one). The
   /// answer arrives through the stream already open here, or the history redraw of a running one.
-  Future<void> interject(String text) async {
+  /// [spoken]: said in a call — the composer's attachments stay where they are.
+  Future<void> interject(String text, {bool spoken = false}) async {
     final c = current;
-    final files = [for (final p in pending) if (p.attachment != null) p.attachment!];
-    if (c == null || (text.trim().isEmpty && files.isEmpty) || uploading) return;
+    final files = spoken ? <Attachment>[] : [for (final p in pending) if (p.attachment != null) p.attachment!];
+    if (c == null || (text.trim().isEmpty && files.isEmpty) || (!spoken && uploading)) return;
     final ticket = _shown;
     void add(Entry e) {
       if (ticket == _shown) entries.add(e);
     }
 
     add(Said(mine: true, speaker: userSpeaker, color: '', text: text.trim(), files: files));
-    pending.removeWhere((p) => p.attachment != null);
+    if (!spoken) pending.removeWhere((p) => p.attachment != null);
     notifyListeners();
     try {
       await for (final ev in api.chat(c, text.trim(), session: session, files: [for (final f in files) f.id], interject: true)) {
@@ -687,14 +694,16 @@ class Workbench extends ChangeNotifier {
     }
     notifyListeners();
     unawaited(loadRuns());
+    onSpeech?.call('sent', '', '');
   }
 
-  /// Sends and streams the reply. Returns when the turn is over.
-  Future<void> send(String text) async {
+  /// Sends and streams the reply. Returns when the turn is over. [spoken]: said in a call — the
+  /// composer's attachments stay where they are.
+  Future<void> send(String text, {bool spoken = false}) async {
     final c = current;
     // A message may be only files; it waits while any is still uploading.
-    final files = [for (final p in pending) if (p.attachment != null) p.attachment!];
-    if (c == null || busy || (text.trim().isEmpty && files.isEmpty) || uploading) return;
+    final files = spoken ? <Attachment>[] : [for (final p in pending) if (p.attachment != null) p.attachment!];
+    if (c == null || busy || (text.trim().isEmpty && files.isEmpty) || (!spoken && uploading)) return;
 
     busy = true;
     _streaming = c;
@@ -708,8 +717,9 @@ class Workbench extends ChangeNotifier {
 
     add(Said(mine: true, speaker: userSpeaker, color: '', text: text.trim(), files: files));
     // They go with this message now; a failed one stays behind for the person to see and remove.
-    pending.removeWhere((p) => p.attachment != null);
+    if (!spoken) pending.removeWhere((p) => p.attachment != null);
     notifyListeners();
+    onSpeech?.call('begin', '', '');
 
     // Tool cards are matched run→done by bot+name+args; the server sends the
     // same args back on both phases, so this is the key it already gives us.
@@ -740,12 +750,14 @@ class Workbench extends ChangeNotifier {
             // come first after start; an early bubble would put the answer
             // above its own evidence. A turn with no delta leaves no empty bubble.
             live = null;
+            onSpeech?.call('start', ev.botId, '');
           case 'delta':
             if (live == null) {
               live = Said(mine: false, speaker: name, color: colour)..streaming = true;
               add(live);
             }
             live.text += ev.text;
+            onSpeech?.call('delta', ev.botId, ev.text);
           case 'end':
             live?.streaming = false;
             live = null;
@@ -755,6 +767,7 @@ class Workbench extends ChangeNotifier {
             add(Note('⚠ ${ev.data['message'] ?? ''}'));
             live?.streaming = false;
             live = null;
+            onSpeech?.call('flush', ev.botId, '');
           case 'tool':
             final phase = (ev.data['phase'] as String?) ?? '';
             if (phase == 'retry') {
@@ -763,6 +776,7 @@ class Workbench extends ChangeNotifier {
               // show the reply twice (the saved history has only the retry's).
               if (live != null) entries.remove(live);
               live = null;
+              onSpeech?.call('drop', ev.botId, '');
               add(Note(tr('state.retry', {'name': name, 'reason': ev.data['reason'] ?? ''})));
               break;
             }
@@ -788,6 +802,7 @@ class Workbench extends ChangeNotifier {
               // new bubble, below that message.
               live?.streaming = false;
               live = null;
+              onSpeech?.call('interject', ev.botId, '');
               break;
             }
             if (phase == 'nudge') {
@@ -806,6 +821,7 @@ class Workbench extends ChangeNotifier {
               // otherwise both parts merge ABOVE the command between them.
               live?.streaming = false;
               live = null;
+              onSpeech?.call('flush', ev.botId, '');
               final card = Ran(speaker: name, color: colour, label: _label(ev.data['name'], args));
               cards[key] = card;
               add(card);
@@ -858,6 +874,7 @@ class Workbench extends ChangeNotifier {
     busy = false;
     _streaming = null;
     notifyListeners();
+    onSpeech?.call('end', '', '');
     unawaited(loadRuns());
     unawaited(loadTasks());
     await refresh();

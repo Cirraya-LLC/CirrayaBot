@@ -22,6 +22,9 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
 
+    /** Speech: recognizer, voices, recorder, player (lib/data/speech.dart). */
+    private var voice: VoiceBridge? = null
+
     /** A photo / video being taken: where it goes, and who is waiting for the answer. */
     private var capture: Pair<File, MethodChannel.Result>? = null
 
@@ -31,6 +34,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         launchTarget = targetOf(intent)
+        voice = VoiceBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "cirraya/platform")
         channel = ch
         ch.setMethodCallHandler { call, result ->
@@ -91,6 +95,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onResume() { super.onResume(); NoticeService.appVisible = true }
+    override fun onDestroy() { voice?.dispose(); voice = null; super.onDestroy() }
     override fun onPause() { NoticeService.appVisible = false; super.onPause() }
 
     // A notice tapped while the app was already running (singleTop): open that conversation now.
@@ -125,6 +130,10 @@ class MainActivity : FlutterActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == VoiceBridge.MIC_REQUEST) {
+            voice?.onPermission(grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+            return
+        }
         if (requestCode == 7 && notificationsAllowed()) {
             // the "connected" notice was posted before there was permission to show it
             ContextCompat.startForegroundService(this, Intent(this, NoticeService::class.java))
