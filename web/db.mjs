@@ -264,6 +264,9 @@ create table if not exists secrets (
 );
 create unique index if not exists secrets_name_idx on secrets (agent_id, lower(name));
 
+-- The voice an agent speaks with on an upstream voice (settings.voice.tts): '' = the default one.
+alter table agents add column if not exists voice text not null default '';
+
 -- Backup models, tried in order when the agent's own model keeps failing: [{provider_id, model}],
 -- provider_id '' = the default upstream. Chosen by the person, like the main model; never shipped.
 alter table agents add column if not exists fallbacks jsonb not null default '[]';
@@ -317,19 +320,19 @@ export async function getAgent(id) {
 export async function upsertAgent(a) {
   const { rows } = await q(`
     insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy,
-                        fallbacks)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                        fallbacks, voice)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
-      approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks
+      approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks, voice = excluded.voice
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
      a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? '',
-     JSON.stringify(a.fallbacks ?? [])])
+     JSON.stringify(a.fallbacks ?? []), a.voice ?? ''])
   return rows[0]
 }
 
