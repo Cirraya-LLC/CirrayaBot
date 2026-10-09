@@ -570,6 +570,9 @@ class AgentSpend {
     required this.capMicro,
     required this.ownCap,
     required this.priced,
+    this.priceSource = '',
+    this.priceInMicro,
+    this.priceOutMicro,
   });
 
   final String id;
@@ -585,6 +588,13 @@ class AgentSpend {
   /// be costed, so no cap applies either.
   final bool priced;
 
+  /// Where the price comes from: 'upstream' (its model list), 'manual' (typed on the upstream), '' (none).
+  final String priceSource;
+
+  /// The price in force, micro-dollars per million tokens.
+  final int? priceInMicro;
+  final int? priceOutMicro;
+
   static AgentSpend fromJson(Map<String, Object?> j) => AgentSpend(
     id: (j['id'] as String?) ?? '',
     name: (j['name'] as String?) ?? '',
@@ -593,6 +603,9 @@ class AgentSpend {
     capMicro: (j['cap_micro'] as num?)?.toInt(),
     ownCap: (j['own_cap'] as bool?) ?? false,
     priced: (j['priced'] as bool?) ?? false,
+    priceSource: (j['price_source'] as String?) ?? '',
+    priceInMicro: (j['price_in_micro'] as num?)?.toInt(),
+    priceOutMicro: (j['price_out_micro'] as num?)?.toInt(),
   );
 }
 

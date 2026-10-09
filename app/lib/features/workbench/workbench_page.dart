@@ -1404,11 +1404,16 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
             '${tr('wb.spendTokens', {'n': _tokens(u.month.tokens)})} · $cap',
             style: TextStyle(fontSize: 11.5, color: C.dim2),
           ),
-          if (!u.priced)
-            Padding(
-              padding: const EdgeInsets.only(top: 3),
-              child: Text(tr('wb.unpriced'), style: TextStyle(fontSize: 11, color: C.warn)),
-            ),
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: u.priced
+                ? Text(
+                    tr(u.priceSource == 'upstream' ? 'wb.priceUpstream' : 'wb.priceManual',
+                        {'in': moneyText(u.priceInMicro), 'out': moneyText(u.priceOutMicro)}),
+                    style: TextStyle(fontSize: 11, color: C.dim2),
+                  )
+                : Text(tr('wb.unpriced'), style: TextStyle(fontSize: 11, color: C.warn)),
+          ),
         ],
       ),
     );

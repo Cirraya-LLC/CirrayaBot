@@ -109,6 +109,42 @@ export async function listModels(p) {
 }
 
 /**
+ * The price a /models entry states, as micro-dollars per million tokens ({ in, out }), or null
+ * when it states none. Nothing here knows any model's price: it only reads what the person's own
+ * upstream says, in the shapes upstreams say it in —
+ *   OpenRouter (and relays copying it): pricing.prompt / pricing.completion, dollars per token
+ *   LiteLLM:                            input_cost_per_token / output_cost_per_token, dollars per token
+ *   Together and others:                pricing.input / pricing.output, dollars per million tokens
+ * Negative numbers (OpenRouter's -1 for routers that pick a model per request) mean "varies": no price.
+ */
+export function priceOf(entry) {
+  const n = v => (v === null || v === undefined || v === '' ? NaN : Number(v))
+  const both = (a, b, scale) => Number.isFinite(a) && Number.isFinite(b) && a >= 0 && b >= 0
+    ? { in: Math.round(a * scale), out: Math.round(b * scale) } : null
+  return both(n(entry?.pricing?.prompt), n(entry?.pricing?.completion), 1e12)
+    ?? both(n(entry?.input_cost_per_token), n(entry?.output_cost_per_token), 1e12)
+    ?? both(n(entry?.pricing?.input), n(entry?.pricing?.output), 1e6)
+}
+
+const contextOf = e => {
+  const n = e && (e.context_length ?? e.context_window ?? e.max_context_length ?? e.max_model_len ?? e.top_provider?.context_length)
+  return Number(n) > 0 ? Number(n) : null
+}
+
+/**
+ * What the upstream's /models says about one model: its context window and its price. One request
+ * for both. The price only comes from an entry whose id is exactly this model — a near match is
+ * fine for guessing a window, not for charging money.
+ */
+export async function modelInfo({ base_url, api_key, protocol, model }) {
+  const list = await fetchModelList({ base_url, api_key, protocol })
+  if (!list) return { reached: false, tokens: null, price: null }
+  const exact = list.find(x => x?.id === model)
+  const near = exact ?? list.find(x => String(x?.id ?? '').includes(model))
+  return { reached: true, tokens: contextOf(near), price: exact ? priceOf(exact) : null }
+}
+
+/**
  * Ask the upstream for this model's context window.
  * OpenAI's own /models omits it, but OpenRouter / vLLM / ollama / most relay gateways
  * return it — so ask first, then guess from the name, and otherwise admit we don't know.
@@ -146,6 +182,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const est = estimateUsage([sys, { role: 'user', content: 'hello there' }], 'hi', [{ name: 'bash', args: '{"command":"ls"}' }])
   a(est.prompt > 0 && est.completion > estimateTokens('hi'), 'estimate counts the whole prompt and the tool arguments')
 
+  a(JSON.stringify(priceOf({ pricing: { prompt: '0.000003', completion: '0.000015' } })) === '{"in":3000000,"out":15000000}',
+    'OpenRouter: dollars per token as strings')
+  a(JSON.stringify(priceOf({ input_cost_per_token: 1.5e-7, output_cost_per_token: 6e-7 })) === '{"in":150000,"out":600000}', 'LiteLLM')
+  a(JSON.stringify(priceOf({ pricing: { input: 0.88, output: 0.88 } })) === '{"in":880000,"out":880000}', 'per million')
+  a(JSON.stringify(priceOf({ pricing: { prompt: '0', completion: '0' } })) === '{"in":0,"out":0}', 'free is a price')
+  a(priceOf({ pricing: { prompt: '-1', completion: '-1' } }) === null, 'a router that varies has no price')
+  a(priceOf({ pricing: { prompt: '0.000003' } }) === null, 'half a price is no price')
+  a(priceOf({ id: 'x' }) === null && priceOf(null) === null, 'nothing stated')
   a(guessContext('claude-opus-5') === 200_000, 'claude fallback')
   a(guessContext('some-unknown-model') === null, 'unknown means null, never a wild guess')
   console.log('model.mjs self-test passed')

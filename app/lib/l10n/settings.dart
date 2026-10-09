@@ -82,10 +82,9 @@ const Map<String, List<String>> settingsStrings = {
   'prov.ctxAuto': ['Auto context', '上下文自动', '上下文自動'],
   'prov.priceIn': ['Input \$/M tokens', '输入 \$/百万 tokens', '輸入 \$/百萬 tokens'],
   'prov.priceOut': ['Output \$/M tokens', '输出 \$/百万 tokens', '輸出 \$/百萬 tokens'],
-  'prov.priceHint': [
-    'Leave the prices empty if you don’t know them: calls are still counted in tokens, but they have no cost and no cap can hold them.',
-    '不知道价格就留空：调用照样按 token 记，但没有金额，上限也拦不住。',
-    '不知道價格就留空：呼叫照樣以 token 計，但沒有金額，上限也攔不住。'],
+  'prov.priceHint': ['Optional. When the upstream’s own model list states prices (OpenRouter does), each model is charged at its listed price; these are for the models it doesn’t price. With neither, calls are counted in tokens only and no cap can hold them.',
+    '可以不填：上游自己的模型列表里带价格的（比如 OpenRouter），每个模型按它报的价计；这里填的用于上游没报价的模型。两边都没有，就只按 token 记，上限也拦不住。',
+    '可以不填：上游自己的模型列表裡帶價格的（例如 OpenRouter），每個模型依它報的價計算；這裡填的用於上游沒報價的模型。兩邊都沒有，就只以 token 計，上限也攔不住。'],
   'prov.badPrice': ['A price must be a number of dollars, or empty', '价格要填美元金额，或者留空', '價格請填美元金額，或留空'],
   'prov.defaultCap': ['Default daily cap \$ (all Agents)', '默认每日上限 \$（所有 Agent）', '預設每日上限 \$（所有 Agent）'],
   'prov.capSaved': ['Default daily cap: {cap}', '默认每日上限：{cap}', '預設每日上限：{cap}'],
