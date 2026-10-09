@@ -166,6 +166,7 @@ source, not the README:
   Pipedream / MCP / OpenAPI tools; Slack, Telegram, WhatsApp, iMessage (Sendblue), Feishu channels; webhook and
   GitHub triggers; run leases + a reconciler + idempotency keys on external effects; steering a run mid-turn; a
   model emulator for deterministic agent tests (`packages/testkit/src/model-emulator.ts`); voice.
+  (Their integrations, channels and webhook/GitHub triggers are out of our scope by decision — 3.1.)
 - **Weaker than us, verified in code**: approvals default to **allow** — `shell`, `write_file`, `browser_act` and
   `computer_act` are exempt outright, and other "consequential" tools only ask once the operator adds a rule or
   turns on the LLM Auto Review (`action-approval.test.ts`, "stays YOLO when auto review is off"); **no spending cap**
@@ -1245,9 +1246,9 @@ a 5-minute minimum. We need something attached to an Agent / group that survives
 - The client's weekday FilterChips need `showCheckmark: false`: the checkmark widens them, wraps the
   whole row, and moves the buttons below
 
-**Not done yet**: event triggers (Grok Bot has "a message arrives in some channel", "a GitHub event");
-letting Agents create tasks themselves (think it through first: one injection could make it run every 5
-minutes and spend money); a per-task spending cap.
+**Not done yet**: letting Agents create tasks themselves (think it through first: one injection could make it run every 5
+minutes and spend money); a per-task spending cap. **Event triggers from outside (a chat channel, a
+GitHub event, a webhook) are out of scope** — see 3.1.
 
 ## 2.22 Browser (2026-09-19)
 
@@ -1357,9 +1358,10 @@ typing needed a separate input box. Now:
   directly over the WebSocket).
   **A real input method on a Mac can't be verified on this machine** (xdotool has no input method)
 
-**Not done yet**: MCP integration (the approach dsh recommends); downloading files; multiple tabs (when
+**Not done yet**: downloading files; multiple tabs (when
 a new tab opens the stream follows it, but other tabs aren't visible); bringing his clipboard contents
-back to the local clipboard; the remote cursor shape (currently always the normal arrow).
+back to the local clipboard; the remote cursor shape (currently always the normal arrow). (MCP is out of
+scope — see 3.1.)
 
 ## 2.23 Skill library (2026-09-19)
 
@@ -2098,14 +2100,20 @@ built-in web UI, **not part of the product**, kept only for the record.
 
 ## 3.1 Next steps
 
+**Scope (the boss, 2026-10-09): 「我们只准备做我们的客户端 不做外部支持」** — we build our own clients (web,
+desktop, Android, later iOS) and nothing that plugs the product into outside services: **no chat channels**
+(Slack / Telegram / Feishu / WeCom …), **no third-party app integrations** (MCP, Composio, OpenAPI tools), **no
+external event triggers** (webhooks, GitHub). Model upstreams stay — they are how the product works at all. When
+comparing with peers (2.6.1), their integrations are not gaps of ours.
+
 1. **Plug in the dsh runtime** to replace our own agent loop, gaining bwrap/Landlock sandboxing, session
    persistence and approvals (see 2.9.x)
 2. ~~**Per-Agent spending cap**~~ **done 2026-09-20, see 2.25** — usage rows, per-upstream
    prices, and a daily cap checked before every model call
 3. ~~Container egress allowlist~~ **not wanted**: agents are meant to reach the internet (boss, 2026-09-26).
    Only the host's own ports are worth a host firewall (2.28)
-4. Event triggers for scheduled tasks, browser via MCP, a skill marketplace (v1 of scheduled tasks 2.21,
-   browser 2.22 and skill library 2.23 are done)
+4. ~~Event triggers for scheduled tasks, browser via MCP~~ **out of scope** (above); a skill marketplace
+   inside our own product is still open (v1 of scheduled tasks 2.21, browser 2.22 and skill library 2.23 are done)
 
 ## 4. Maintaining this file (the boss, 2026-09-05: "from now on you should update CLAUDE.md yourself" (「你以后都应该自我更新 CLAUDE.md」))
 
