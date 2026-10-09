@@ -48,6 +48,8 @@ const modelSpeaker = s => (s === USER_SPEAKER ? 'User' : s)
 const toBot = (r, lang = 'en') => ({
   id: r.id, name: r.name, description: r.description, persona: r.persona,
   order: r.ord, color: r.color, provider_id: r.provider_id ?? '', model: r.model ?? '',
+  // Tried in order when its own model keeps failing. [{provider_id, model}], '' = the default upstream.
+  fallbacks: Array.isArray(r.fallbacks) ? r.fallbacks : [],
   // Money is micro-dollars everywhere in the API (1 dollar = 1e6); null = no cap of its own.
   daily_cap_micro: r.daily_cap_micro == null ? null : Number(r.daily_cap_micro),
   // How hard this agent's model should think. '' = say nothing, which is what it did before.
@@ -980,10 +982,11 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     // ⚠️ Must back off before retrying. In group relays the first person reliably succeeded and the second reliably
     // failed — not random, the two calls were too close together and got rate-limited; retrying immediately guarantees another hit.
     let r
-    for (const wait of [0, 2000, 6000]) {
+    for (const [i, wait] of RETRY_WAITS.entries()) {
       if (wait) await new Promise(t => setTimeout(t, wait))
       try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal, specs: ctx.specs }); break }
       catch (e) {
+        if (ctx.signal?.aborted) throw new Say('chat.aborted')
         // Rejected with a 4xx while carrying a screenshot: most likely this model doesn't accept images. Drop them and carry on,
         // and stop sending screenshots afterwards — otherwise a model that can't see images fails the whole turn on the browser
         if (isUpstreamError(e) && upstreamStatus(e) >= 400 && upstreamStatus(e) < 500 && dropImages(messages)) {
@@ -991,9 +994,17 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
           onTool?.({ phase: 'retry', reason: tr(lang, 'chat.noImages') })
           r = null; break
         }
-        // Stopped (the Stop button, or a manual run's page closing): say that, not the fetch library's words
-        if (ctx.signal?.aborted) throw new Say('chat.aborted')
-        if (!isUpstreamError(e) || wait === 6000) throw e
+        // Out of retries (or not worth one): a backup model, if the agent has one left. The rest of this
+        // turn stays on it; the next turn starts from the agent's own model again.
+        if (!isUpstreamError(e) || i === RETRY_WAITS.length - 1) {
+          ctx.fallbacks ??= await fallbacksFor(ctx.bot)
+          const next = worthFallingBack(e) && ctx.fallbacks.shift()
+          if (!next) throw e
+          console.warn(`[fallback] ${ctx.bot.name}: ${p.model} failed (${errorText(e, 'en').slice(0, 160)}); trying ${next.model}`)
+          onTool?.({ phase: 'retry', reason: tr(lang, 'chat.fallback', { from: p.model, model: next.model }) })
+          p = next
+          r = null; break
+        }
         onTool?.({ phase: 'retry', reason: errorText(e, lang).slice(0, 120) })
       }
     }
@@ -1732,14 +1743,41 @@ async function contextFor(base, model) {
 }
 
 /** Which upstream and model this agent uses. Without its own upstream it follows the default; the model must be its own choice. */
-async function providerFor(bot) {
-  const base = bot.provider_id ? await db.getProvider(bot.provider_id) : await requireProvider()
+async function providerFor(bot, choice = bot) {
+  const base = choice.provider_id ? await db.getProvider(choice.provider_id) : await requireProvider()
   if (!base) throw new Say('provider.gone', { name: bot.name })
-  if (!bot.model) throw new Say('provider.noModel', { name: bot.name })
+  if (!choice.model) throw new Say('provider.noModel', { name: bot.name })
   // An agent's own effort wins; empty means "whatever the platform says", and the
   // platform's own empty means send nothing — what every model got before this existed.
   const effort = normEffort(bot.effort) || normEffort(await db.defaultEffort())
-  return { ...base, model: bot.model, effort, context_tokens: await contextFor(base, bot.model) }
+  return { ...base, model: choice.model, effort, context_tokens: await contextFor(base, choice.model) }
+}
+
+const MAX_FALLBACKS = 3
+// How long to wait before each try of one model call. MODEL_RETRY_WAITS exists for the tests, which
+// can't sit through eight seconds of backoff per failing call.
+const RETRY_WAITS = (env.MODEL_RETRY_WAITS ?? '0,2000,6000').split(',').map(Number).filter(n => n >= 0)
+
+/** The agent's backup models, resolved, in order. One whose upstream has since gone is skipped, with a line in the log. */
+async function fallbacksFor(bot) {
+  const out = []
+  for (const f of bot.fallbacks ?? []) {
+    try { out.push(await providerFor(bot, f)) }
+    catch (e) { console.warn(`[fallback] ${bot.name}: skipping ${f.model} — ${errorText(e, 'en')}`) }
+  }
+  return out
+}
+
+/**
+ * Worth trying a backup model for: the upstream is down, overloaded, refusing this key or this
+ * model, or answered nothing. Not a request it rejected as malformed or too big (400 / 413 / 422) —
+ * the backup would get the same request. Not our own refusals either (the daily cap).
+ */
+function worthFallingBack(e) {
+  if (e?.capped) return false
+  if (isUpstreamError(e)) return ![400, 413, 422].includes(upstreamStatus(e))
+  // fetch itself failing: connection refused, DNS, TLS, reset
+  return e?.name === 'TypeError' && /fetch failed/i.test(String(e.message))
 }
 
 /**
@@ -1816,7 +1854,7 @@ const readBody = async req => {
 const str = v => (typeof v === 'string' ? v : '')
 
 /** Agent field validation. On PATCH only the fields sent are checked. */
-async function checkAgent(b, selfId = null) {
+async function checkAgent(b, selfId = null, cur = null) {
   const out = {}
   if (b.name !== undefined || !selfId) {
     const name = str(b.name).trim()
@@ -1878,6 +1916,22 @@ async function checkAgent(b, selfId = null) {
     if (!model) throw new Say('agent.modelRequired')
     if (model.length > 200) throw new Say('agent.modelLong')
     out.model = model
+  }
+  // Backup models: the person's own picks from their own upstreams, tried in order. Not the main
+  // model again — "falling back" to the thing that just failed would only fail twice.
+  if (b.fallbacks !== undefined) {
+    const bad = new Say('agent.fallbacks', { max: MAX_FALLBACKS })
+    if (!Array.isArray(b.fallbacks) || b.fallbacks.length > MAX_FALLBACKS) throw bad
+    const main = `${out.provider_id ?? cur?.provider_id ?? ''}|${out.model ?? cur?.model ?? ''}`
+    const seen = new Set([main])
+    out.fallbacks = []
+    for (const f of b.fallbacks) {
+      const provider_id = str(f?.provider_id).trim(), model = str(f?.model).trim()
+      if (!model || model.length > 200 || seen.has(`${provider_id}|${model}`)) throw bad
+      if (provider_id && !await db.getProvider(provider_id)) throw new Say('err.noProvider')
+      seen.add(`${provider_id}|${model}`)
+      out.fallbacks.push({ provider_id, model })
+    }
   }
   return out
 }
@@ -2002,7 +2056,7 @@ const server = createServer(async (req, res) => {
     if (bm && req.method === 'PATCH') {
       const cur = await db.getAgent(bm[1])
       if (!cur) return send(404, { error: t('err.noAgent') })
-      const patch = await checkAgent(await readBody(req), cur.id)
+      const patch = await checkAgent(await readBody(req), cur.id, cur)
       await db.upsertAgent({ ...cur, ...patch })
       // Group logs identify people by name. Without syncing a rename, what he said in groups would become "someone else's"
       if (patch.name && patch.name !== cur.name) await db.renameSpeaker(cur.name, patch.name)

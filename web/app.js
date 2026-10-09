@@ -924,26 +924,56 @@ function editBot(b) {
   $('#bcaphint').textContent = u && !u.priced ? t('sp.unpricedWhy')
     : USAGE.default_cap_micro != null ? t('sp.capDefault', { cap: money(USAGE.default_cap_micro) }) : ''
   $('#bdel').style.display = b ? '' : 'none'
+  $('#bfb').innerHTML = ''
+  for (const f of b?.fallbacks ?? []) addFallbackRow(f)
+  paintFallbackAdd()
   $('#bdlg').showModal()
 }
+
+// Backup models: one row each, an upstream and a model, like the main pick above.
+const MAX_FALLBACKS = 3
+function addFallbackRow(f = { provider_id: '', model: '' }) {
+  const def = PROVS.find(p => p.is_default)
+  const row = document.createElement('div')
+  row.className = 'fbrow'
+  row.innerHTML = `<select data-i18n-title="b.provTitle"></select><select></select>` +
+    `<input type="text" autocomplete="off" hidden><button class="x" type="button">×</button>`
+  const [prov, sel, box, x] = row.children
+  prov.title = t('b.provTitle'); sel.title = t('b.modelTitle'); box.placeholder = t('b.modelPh'); x.title = t('b.fallbackRemove')
+  prov.innerHTML = `<option value="">${esc(def ? t('b.defaultProvNamed', { name: def.name }) : t('b.defaultProv'))}</option>` +
+    PROVS.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
+  prov.value = PROVS.some(p => p.id === f.provider_id) ? f.provider_id : ''
+  // A new row starts with nothing picked: the list's first (or the model others use) is most
+  // likely the main model, and a backup that is the main model would only fail twice.
+  prov.onchange = () => fillModels(sel, box, prov.value, prov.value === f.provider_id ? f.model : '', { blank: true })
+  x.onclick = () => { row.remove(); paintFallbackAdd() }
+  $('#bfb').append(row)
+  fillModels(sel, box, prov.value, f.model, { blank: true })
+}
+function paintFallbackAdd() { $('#bfbadd').hidden = $('#bfb').children.length >= MAX_FALLBACKS }
+$('#bfbadd').onclick = () => { addFallbackRow(); paintFallbackAdd() }
+const chosenFallbacks = () => [...$('#bfb').children].map(row => {
+  const [prov, sel, box] = row.children
+  return { provider_id: prov.value, model: (sel.hidden ? box.value : sel.value).trim() }
+}).filter(f => f.model)
 // Models come from the provider's /models; fall back to a text box when it gives no list,
 // otherwise Agents on that provider couldn't pick a model at all.
-let modelsSeq = 0
-async function loadModels(providerId, current) {
-  const seq = ++modelsSeq
-  const sel = $('#bmodel'), box = $('#bmodelx')
+const loadModels = (providerId, current) => fillModels($('#bmodel'), $('#bmodelx'), providerId, current)
+async function fillModels(sel, box, providerId, current, { blank = false } = {}) {
+  const seq = sel.modelsSeq = (sel.modelsSeq ?? 0) + 1
   sel.hidden = false; box.hidden = true
   sel.innerHTML = `<option value="">${esc(t('b.loadingModels'))}</option>`; sel.disabled = true
   const r = await fetch(api('/api/providers/models'), { method:'POST', headers:{'content-type':'application/json'},
     body: JSON.stringify({ id: providerId }) }).then(x => x.json()).catch(() => ({ models: [] }))
-  if (seq !== modelsSeq) return                  // provider changed meanwhile; this answer is stale
+  if (seq !== sel.modelsSeq) return              // provider changed meanwhile; this answer is stale
   const models = r.models ?? []
   if (!models.length) { sel.hidden = true; box.hidden = false; box.value = current; return }
   // Show a saved model even if the provider dropped it; never silently switch to the first
   const list = current && !models.includes(current) ? [current, ...models] : models
-  sel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}${models.includes(m) ? '' : esc(t('b.unlisted'))}</option>`).join('')
+  sel.innerHTML = (blank ? `<option value="">${esc(t('b.pickModel'))}</option>` : '') +
+    list.map(m => `<option value="${esc(m)}">${esc(m)}${models.includes(m) ? '' : esc(t('b.unlisted'))}</option>`).join('')
   // New Agents default to the model others already use on this provider, not the alphabetically first
-  sel.value = current || r.suggested || models[0]; sel.disabled = false
+  sel.value = current || (blank ? '' : r.suggested || models[0]); sel.disabled = false
 }
 const chosenModel = () => ($('#bmodel').hidden ? $('#bmodelx').value : $('#bmodel').value).trim()
 $('#bcancel').onclick = () => $('#bdlg').close()
@@ -952,7 +982,7 @@ $('#bsave').onclick = async () => {
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
     provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
-    daily_cap_micro: cap === '' ? null : cap }
+    daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks() }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
   const r = bEditing

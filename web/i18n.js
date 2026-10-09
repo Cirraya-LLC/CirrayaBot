@@ -222,6 +222,13 @@ const M = {
   'b.unlisted': [' (no longer listed)', '（上游已不列出）', '（上游已不再列出）'],
   'b.needName': ['Name and persona are both required', '名字和人设都要填', '名字和人設都必須填寫'],
   'b.needModel': ['Pick a model', '要选一个模型', '請選擇一個模型'],
+  'b.fallbacks': ['Backup models', '备用模型', '備用模型'],
+  'b.pickModel': ['— pick a model —', '— 选一个模型 —', '— 選一個模型 —'],
+  'b.fallbackAdd': ['＋ Add', '＋ 添加', '＋ 新增'],
+  'b.fallbackRemove': ['Remove this backup model', '去掉这个备用模型', '移除這個備用模型'],
+  'b.fallbackHint': ['Tried in order when the model above keeps failing (down, overloaded, refusing the key). Up to 3, from your own upstreams.',
+    '上面的模型一直失败（挂了、过载、拒绝密钥）时，按顺序换用。最多 3 个，从你自己添加的上游里选。',
+    '上面的模型一直失敗（掛了、過載、拒絕金鑰）時，依序換用。最多 3 個，從你自己加入的上游裡選。'],
   'b.confirmDelete': ['Delete {name}? What they made stays in their own container.', '删掉 {name}？他做过的东西留在自己的容器里。', '刪除 {name}？他做過的東西會留在自己的容器裡。'],
 
   // provider dialog

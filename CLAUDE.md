@@ -2072,6 +2072,47 @@ chat at the new reply; forced Doze + reply → notice at once; web in Chromium (
 **Not done**: phone photos over 5 MB reach the model only as a line (no resizing yet); desktop Flutter has no
 notifications (no plugin for macOS/Windows notices); iOS.
 
+## 2.36 After the Rakazo comparison: tests, backups, secrets, interjecting (2026-10-09)
+
+The boss, on the list drawn up from 2.6.1: 「其他都按照你推荐的来 并且经过测试确定可用」 (do the rest as
+recommended, tested until it is known to work) — within the scope set in 3.1 (own clients, no outside services,
+no shipped upstreams or models).
+
+### 2.36.1 The end-to-end harness (`test/e2e/`, `npm run test:e2e`)
+
+- `stack.mjs` starts the real `web/server.mjs` against a throwaway database (`create database ma_e2e_…` on
+  `E2E_DATABASE_URL`, default the local server as the current OS user; dropped at the end) and a scratch workspace.
+  `fake-upstream.mjs` is an OpenAI-Chat upstream that answers each request from a function the test sets and
+  records what it was sent (`describe()`: system prompt, last user text, this turn's tool results, offered tools).
+  Tools on = `fake-docker.sh` as `CONTAINER_CLI`: every exec answers `ran: <command>`, nothing runs.
+- ⚠️ **`MA_DOTENV=off`** (env.mjs) — the server otherwise loads the developer's `.env`, and a test run would write
+  into the real `WORKSPACE_HOST_PATH` (2.28 hit this). **`MODEL_RETRY_WAITS`** shortens the 0/2/6 s backoff.
+- ⚠️ The child gets a minimal environment, so **a DSN without a user name fails as "Waiting for PostgreSQL…"**
+  forever — the driver falls back to `$USER`, which isn't set. `stack.mjs` spells out the OS user.
+- The server's runtime dependency moved to **`web/package.json` + lock** (only `pg`); the root package.json still
+  carries the dsh experiment, and `npm install` there pulls hundreds of packages. Locally: `npm install --prefix web`.
+  The Dockerfile now `npm ci`s from that lock.
+- `node --test` in Node 22 takes files, not a directory: `node --test test/e2e/*.test.mjs`.
+
+### 2.36.2 Backup models (`agents.fallbacks`)
+
+Up to 3 `{provider_id, model}` per agent, picked in the editor from the person's own upstreams (never shipped).
+When the agent's model fails after its retries, `runAgent` moves the rest of **that turn** to the next backup and
+says so in the stream (`tool {phase:'retry', reason}` — clients already show it); the next turn starts from the
+agent's own model again. Background tasks and routines go through the same loop.
+
+- Falls back on: HTTP 5xx/429/401/403/404, an error inside the stream, an empty answer, the connection failing
+  (`fetch failed`). **Not** on 400/413/422 (the backup would get the same request) or the daily cap.
+- Saving checks: at most 3, each with a model, none equal to the main model or each other, upstream exists.
+  **An upstream used as a backup can't be deleted** (409 with the names), like one used as the main.
+- Clients: web rows under the effort select (`addFallbackRow`, `fillModels` shared with the main pick — a new
+  row starts on "— pick a model —", since the list's first is most likely the main model); Flutter `_FallbackPick`
+  rows in `editors.dart`. The Flutter agent editor is now `scrollable` (it was taller than a phone).
+- Fixed on the way: the Flutter editor never stopped "Asking the provider…" when the upstream list failed to load.
+
+Tests: `test/e2e/fallback.test.mjs` (switch + note, rest of turn on the backup, 400 not retried, dead upstream,
+validation + 409), `app/test/editor_test.dart`; web editor driven in headless Chromium (add, save, reopen, 3 max).
+
 ## 3. What runs now
 
 ```bash
