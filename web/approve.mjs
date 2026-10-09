@@ -9,7 +9,7 @@ export const APPROVAL_MODES = ['off', 'match', 'all']
 
 // Only tools that change something outside the conversation can need approval. Reading a file or
 // a skill cannot be the thing you regret.
-export const ACTING_TOOLS = ['bash', 'write_file', 'browser', 'http_request']
+export const ACTING_TOOLS = ['bash', 'write_file', 'browser', 'http_request', 'install_packages']
 
 // Seeded patterns. Kept short on purpose: a list long enough to catch everything asks so often
 // that people approve without reading, which is worse than not asking.
@@ -37,6 +37,7 @@ export function toolSubject(name, args = {}) {
   if (name === 'browser') return `browser ${args.action ?? ''} ${args.url ?? ''}`.trim()
   if (name === 'http_request') return `${String(args.method || 'GET').toUpperCase()} ${args.url ?? ''}`
   if (name === 'request_secret') return `secret ${args.name ?? ''} for ${args.origin ?? ''}`
+  if (name === 'install_packages') return `apt install ${(Array.isArray(args.packages) ? args.packages : []).join(' ')}`
   return name
 }
 

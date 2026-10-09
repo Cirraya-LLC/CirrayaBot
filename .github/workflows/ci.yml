@@ -1,0 +1,64 @@
+# What has to hold before anything is merged or deployed: the server's own checks, the end-to-end
+# tests against a real PostgreSQL (with a scripted fake model and a stand-in for docker), the Flutter
+# client's analysis and tests, and the server image building.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 3s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web --no-audit --no-fund
+      - run: pip install pyyaml          # check-bots.py reads the seed definitions
+      - name: Self-tests
+        run: |
+          for f in model schedule skill approve sandbox memory autonomy tasks files markdown protocols i18n secrets; do
+            echo "== $f"; node web/$f.mjs
+          done
+          python3 check-bots.py
+      - name: End-to-end
+        env:
+          E2E_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: node --test --test-reporter=spec test/e2e/*.test.mjs
+      - name: start.sh parses
+        run: bash -n start.sh
+
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.1
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze .
+      - run: flutter test
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Server image builds
+        run: docker build -t cirrayabot-ci .
