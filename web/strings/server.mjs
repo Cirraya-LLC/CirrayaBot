@@ -39,9 +39,9 @@ export const serverStrings = {
 
   // Chat stream
   'chat.needTarget':  ['Pick an agent or a group, and do not send an empty message', '要选一个 Agent 或一个群，并且不能发空消息', '請選一個 Agent 或一個群組，而且不能傳送空白訊息'],
-  'voice.need.sttModel': ['Speech recognition on an upstream needs a model, e.g. whisper-1', '用上游识别语音，要填模型，比如 whisper-1', '用上游辨識語音，要填模型，例如 whisper-1'],
-  'voice.need.ttsModel': ['Reading aloud on an upstream needs a model, e.g. tts-1', '用上游朗读，要填模型，比如 tts-1', '用上游朗讀，要填模型，例如 tts-1'],
-  'voice.need.voice':    ['Reading aloud on an upstream needs a voice name (at most 100 characters), e.g. alloy', '用上游朗读，要填音色名（最多 100 个字符），比如 alloy', '用上游朗讀，要填音色名稱（最多 100 個字元），例如 alloy'],
+  'voice.need.sttModel': ['Speech recognition on an upstream needs a model: the name your upstream gives its speech-to-text model', '用上游识别语音，要填模型：上游给它的语音转文字模型起的名字', '用上游辨識語音，要填模型：上游為語音轉文字模型取的名稱'],
+  'voice.need.ttsModel': ['Reading aloud on an upstream needs a model: the name your upstream gives its text-to-speech model', '用上游朗读，要填模型：上游给它的文字转语音模型起的名字', '用上游朗讀，要填模型：上游為文字轉語音模型取的名稱'],
+  'voice.need.voice':    ['Reading aloud on an upstream needs a voice name (at most 100 characters), as your upstream lists its voices', '用上游朗读，要填音色名（最多 100 个字符），按上游列出的音色填', '用上游朗讀，要填音色名稱（最多 100 個字元），依上游列出的音色填寫'],
   'voice.noUpstream':    ['There is no upstream to use for voice — add one first', '没有可用的上游，先添加一个', '沒有可用的上游，請先新增一個'],
   'voice.anthropic':     ['“{name}” speaks the Anthropic protocol, which has no speech endpoints — pick an OpenAI-style upstream', '「{name}」是 Anthropic 协议，没有语音接口——请选一个 OpenAI 格式的上游', '「{name}」是 Anthropic 協定，沒有語音介面——請選一個 OpenAI 格式的上游'],
   'voice.sttDevice':     ['Speech recognition is set to this device, not an upstream', '语音识别设置的是用设备自带的，不是上游', '語音辨識設定的是用裝置內建的，不是上游'],

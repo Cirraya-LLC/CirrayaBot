@@ -1,5 +1,7 @@
 import { lang, t, setLang, applyDom, LANG_NAMES } from './i18n.js'
 import { renderMarkdown } from './markdown.mjs'
+import { Reader, speakable, sentences } from './voice.mjs'
+import { Speaker, Listener, Mic, Voice, canHear, canRecord, canSpeak, hearLang, deviceVoices } from './speech.js'
 
 const $ = s => document.querySelector(s)
 const K = new URLSearchParams(location.search).get('k')
@@ -288,6 +290,7 @@ async function openConv(c) {
     ? t('head.groupSub', { members: listJoin(c.members.map(id => bot(id)?.name ?? id)) })
     : (c.tag || '')
   $('#in').placeholder = t(c.kind === 'group' ? 'comp.toGroup' : 'comp.toAgent', { name: c.name })
+  $('#hread').hidden = $('#hcall').hidden = false
   renderMembers(c)
   renderSpend(c)
   loadMemory(c)
@@ -561,9 +564,11 @@ function bubble(botId, mine) {
   const b = bot(botId)
   const el = document.createElement('div')
   el.className = 'msg' + (mine ? ' me' : '')
+  if (botId && !mine) el.dataset.bot = botId
   el.innerHTML = `<div class="mav" style="background:${mine ? '#5b8cff' : col(b?.color)}">${
     mine ? esc(t('msg.you')) : esc(b?.name?.slice(0,1) ?? '?')}</div>
-    <div class="mwrap"><div class="mname" style="color:${b ? col(b.color) : 'var(--dim)'}">${esc(b?.name ?? '')}</div>
+    <div class="mwrap"><div class="mname" style="color:${b ? col(b.color) : 'var(--dim)'}">${esc(b?.name ?? '')}${
+      mine ? '' : `<button class="say" title="${esc(t('vo.readThis'))}" aria-label="${esc(t('vo.readThis'))}">${SAY_ICON}</button>`}</div>
     <div class="bub"></div></div>`
   log.appendChild(el); log.scrollTop = log.scrollHeight
   return el.querySelector('.bub')
@@ -813,23 +818,29 @@ async function loadRuns() {
   if (RUNS.length) runTimer = setTimeout(loadRuns, 4000)
 }
 
-async function send() {
-  const text = input.value.trim()
+/** Send what is typed — or, from a call, what was said (`spoken`: the composer and its files are left alone). */
+async function send(spoken = null) {
+  // Still dictating: finish hearing it first, then this sends what was heard.
+  if (spoken == null && dictating) { dictating.sendAfter = true; dictating.stop(); return }
+  const text = (spoken ?? input.value).trim()
   if (!cur) return
   // This conversation is at work — streaming here, or running elsewhere: say it to that turn.
-  if ((busy && streaming && streaming.kind === cur.kind && streaming.id === cur.id) || (!busy && running(cur))) return interject()
+  if ((busy && streaming && streaming.kind === cur.kind && streaming.id === cur.id) || (!busy && running(cur))) return interject(spoken)
   if (busy) return
-  if (uploading()) { note(t('file.waitUpload')); return }
-  const files = PEND.filter(p => p.att && p.conv === convKey(cur)).map(p => p.att)
+  if (spoken == null && uploading()) { note(t('file.waitUpload')); return }
+  const files = spoken != null ? [] : PEND.filter(p => p.att && p.conv === convKey(cur)).map(p => p.att)
   if (!text && !files.length) return
-  input.value = ''; input.style.height = 'auto'
-  for (const p of PEND) if (p.thumb) URL.revokeObjectURL(p.thumb)
-  PEND = []; renderPend()
+  if (spoken == null) {
+    input.value = ''; input.style.height = 'auto'
+    for (const p of PEND) if (p.thumb) URL.revokeObjectURL(p.thumb)
+    PEND = []; renderPend()
+  }
   const mine = bubble(null, true)
   mine.innerHTML = fmt(text)
   addAtts(mine, files)
   const ticket = shown, target = cur
   busy = true; streaming = target; sendMode(); paintRun()
+  readers.clear(); call.muteTurn = false               // a new turn: read it from its first word
   const bubs = new Map(), tools = new Map()
   try {
     const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
@@ -856,29 +867,30 @@ async function send() {
         if (ticket !== shown) continue
         // Create the bubble on the first delta: tool calls often arrive right after start, and
         // an early bubble would put the answer above its own evidence.
-        if (ev === 'start') bubs.delete(d.botId)
+        if (ev === 'start') { bubs.delete(d.botId); readFlush(d.botId) }
         else if (ev === 'delta') {
           let s = bubs.get(d.botId)
           if (!s) { s = { el: bubble(d.botId, false), raw: '' }; bubs.set(d.botId, s) }
           s.raw += d.text; s.el.innerHTML = fmt(s.raw); $('#log').scrollTop = $('#log').scrollHeight
+          readFeed(d.botId, d.text)
         }
-        else if (ev === 'error') { (bubs.get(d.botId)?.el ?? bubble(d.botId, false)).textContent = '⚠ ' + d.message }
+        else if (ev === 'error') { readFlush(d.botId); (bubs.get(d.botId)?.el ?? bubble(d.botId, false)).textContent = '⚠ ' + d.message }
         else if (ev === 'note') note(d.text)
         else if (ev === 'tool') {
           if (d.phase === 'retry') {
             // the failed attempt may have streamed half a sentence; the retry repeats it all
-            bubs.get(d.botId)?.el.closest('.msg')?.remove(); bubs.delete(d.botId)
+            bubs.get(d.botId)?.el.closest('.msg')?.remove(); bubs.delete(d.botId); readers.delete(d.botId)
             note(t('note.retry', { name: bot(d.botId)?.name ?? '', reason: d.reason })); continue
           }
           if (d.phase === 'trim') { note(t('note.trim', { n: d.dropped })); continue }
           if (d.phase === 'nudge') { bubs.delete(d.botId); note(t('note.nudge', { n: d.open })); continue }
           // what was said meanwhile reached the model: what it writes next is a new bubble, below that message
-          if (d.phase === 'interject') { bubs.delete(d.botId); continue }
+          if (d.phase === 'interject') { bubs.delete(d.botId); readFlush(d.botId); call.muteTurn = false; continue }
           const key = `${d.botId}:${d.name}:${JSON.stringify(d.args)}`
           if (d.phase === 'run') {
             // Close the current bubble when a tool starts; later text gets a new one, otherwise
             // "say → run → say" merges into one bubble above the command.
-            bubs.delete(d.botId)
+            bubs.delete(d.botId); readFlush(d.botId)
             tools.set(key, toolLine(d.botId, toolLabel(d.name, d.args)))
           } else if (d.phase === 'ask') {
             const el = tools.get(key)
@@ -900,7 +912,9 @@ async function send() {
       }
     }
   } catch (e) { if (ticket === shown) note('⚠ ' + (e.message ?? e)) }
-  busy = false; streaming = null; sendMode(); input.focus()
+  readFlush()
+  busy = false; streaming = null; sendMode(); if (!call.on) input.focus()
+  if (call.on) callAfterTurn()
   loadRuns(); loadTasks()
   CONVS = await (await fetch(api('/api/conversations'))).json(); renderConvs()
   loadUsage()                                         // the turn just cost something; show it
@@ -917,14 +931,16 @@ async function send() {
  * reply comes through the stream already open here, or — when the turn runs elsewhere — through
  * the history redraw that follows a running conversation.
  */
-async function interject() {
-  const text = input.value.trim()
-  if (uploading()) { note(t('file.waitUpload')); return }
-  const files = PEND.filter(p => p.att && p.conv === convKey(cur)).map(p => p.att)
+async function interject(spoken = null) {
+  const text = (spoken ?? input.value).trim()
+  if (spoken == null && uploading()) { note(t('file.waitUpload')); return }
+  const files = spoken != null ? [] : PEND.filter(p => p.att && p.conv === convKey(cur)).map(p => p.att)
   if (!text && !files.length) return
-  input.value = ''; input.style.height = 'auto'
-  for (const p of PEND) if (p.thumb) URL.revokeObjectURL(p.thumb)
-  PEND = []; renderPend(); sendMode()
+  if (spoken == null) {
+    input.value = ''; input.style.height = 'auto'
+    for (const p of PEND) if (p.thumb) URL.revokeObjectURL(p.thumb)
+    PEND = []; renderPend(); sendMode()
+  }
   const mine = bubble(null, true)
   mine.innerHTML = fmt(text)
   addAtts(mine, files)
@@ -940,6 +956,316 @@ async function interject() {
     }
   } catch (e) { note('⚠ ' + (e.message ?? e)) }
   loadRuns()
+  if (call.on) callAfterTurn()
+}
+
+// ═══ Voice ═══
+// Speaking to an agent and hearing it answer. voice.mjs decides what is read out; speech.js drives the
+// browser's microphone and voices. Which engine hears and which speaks is a platform setting (this device,
+// or one of the person's upstreams); what only makes sense per device — the language spoken, the device
+// voice, reading replies aloud — stays in this browser.
+const SAY_ICON = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6h2.3L8 3.3v9.4L4.8 10H2.5z"/><path d="M10.6 5.7a3.2 3.2 0 0 1 0 4.6M12.4 3.9a5.7 5.7 0 0 1 0 8.2"/></svg>'
+let VOICE = { stt: { mode: 'device' }, tts: { mode: 'device' } }
+const ls = (k, d = '') => { try { return localStorage.getItem(k) ?? d } catch { return d } }
+const lsSet = (k, v) => { try { localStorage.setItem(k, v) } catch {} }
+const autoRead = () => ls('ma_autoread') === 'on'
+// A device recognizer must be told the language (the interface's, unless chosen); an upstream is only told
+// when the person chose one — otherwise it detects it, and someone speaking Spanish to an English page is heard.
+const hearIn = () => VOICE.stt.mode === 'upstream' ? ls('ma_voice_lang') : hearLang(ls('ma_voice_lang'), lang)
+async function loadVoice() {
+  VOICE = await fetch(api('/api/settings/voice')).then(r => r.ok ? r.json() : VOICE).catch(() => VOICE)
+}
+
+const call = { on: false, state: '', mic: null, listener: null, muteTurn: false, paused: false, target: null, watch: null }
+let readingBub = null
+const speaker = new Speaker({
+  mode: () => VOICE.tts.mode, speakUrl: api('/api/voice/speak'), fetch,
+  preferred: () => ls('ma_voice_name'), uiLang: () => lang,
+  onState: speaking => onSpeaking(speaking),
+  onSay: text => { if (call.on) $('#csaid').textContent = text },
+  onError: e => note('⚠ ' + t('vo.speakFailed', { msg: e.message ?? e })),
+})
+
+function voiceError(e) {
+  if (e?.code === 'denied') return t('vo.denied')
+  if (e?.code === 'unsupported') return t('vo.noRecognizer')
+  if (e?.code === 'mic') return t('vo.noMic')
+  if (e?.code === 'network') return t('vo.network')
+  return e?.message ?? String(e)
+}
+/** Can this browser hear with the engine chosen? Says why not. */
+function canListen() {
+  const up = VOICE.stt.mode === 'upstream'
+  if (up ? canRecord() : canHear()) return true
+  note(t(up ? 'vo.noMic' : 'vo.noRecognizer'))
+  return false
+}
+async function transcribe(blob, lang2) {
+  const r = await fetch(api(`/api/voice/transcribe${lang2 ? `?language=${lang2}` : ''}`),
+    { method: 'POST', headers: { 'content-type': blob.type || 'audio/webm' }, body: blob })
+  if (!r.ok) throw new Error(await errText(r))
+  return (await r.json()).text ?? ''
+}
+
+// ── Reading a reply as it streams: one Reader per agent speaking in it ──
+const readers = new Map()
+const reads = () => (autoRead() || call.on) && !call.muteTurn
+function readFeed(botId, text, final = false) {
+  let r = readers.get(botId)
+  if (!r) readers.set(botId, r = new Reader({ codeWord: t('vo.code') }))
+  const out = r.push(text, final)
+  if (final) readers.delete(botId)
+  if (reads()) for (const piece of out) speaker.say(piece, botId)
+}
+const readFlush = botId => { for (const id of botId ? [botId] : [...readers.keys()]) if (readers.has(id)) readFeed(id, '', true) }
+
+// One message, on its 🔊 — the same rules: code is "(code)", links are their words.
+$('#log').addEventListener('click', e => {
+  const btn = e.target.closest('.say'); if (!btn) return
+  const msg = btn.closest('.msg'), bub = msg.querySelector('.bub')
+  const again = readingBub === bub && speaker.busy
+  speaker.stop()
+  if (again) return
+  if (VOICE.tts.mode === 'device' && !canSpeak()) { note(t('vo.noVoices')); return }
+  const copy = bub.cloneNode(true)
+  copy.querySelectorAll('pre').forEach(p => p.replaceWith(`\n(${t('vo.code')})\n`))
+  const pieces = sentences(speakable(copy.textContent, { codeWord: t('vo.code') }), { final: true }).out
+  if (!pieces.length) return
+  readingBub = bub; btn.classList.add('on')
+  for (const piece of pieces) speaker.say(piece, msg.dataset.bot || null)
+})
+
+function paintRead() {
+  const on = autoRead(), b = $('#hread')
+  b.setAttribute('aria-pressed', String(on)); b.title = t(on ? 'vo.readOn' : 'vo.readOff')
+}
+$('#hread').onclick = () => { lsSet('ma_autoread', autoRead() ? 'off' : 'on'); if (!autoRead()) speaker.stop(); paintRead() }
+paintRead()
+
+function onSpeaking(speaking) {
+  if (!speaking) { readingBub = null; document.querySelectorAll('.say.on').forEach(x => x.classList.remove('on')) }
+  if (!call.on) return
+  if (speaking) { if (!call.listener) { callState('speaking'); startWatch() } return }
+  stopWatch()
+  if (busy) { if (!call.listener) callState('thinking') } else callAfterTurn()
+}
+
+// ── Dictation: the mic in the composer types what you say; you read it, then send ──
+let dictating = null
+function paintMic(state = '') {
+  const b = $('#cmic')
+  b.setAttribute('aria-pressed', String(!!dictating && state !== 'transcribing'))
+  b.classList.toggle('busy', state === 'transcribing')
+  b.title = t(state === 'transcribing' ? 'vo.transcribing' : dictating ? 'vo.dictateStop' : 'vo.dictate')
+}
+$('#cmic').onclick = () => dictate()
+async function dictate() {
+  if (dictating) { dictating.stop(); return }
+  if (!cur || !canListen()) return
+  speaker.stop()
+  const L = dictating = new Listener()
+  const before = input.value, sep = before && !/\s$/.test(before) ? ' ' : ''
+  const show = x => { input.value = before + (x ? sep + x : ''); input.dispatchEvent(new Event('input')) }
+  paintMic()
+  try {
+    const text = await L.start({ mode: VOICE.stt.mode, lang: hearIn(), continuous: true,
+      transcribe: (blob, l) => { paintMic('transcribing'); return transcribe(blob, l) },
+      onInterim: x => { if (typeof x === 'string') show(x) } })
+    show(L.thrown ? '' : text)
+  } catch (e) { if (!L.thrown) note('⚠ ' + voiceError(e)) }
+  if (dictating === L) dictating = null
+  paintMic(); input.focus()
+  if (L.sendAfter && !L.thrown) send()
+}
+// Esc while dictating: forget it, back to what was typed before
+input.addEventListener('keydown', e => { if (e.key === 'Escape' && dictating) { e.preventDefault(); dictating.abort() } })
+
+// ── A call: listen → send → read the answer → listen again, hands-free ──
+function callState(state) {
+  call.state = state
+  $('#call').dataset.state = state
+  $('#cstate').textContent = t(`vo.state.${state}`)
+  if (state !== 'listening') $('#cring').style.removeProperty('--lvl')
+}
+$('#hcall').onclick = () => startCall()
+async function startCall() {
+  if (!cur || call.on) return
+  await loadVoice()
+  if (!canListen()) { openVoice(); return }
+  if (VOICE.tts.mode === 'device' && !canSpeak()) { note(t('vo.noVoices')); openVoice(); return }
+  Object.assign(call, { on: true, target: { ...cur }, muteTurn: false, paused: false })
+  const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id) ?? { ...cur, name: $('#htitle').textContent }
+  $('#cav').innerHTML = avatar(c)
+  $('#cname').textContent = c.name
+  $('#cheard').textContent = ''; $('#csaid').textContent = ''
+  $('#cmute').setAttribute('aria-pressed', 'false')
+  // Talking over the agent can only be heard when its voice comes out of this page (an upstream voice):
+  // that is the sound echo cancellation takes back out of the microphone. A device voice is played by
+  // the system, and the mic would hear the agent interrupting itself.
+  const bargeIn = VOICE.tts.mode === 'upstream'
+  $('#chint').textContent = t(bargeIn ? 'vo.hintTalk' : 'vo.hintTap')
+  $('#call').hidden = false; $('#corb').focus()
+  speaker.stop(); dictating?.abort()
+  if (VOICE.stt.mode === 'upstream' || bargeIn) {
+    try { call.mic = await new Mic().open() }
+    catch (e) { endCall(); note('⚠ ' + voiceError({ code: e.name === 'NotAllowedError' ? 'denied' : 'mic', message: e.message })); return }
+  }
+  if (!call.on) return
+  // A reply already streaming here is read from now on; listening starts when it's done.
+  if (busy) callState('thinking'); else callListen()
+}
+function endCall() {
+  if (!call.on) return
+  call.on = false
+  call.listener?.abort(); call.listener = null
+  stopWatch()
+  call.mic?.close(); call.mic = null
+  speaker.stop()
+  $('#call').hidden = true
+  $('#hcall').focus()
+}
+async function callListen() {
+  if (!call.on || call.listener) return
+  if (call.paused) { callState('muted'); return }
+  stopWatch()
+  callState('listening')
+  const L = call.listener = new Listener(), began = Date.now()
+  let text = ''
+  try {
+    text = await L.start({ mode: VOICE.stt.mode, lang: hearIn(), mic: call.mic,
+      transcribe: (blob, l) => { if (call.on) callState('transcribing'); return transcribe(blob, l) },
+      onInterim: x => {
+        if (typeof x === 'string') $('#cheard').textContent = x
+        else $('#cring').style.setProperty('--lvl', (1 + Math.min(x * 9, 0.35)).toFixed(3))
+      } })
+  } catch (e) {
+    if (call.listener === L) call.listener = null
+    if (call.on && !L.thrown) { note('⚠ ' + voiceError(e)); endCall() }
+    return
+  }
+  if (call.listener === L) call.listener = null
+  if (!call.on || L.thrown) return
+  // Nothing said: listen again — after a pause if the recognizer gave up at once, so a broken one can't spin
+  if (!text) { setTimeout(callListen, Date.now() - began < 1000 ? 800 : 0); return }
+  $('#cheard').textContent = text; $('#csaid').textContent = ''
+  if (!cur || cur.kind !== call.target.kind || cur.id !== call.target.id) { endCall(); return }
+  callState('thinking')
+  send(text)
+}
+/** The turn ended (or a message was handed to one still working): listen once the voice is quiet. */
+function callAfterTurn() {
+  if (!call.on || busy || call.listener || speaker.busy) return
+  callListen()
+}
+// Cutting in: by voice (upstream voices only, see above) or by a tap / Space.
+function startWatch() {
+  if (!call.mic || VOICE.tts.mode !== 'upstream' || call.watch || call.paused) return
+  const v = new Voice({ min: 0.03, onsetMs: 260 })
+  call.watch = setInterval(() => { if (v.tick(call.mic.level())) callInterrupt() }, 50)
+}
+function stopWatch() { clearInterval(call.watch); call.watch = null }
+function callInterrupt() {
+  if (!call.on) return
+  stopWatch()
+  // The rest of this answer goes unread; what is said now reaches the turn as an interjection, and
+  // what the agent writes after that is read again.
+  if (speaker.busy || busy) call.muteTurn = true
+  speaker.stop()
+  callListen()
+}
+function callTap() {
+  if (!call.on) return
+  if (call.state === 'listening') call.listener?.stop()     // done talking: send it now
+  else if (call.state === 'speaking' || call.state === 'thinking') callInterrupt()
+}
+$('#corb').onclick = callTap
+$('#cend').onclick = endCall
+$('#cmute').onclick = () => {
+  call.paused = !call.paused
+  $('#cmute').setAttribute('aria-pressed', String(call.paused))
+  $('#cmute').title = t(call.paused ? 'vo.unmute' : 'vo.mute')
+  if (call.paused) { stopWatch(); call.listener?.abort(); call.listener = null; if (!speaker.busy && !busy) callState('muted') }
+  else if (speaker.busy) startWatch()
+  else if (!busy) callListen()
+}
+document.addEventListener('keydown', e => {
+  if (!call.on) return
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endCall() }
+  else if (e.key === ' ' && e.target.tagName !== 'BUTTON') { e.preventDefault(); callTap() }
+}, true)
+
+// ── Settings ──
+const VLANGS = [['en-US', 'English (US)'], ['en-GB', 'English (UK)'], ['en-IN', 'English (India)'], ['es-ES', 'Español'],
+  ['fr-FR', 'Français'], ['de-DE', 'Deutsch'], ['it-IT', 'Italiano'], ['pt-BR', 'Português (Brasil)'], ['nl-NL', 'Nederlands'],
+  ['pl-PL', 'Polski'], ['tr-TR', 'Türkçe'], ['ru-RU', 'Русский'], ['uk-UA', 'Українська'], ['ar-SA', 'العربية'],
+  ['hi-IN', 'हिन्दी'], ['id-ID', 'Bahasa Indonesia'], ['vi-VN', 'Tiếng Việt'], ['th-TH', 'ไทย'], ['ja-JP', '日本語'],
+  ['ko-KR', '한국어'], ['zh-CN', '中文（普通话）'], ['zh-TW', '中文（台灣）'], ['zh-HK', '粵語（香港）']]
+const vhint = (s, cls = '') => { $('#vhint').className = 'phint ' + cls; $('#vhint').textContent = s }
+$('#voicebtn').onclick = () => openVoice()
+async function openVoice() {
+  await Promise.all([loadVoice(), loadProvs()])
+  const def = PROVS.find(p => p.is_default)
+  const opts = `<option value="">${esc(def ? t('b.defaultProvNamed', { name: def.name }) : t('b.defaultProv'))}</option>` +
+    PROVS.map(p => `<option value="${esc(p.id)}"${p.protocol === 'messages' ? ' disabled' : ''}>${esc(p.name)}${
+      p.protocol === 'messages' ? esc(t('vo.noSpeech')) : ''}</option>`).join('')
+  for (const [part, pre] of [[VOICE.stt, 'vstt'], [VOICE.tts, 'vtts']]) {
+    $(`#${pre}mode`).value = part.mode
+    $(`#${pre}prov`).innerHTML = opts
+    $(`#${pre}prov`).value = PROVS.some(p => p.id === part.provider_id) ? part.provider_id : ''
+    $(`#${pre}model`).value = part.model ?? ''
+  }
+  $('#vttsvoice').value = VOICE.tts.voice ?? ''
+  $('#vlang').innerHTML = `<option value="">${esc(t('vo.langAuto', { l: hearLang('', lang) }))}</option>` +
+    VLANGS.map(([v, n]) => `<option value="${v}">${esc(n)} · ${v}</option>`).join('')
+  $('#vlang').value = VLANGS.some(([v]) => v === ls('ma_voice_lang')) ? ls('ma_voice_lang') : ''
+  const vs = (await deviceVoices()).slice()
+  const ui = lang.startsWith('zh') ? 'zh' : lang.slice(0, 2)
+  vs.sort((a, b) => (b.lang.toLowerCase().startsWith(ui) - a.lang.toLowerCase().startsWith(ui)) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name))
+  $('#vdevvoice').innerHTML = `<option value="">${esc(t('vo.devVoiceAuto'))}</option>` +
+    vs.map(v => `<option value="${esc(v.voiceURI)}">${esc(v.name)} · ${esc(v.lang)}</option>`).join('')
+  $('#vdevvoice').value = vs.some(v => v.voiceURI === ls('ma_voice_name')) ? ls('ma_voice_name') : ''
+  $('#vauto').checked = autoRead()
+  vhint('')
+  paintVoiceForm()
+  voiceModels('vstt'); voiceModels('vtts')
+  $('#vdlg').showModal()
+}
+function paintVoiceForm() {
+  const sttUp = $('#vsttmode').value === 'upstream', ttsUp = $('#vttsmode').value === 'upstream'
+  $('#vsttup').hidden = !sttUp; $('#vttsup').hidden = !ttsUp; $('#vdevvoice').hidden = ttsUp
+  $('#vlang').options[0].textContent = sttUp ? t('vo.langDetect') : t('vo.langAuto', { l: hearLang('', lang) })
+  $('#vsttnote').textContent = sttUp ? t('vo.sttUpNote') : canHear() ? t('vo.sttDevNote') : t('vo.noRecognizer')
+  $('#vttsnote').textContent = ttsUp ? t('vo.ttsUpNote') : canSpeak() ? t('vo.ttsDevNote') : t('vo.noVoices')
+}
+$('#vsttmode').onchange = $('#vttsmode').onchange = paintVoiceForm
+/** What the chosen upstream lists, as suggestions — nothing is filled in for you. */
+async function voiceModels(pre) {
+  const sel = $(`#${pre}prov`), list = $(`#${pre}models`)
+  const seq = list.seq = (list.seq ?? 0) + 1
+  const r = await fetch(api('/api/providers/models'), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: sel.value }) }).then(x => x.json()).catch(() => ({ models: [] }))
+  if (seq === list.seq) list.innerHTML = (r.models ?? []).map(m => `<option value="${esc(m)}">`).join('')
+}
+$('#vsttprov').onchange = () => voiceModels('vstt')
+$('#vttsprov').onchange = () => voiceModels('vtts')
+async function saveVoice() {
+  lsSet('ma_voice_lang', $('#vlang').value); lsSet('ma_voice_name', $('#vdevvoice').value)
+  lsSet('ma_autoread', $('#vauto').checked ? 'on' : 'off'); paintRead()
+  const body = {
+    stt: { mode: $('#vsttmode').value, provider_id: $('#vsttprov').value, model: $('#vsttmodel').value.trim() },
+    tts: { mode: $('#vttsmode').value, provider_id: $('#vttsprov').value, model: $('#vttsmodel').value.trim(), voice: $('#vttsvoice').value.trim() },
+  }
+  const r = await fetch(api('/api/settings/voice'), { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  if (!r.ok) { vhint(await errText(r), 'bad'); return false }
+  VOICE = await r.json()
+  vhint(t('vo.saved'), 'good')
+  return true
+}
+$('#vsave').onclick = async () => { if (await saveVoice()) $('#vdlg').close() }
+$('#vclose').onclick = () => $('#vdlg').close()
+$('#vtry').onclick = async () => {
+  if (!await saveVoice()) return
+  speaker.stop(); speaker.say(t('vo.sample'), cur?.kind === 'agent' ? cur.id : null)
 }
 
 // ═══ Groups ═══
@@ -1044,6 +1370,7 @@ function editBot(b) {
     .map(m => `<option value="${m}">${esc(t(m ? `b.auto${m[0].toUpperCase()}${m.slice(1)}` : 'b.autoDefault'))}</option>`).join('')
   $('#bauto').value = ['auto', 'manual'].includes(b?.autonomy) ? b.autonomy : ''
   $('#bcap').value = dollars(b?.daily_cap_micro)
+  $('#bvoice').value = b?.voice ?? ''
   // A cap only means something when the upstream has prices; say so rather than let it look guarded.
   const u = b && spendOf(b.id)
   $('#bcaphint').textContent = u && !u.priced ? t('sp.unpricedWhy')
@@ -1107,7 +1434,7 @@ $('#bsave').onclick = async () => {
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
     provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
-    daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks() }
+    daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), voice: $('#bvoice').value.trim() }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
   const r = bEditing
@@ -2132,7 +2459,7 @@ async function reload() {
   try {
     await reload()
     if (CONVS.length) openConv(CONVS[0])
-    loadRuns()
+    loadRuns(); loadVoice()
     await loadProvs()
     if (!PROVS.length) { fillProv(null); $('#pdlg').showModal()
       hint(t('p.first')) }

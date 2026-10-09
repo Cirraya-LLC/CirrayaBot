@@ -55,6 +55,7 @@ export function speakable(md, { codeWord = 'code' } = {}) {
   t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, row) => row.split('|').map(c => c.trim()).filter(Boolean).join(', '))
   t = t.replace(/(\*\*|__|~~)(.+?)\1/g, '$2').replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?=[^\w*]|$)/g, '$1$2')
   t = t.replace(/@(\S+)/g, '$1')
+  t = t.replace(/\*\*|__|~~|`/g, '')                                     // marks left unpaired by a cut mid-sentence
   return t.replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{2,}/g, '\n').trim()
 }
 
@@ -67,7 +68,7 @@ export function sentences(text, { final = false, max = 220 } = {}) {
   const out = []
   let rest = String(text ?? '')
   // CJK sentence marks end a sentence where they stand; . ! ? only before a space or the end ("3.14").
-  const end = /[。！？…]+["'”’」』)\]]*|[.!?]+["'”’)\]]*(\s+|$)|\n+/g
+  const end = /[。！？…]+["'”’」』)\]*_]*|[.!?]+["'”’)\]*_]*(\s+|$)|\n+/g
   let m, from = 0
   while ((m = end.exec(rest))) {
     // At the very end of what has streamed so far, "3." may yet become "3.14": wait for more.
@@ -94,6 +95,55 @@ function cut(s, max) {
   }
   if (s) out.push(s)
   return out
+}
+
+/**
+ * Reads a reply as it streams: push() the new text, get back what can be spoken now. Code blocks
+ * are held until they close (then "(code)" is said once), so a fence is never read line by line;
+ * a sentence is handed out only once it is complete. push('', true) at the end flushes the rest.
+ */
+export class Reader {
+  constructor({ codeWord = 'code', max = 220 } = {}) { this.raw = ''; this.at = 0; this.codeWord = codeWord; this.max = max }
+  push(delta, final = false) {
+    this.raw += delta ?? ''
+    const p = this.raw.slice(this.at)
+    let cut = 0
+    if (final) cut = p.length
+    else {
+      const fences = [...p.matchAll(/```/g)].map(m => m.index)
+      const inFence = i => fences.filter(f => f < i).length % 2 === 1
+      // The last place a sentence ends outside a code block, or right after a block closes.
+      const end = /[。！？…]+["'”’」』)\]*_]*|[.!?]+["'”’)\]*_]*(\s+|$)|\n+/g
+      let m
+      while ((m = end.exec(p))) {
+        const stop = m.index + m[0].length
+        if (inFence(m.index)) continue
+        if (stop === p.length && /^[.!?]/.test(m[0]) && !/\s$/.test(m[0])) break   // "3." may become "3.14"
+        cut = stop
+      }
+      // A long run with no sentence end yet (and no open block): cut at a comma or space.
+      if (!cut && p.length > this.max && !fences.length) {
+        const at = Math.max(p.lastIndexOf(', ', this.max - 1), p.lastIndexOf('，', this.max - 1), p.lastIndexOf(' ', this.max - 1))
+        if (at > 40) cut = at + 1
+      }
+    }
+    if (!cut) return []
+    this.at += cut
+    return sentences(speakable(p.slice(0, cut), { codeWord: this.codeWord }), { final: true, max: this.max }).out
+  }
+}
+
+/**
+ * Which language a piece is written in, by its script: 'zh' / 'ja' / 'ko' / 'ru', or '' for
+ * anything else — enough to pick a device voice that can say it at all.
+ */
+export function scriptOf(text) {
+  const s = String(text ?? '')
+  if (/[\u3040-\u30ff]/.test(s)) return 'ja'
+  if (/[\uac00-\ud7af]/.test(s)) return 'ko'
+  if (/[\u4e00-\u9fff]/.test(s)) return 'zh'
+  if (/[\u0400-\u04ff]/.test(s)) return 'ru'
+  return ''
 }
 
 /**
@@ -134,6 +184,21 @@ if (typeof process !== 'undefined' && import.meta.url === `file://${process.argv
   a.deepEqual(sentences('(code)\n...\n', { final: true }).out, ['(code)'], 'nothing without a letter or digit')
   const long = 'word, '.repeat(80)
   a.ok(sentences(long).out.every(x => x.length <= 220), 'a long run is cut so speech can start')
+  const r = new Reader()
+  a.deepEqual(r.push('Here it is. Run'), ['Here it is.'])
+  a.deepEqual(r.push(' this:\n```bash\nls -la\nrm x\n'), ['Run this:'], 'lines inside an open block are not read')
+  a.deepEqual(r.push('```\nDone. All'), ['(code)', 'Done.'])
+  a.deepEqual(r.push(' good', true), ['All good'])
+  const r2 = new Reader()
+  a.deepEqual(r2.push('**Bold claim.** And more'), ['Bold claim.'], 'no stray marks')
+  a.deepEqual(r2.push('', true), ['And more'])
+  const r3 = new Reader()
+  a.deepEqual(r3.push('Pi is 3.'), [])
+  a.deepEqual(r3.push('14 roughly. '), ['Pi is 3.14 roughly.'])
+  a.deepEqual(new Reader().push('| a | b |\n|---|---|\n| 1 | 2 |\n'), ['a, b', '1, 2'])
+  a.ok(new Reader().push('word '.repeat(80)).length >= 1, 'a long run starts being read before it ends')
+  a.equal(scriptOf('你好'), 'zh'); a.equal(scriptOf('こんにちは'), 'ja'); a.equal(scriptOf('안녕'), 'ko')
+  a.equal(scriptOf('Привет'), 'ru'); a.equal(scriptOf('Hello'), '')
   const t1 = deviceTone('chief'), t2 = deviceTone('operator')
   a.ok(t1.pitch >= 0.85 && t1.pitch <= 1.15 && t1.rate >= 0.94 && t1.rate <= 1.06)
   a.deepEqual(deviceTone('chief'), t1, 'stable per agent')
