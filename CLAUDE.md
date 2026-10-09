@@ -35,7 +35,7 @@ the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
 2.6–2.11 are kept because the dsh source-code findings in them still hold and will be needed the day
 we plug in the runtime.
 
-**For the current shape see 2.12, 2.18, 2.31** (background tasks), **2.32** (files), **2.33–2.35** (Android, HTTPS, notifications): PostgreSQL + one container per Agent + one-command
+**For the current shape see 2.12, 2.18, 2.31** (background tasks), **2.32** (files), **2.33–2.35** (Android, HTTPS, notifications), **2.37** (voice): PostgreSQL + one container per Agent + one-command
 compose deployment.
 
 **Branch `feat/studio` (2026-09-25, not merged by the boss's decision)** turns the product into an AI
@@ -668,7 +668,7 @@ The conversation list shows "what was said last", and DM history used to live on
 restart and the whole list was empty.
 
 **What we didn't copy**: the `Marketplace` at the bottom (skill market; we didn't have the concept of
-skills yet), `Routines` in the right panel (scheduled tasks, not done yet), voice input. Shared memory
+skills yet), `Routines` in the right panel (scheduled tasks, not done yet), voice input (done later, 2.37). Shared memory
 is our own thing that Grok Bot doesn't have; it moved to the lower half of the right panel.
 
 ## 2.18 Made into a product: PostgreSQL + one-command container deployment + custom upstreams (2026-09-16)
@@ -2268,8 +2268,64 @@ output masked; validation; tasks get no request_secret. `app/test/secret_test.da
   during a 20 s command (button Stop/Send, "passed on" note, the answer acknowledging it); backup-model rows.
 - ⚠️ A fake model that counts "this turn's tool results" as those after the last user message re-runs a step after
   an interjection (the interjection IS the last user message). That was the fake, not the server — e2e asserts it.
-- **Not verified**: the Android build of these screens on the phone (it was unplugged; the release APK is built,
-  `app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`); the macOS/Windows builds; podman.
+- **Not verified**: these screens on the phone (the phone was back on 2026-10-09, but only voice was checked on it,
+  2.37); the macOS/Windows builds; podman.
+
+## 2.37 Voice: dictation, replies read aloud, calls (2026-10-09)
+
+The boss: 「我也想做语音 可以怎么做呢」, then 「不考虑国内 国内不配」, then "continue" on the plan: up to calls, web and
+Android first, the device's own speech by default and an upstream as the option.
+
+- **Two engines each for hearing and speaking**, a platform setting (`settings` key `voice`, `GET/PUT
+  /api/settings/voice`): `device` (the browser's Web Speech API; Android's SpeechRecognizer + TextToSpeech — nothing
+  to set up) or `upstream` (one of the person's upstreams at OpenAI-style `/audio/transcriptions` and
+  `/audio/speech`, called by the server so the key stays there). **No model or voice name is suggested anywhere**
+  (3.1) — the upstream's /models list is offered as suggestions. An Anthropic-protocol upstream is refused; an
+  upstream without the endpoint (404) or unreachable is a 424 that says so. Per device (localStorage / `voice.json`):
+  the language spoken, the device voice, reading replies aloud. Per agent: `agents.voice`, its upstream voice name.
+- `POST /api/voice/transcribe` takes the raw audio (content-type = its type, ≤ 25 MB) and passes `?language=` only
+  when the person chose one — otherwise the upstream detects it (an English UI doesn't mean English speech).
+  `POST /api/voice/speak {text, agent}` streams the audio back.
+- **What is read**: `web/voice.mjs` (`speakable`, `sentences`, `Reader`, `scriptOf`, `deviceTone`) and its Dart twin
+  `app/lib/data/voice.dart`; both test suites pin the same cases, `deviceTone` values included, so an agent sounds
+  the same on both. A code block is "(code)" once, never read line by line; links are their words; a sentence is
+  handed out only when complete ("3." waits for "14"). On a device voice a sentence is said by a voice for its own
+  script — a Chinese sentence gets a Chinese voice whatever the interface is — and each agent gets its own pitch/pace.
+- **Web** (`web/speech.js`): mic in the composer (Enter while it listens sends what was heard, Esc throws it away),
+  🔊 on each agent message, a read-aloud toggle and a call button in the header, the call overlay (`#call`).
+  Talking over the agent cuts in **only on an upstream voice**: echo cancellation removes sound the page plays, and
+  a device voice is played by the OS — the mic would hear the agent interrupt itself. Otherwise tap / Space.
+  Firefox has no recognizer: the page says to pick an upstream.
+- **Android**: `VoiceBridge.kt` over channel `cirraya/voice` (recognizer, TTS, `AudioRecord` → WAV with the web's
+  silence rule, `MediaPlayer`); RECORD_AUDIO is asked on the first tap. ⚠️ **Since Android 11 the recognizer and
+  TTS are invisible without `<queries>`** for `RecognitionService` / `TTS_SERVICE`. The call button takes Send's
+  place while the box is empty (a phone header has no room left); voice settings are a footer icon. No cutting in by
+  voice on Android (tap). Desktop Flutter has no voice (no plugin).
+- **A call**: listen → send (into the turn at work, if any) → read the answer → listen. Cutting in leaves the rest
+  of that answer unread until the interjection reaches the turn. A passing recognizer error is retried; three in a
+  row, or a missing permission / recognizer / language, ends the call with a message.
+- ⚠️ **Android's recognizer ends a session after 3–5 s of silence**, and what is said while the next one starts is
+  lost (a call heard "+ 4 answer briefly" for "what is three plus four"). On Android 13+ a session is
+  `EXTRA_SEGMENTED_SESSION` with `EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS` **as an Int** (a Long reads as 0: logcat
+  "not set with positive value; ignoring EXTRA_SEGMENTED_SESSION") and **at most ~60 s** (120 s / 600 s: "too
+  high, ignored"). Utterances arrive as segments; dictation joins them until stopped.
+- ⚠️ The first use after Google's on-device model loads cold (e.g. right after installing the app) can miss the
+  first words.
+- ⚠️ **Testing on the phone while the boss watches it**: the two "mysterious" call drops on 2026-10-09 were the boss
+  hanging up (「刚才我都挂掉好几次了 你到底在测什么」). Say what is being tested before driving the phone, and ask
+  before chasing a drop nobody can explain from the log.
+
+Verified: `test/e2e/voice.test.mjs` (7: settings, transcribe/speak through a fake upstream, agent voice, 424s);
+web in headless Chromium (29 checks: stubbed device engines for dictation, read aloud, call loop, cut in, mute;
+and the upstream path with Chromium's fake microphone fed from a WAV — recorded, stopped on silence, transcribed,
+sent, each sentence spoken and played, back to listening); Flutter `voice_test` (parity), `voice_controller_test`
+(fake engine + server), `voice_layout_test` (composer at 277 logical px, every call state). **On the Pixel 5a**:
+🔊 on a Chinese reply → Google TTS `zho-CHN`; dictation of a sentence played from the Mac's speaker; calls with
+Lin on the real model (France → "Paris", 3 + 4 → "7"); one segmented session through 25 s of silence and the
+whole sentence heard; two dictated sentences joined; the upstream path against the box's fake (`/tmp/cbfake.mjs`
+answers `/audio/*` now): a 269 KB WAV uploaded, the reply's audio played by MediaPlayer to the last frame.
+**Not verified**: a real upstream's speech (66hxhx has no audio endpoints — 404); cutting in by voice on real
+speakers on the web; Safari; iOS and desktop have no voice.
 
 ## 3. What runs now
 
@@ -2286,6 +2342,7 @@ node web/autonomy.mjs      # self-test for auto mode: limits, the plan, nudges
 node web/tasks.mjs         # self-test for background tasks: input, who gets it, what the front thread is told
 node web/files.mjs         # self-test for attachments: types, what they're served as, names, what send_file may read
 node web/secrets.mjs       # self-test for secrets: sealing, origins, masking, internal addresses
+node web/voice.mjs         # self-test for what is read aloud and how a streaming reply is cut into sentences
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)
