@@ -247,6 +247,23 @@ create table if not exists front_runs (
   updated_at timestamptz not null default now()
 );
 
+-- Secrets an agent may use without its model seeing them (secrets.mjs): sent as a header to one https
+-- origin, or typed into a login page on it. value_enc is AES-256-GCM under SECRET_KEY; nothing reads it
+-- back out through the API.
+create table if not exists secrets (
+  id         text primary key,
+  agent_id   text not null,
+  name       text not null,
+  kind       text not null check (kind in ('header','login')),
+  origin     text not null,
+  header     text not null default '',
+  format     text not null default '',
+  value_enc  text not null,
+  created_at timestamptz not null default now(),
+  used_at    timestamptz
+);
+create unique index if not exists secrets_name_idx on secrets (agent_id, lower(name));
+
 -- Backup models, tried in order when the agent's own model keeps failing: [{provider_id, model}],
 -- provider_id '' = the default upstream. Chosen by the person, like the main model; never shipped.
 alter table agents add column if not exists fallbacks jsonb not null default '[]';
@@ -339,6 +356,8 @@ export async function deleteAgent(id) {
   await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id)]])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
   await q(`update skills set agents = array_remove(agents, $1)`, [id])
+  await q('delete from secrets where agent_id = $1', [id])
+  await q('delete from front_runs where scope = $1 and scope_id = $2', ['dm', id])
   return dropFiles(`scope = 'dm' and scope_id = $1`, [id])
 }
 
@@ -454,6 +473,35 @@ export async function recent(scope, scopeId, limit = 200, { tools = false, event
      order by id desc limit $3`, params)
   return rows.reverse()
 }
+
+// ---------- secrets ----------
+const SECRET_COLS = 'id, agent_id, name, kind, origin, header, format, created_at, used_at'
+/** What anyone may see of an agent's secrets: everything but the value. */
+export async function listSecrets(agentId) {
+  return (await q(`select ${SECRET_COLS} from secrets where agent_id = $1 order by lower(name)`, [agentId])).rows
+}
+/** With the sealed value: only for using it. */
+export async function secretsWithValues(agentId) {
+  return (await q('select * from secrets where agent_id = $1', [agentId])).rows
+}
+export async function secretByName(agentId, name) {
+  return (await q('select * from secrets where agent_id = $1 and lower(name) = lower($2)', [agentId, name])).rows[0] ?? null
+}
+/** Saving a name that exists replaces it (a new value for the same use). */
+export async function saveSecret(s) {
+  const { rows } = await q(`
+    insert into secrets (id, agent_id, name, kind, origin, header, format, value_enc)
+    values ($1,$2,$3,$4,$5,$6,$7,$8)
+    on conflict (agent_id, lower(name)) do update set name = excluded.name, kind = excluded.kind, origin = excluded.origin,
+      header = excluded.header, format = excluded.format, value_enc = excluded.value_enc, used_at = null
+    returning ${SECRET_COLS}`,
+    [s.id, s.agent_id, s.name, s.kind, s.origin, s.header ?? '', s.format ?? '', s.value_enc])
+  return rows[0]
+}
+export async function deleteSecret(agentId, id) {
+  return (await q('delete from secrets where agent_id = $1 and id = $2', [agentId, id])).rowCount > 0
+}
+export async function touchSecret(id) { await q('update secrets set used_at = now() where id = $1', [id]) }
 
 // ---------- conversation turns at work ----------
 export async function saveFrontRun(r) {

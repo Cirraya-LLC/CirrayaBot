@@ -9,7 +9,7 @@ export const APPROVAL_MODES = ['off', 'match', 'all']
 
 // Only tools that change something outside the conversation can need approval. Reading a file or
 // a skill cannot be the thing you regret.
-export const ACTING_TOOLS = ['bash', 'write_file', 'browser']
+export const ACTING_TOOLS = ['bash', 'write_file', 'browser', 'http_request']
 
 // Seeded patterns. Kept short on purpose: a list long enough to catch everything asks so often
 // that people approve without reading, which is worse than not asking.
@@ -25,6 +25,8 @@ export const RISKY = [
   String.raw`\|\s*(ba)?sh\b`,
   String.raw`\bkill(all)?\s+-9\b`,
   String.raw`\b(apt|apt-get)\s+.*\bremove\b`,
+  // http_request that changes something on the other side (its subject is "METHOD url")
+  String.raw`^(POST|PUT|PATCH|DELETE)\s+https://`,
 ]
 
 /** What a call is about to do, in one line. The frontends label the card with the same thing. */
@@ -33,6 +35,8 @@ export function toolSubject(name, args = {}) {
   if (name === 'write_file') return `write ${args.path ?? ''}`
   if (name === 'read_file') return `read ${args.path ?? ''}`
   if (name === 'browser') return `browser ${args.action ?? ''} ${args.url ?? ''}`.trim()
+  if (name === 'http_request') return `${String(args.method || 'GET').toUpperCase()} ${args.url ?? ''}`
+  if (name === 'request_secret') return `secret ${args.name ?? ''} for ${args.origin ?? ''}`
   return name
 }
 
@@ -110,5 +114,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.ok(gate('bash', cmd('rm -rf /'), { mode: 'all', patterns: RISKY }, [{ tool: 'bash', pattern: null }]),
     'the whole tool allowed in "all" mode still asks before a risky command')
   a.equal(gate('bash', cmd('git push'), { mode: 'off', patterns: RISKY }), null)
+  a.ok(gate('http_request', { method: 'post', url: 'https://api.x.com/issues' }, risky), 'a write over http_request asks')
+  a.equal(gate('http_request', { url: 'https://api.x.com/issues' }, risky), null, 'a read does not')
+  a.equal(gate('bash', cmd('echo POST https://x'), risky), null, 'the http pattern is anchored to the start')
   console.log('approve.mjs: ok')
 }

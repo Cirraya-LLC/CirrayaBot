@@ -293,6 +293,7 @@ async function openConv(c) {
   loadMemory(c)
   loadRoutines()
   loadBotSkills()
+  loadBotSecrets()
   loadBrowsers()
   TASKS = []; taskSig = ''; openTask = null; renderTasks()
 
@@ -573,6 +574,8 @@ function toolLabel(name, args = {}) {
     const plan = Array.isArray(args.plan) ? args.plan : []
     return t('tool.plan', { done: plan.filter(x => x?.status === 'completed').length, n: plan.length })
   }
+  if (name === 'http_request') return `${String(args.method || 'GET').toUpperCase()} ${args.url ?? ''}${args.secret ? `  · ${args.secret}` : ''}`
+  if (name === 'request_secret') return t('tool.requestSecret', { name: args.name ?? '' })
   return name === 'bash' ? args.command
     : name === 'read_file' ? t('tool.read', { path: args.path })
     : name === 'write_file' ? t('tool.write', { path: args.path })
@@ -604,6 +607,78 @@ function askOn(el, id, always = []) {
   }
   el.appendChild(box)
   el.scrollIntoView({ block: 'nearest' })
+}
+
+/**
+ * An agent asks for a credential: a password field on its card. What is typed goes straight to the
+ * store — the agent hears only "saved" — so the card says where it may be used before anyone types.
+ */
+function secretAsk(el, d) {
+  el.dataset.secret = d.id
+  const box = document.createElement('div')
+  box.className = 'secask'; box.dataset.id = d.id
+  box.innerHTML = `<span></span><span class="why"></span>
+    <div class="row"><input type="password" autocomplete="new-password">
+    <button class="btn" data-ok="0">${esc(t('sec.decline'))}</button><button class="btn pri" data-ok="1">${esc(t('common.save'))}</button></div>`
+  box.children[0].textContent = t('sec.asks', { name: d.name, origin: d.origin })
+  box.children[1].textContent = d.purpose || ''
+  const field = box.querySelector('input')
+  field.placeholder = t(d.kind === 'login' ? 'sec.typePassword' : 'sec.typeValue')
+  const answer = async ok => {
+    if (ok && !field.value) { field.focus(); return }
+    box.querySelectorAll('button,input').forEach(x => x.disabled = true)
+    const r = await fetch(api(`/api/secrets/requests/${d.id}`), { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ok ? { value: field.value } : { decline: true }) })
+    field.value = ''
+    if (!r.ok) { box.textContent = r.status === 404 ? t('ap.gone') : await errText(r); return }
+    box.textContent = ok ? t('sec.saved', { name: d.name }) : t('sec.declined')
+    loadBotSecrets()
+  }
+  box.querySelector('[data-ok="1"]').onclick = () => answer(true)
+  box.querySelector('[data-ok="0"]').onclick = () => answer(false)
+  field.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); answer(true) } }
+  el.appendChild(box)
+  el.scrollIntoView({ block: 'nearest' })
+  field.focus()
+}
+
+// Right column: this Agent's secrets — names, where they may be used, when last used. Never the value.
+async function loadBotSecrets() {
+  const c = cur
+  $('#s2secrets').style.display = c?.kind === 'agent' ? '' : 'none'
+  if (c?.kind !== 'agent') return
+  const list = await fetch(api(`/api/bots/${c.id}/secrets`)).then(r => r.ok ? r.json() : []).catch(() => [])
+  if (cur !== c) return
+  const box = $('#bsecrets'); box.innerHTML = ''
+  for (const s of list) {
+    const el = document.createElement('div'); el.className = 'rt sec'
+    el.innerHTML = `<div><b></b><small></small></div><button class="x" type="button" title="${esc(t('sec.delete'))}">×</button>`
+    el.querySelector('b').textContent = s.name
+    el.querySelector('small').textContent = `${t(s.kind === 'login' ? 'sec.kindLogin' : 'sec.kindHeader')} · ${s.origin}` +
+      (s.used_at ? ` · ${t('sec.used', { when: new Date(s.used_at).toLocaleString() })}` : '')
+    el.querySelector('.x').onclick = async () => {
+      if (!confirm(t('sec.deleteQ', { name: s.name }))) return
+      await fetch(api(`/api/bots/${c.id}/secrets/${s.id}`), { method: 'DELETE' })
+      loadBotSecrets()
+    }
+    box.appendChild(el)
+  }
+}
+$('#addsec').onclick = () => {
+  for (const id of ['#secname', '#secorigin', '#secheader', '#secformat', '#secvalue']) $(id).value = ''
+  $('#seckind').value = 'header'; $('#sechdr').hidden = false
+  $('#secdlg').showModal()
+}
+$('#seckind').onchange = () => { $('#sechdr').hidden = $('#seckind').value !== 'header' }
+$('#seccancel').onclick = () => { $('#secvalue').value = ''; $('#secdlg').close() }
+$('#secsave').onclick = async () => {
+  if (cur?.kind !== 'agent') return
+  const r = await fetch(api(`/api/bots/${cur.id}/secrets`), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: $('#secname').value.trim(), kind: $('#seckind').value, origin: $('#secorigin').value.trim(),
+      header: $('#secheader').value.trim(), format: $('#secformat').value, value: $('#secvalue').value }) })
+  if (!r.ok) { alert(await errText(r)); return }
+  $('#secvalue').value = ''; $('#secdlg').close()
+  loadBotSecrets()
 }
 
 /** Fill in a card once its command has finished. Screenshots only exist in the live stream. */
@@ -810,6 +885,11 @@ async function send() {
             if (el) askOn(el, d.id, d.always)
           } else if (d.phase === 'answered') {
             tools.get(key)?.querySelector('.ask')?.remove()
+          } else if (d.phase === 'secret') {
+            const el = [...tools.values()].reverse().find(x => x.dataset.secret == null && x.isConnected && x.classList.contains('run'))
+            if (el) secretAsk(el, d)
+          } else if (d.phase === 'secret_done') {
+            document.querySelector(`.secask[data-id="${d.id}"]`)?.remove()
           } else {
             const el = tools.get(key)
             // a file the agent sent replaces the card that sent it, as it will after a reload

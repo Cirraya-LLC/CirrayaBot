@@ -75,6 +75,13 @@ class Ran extends Entry {
 
   /// They answered "always allow".
   bool alwaysAllowed = false;
+
+  /// The agent asks for a credential on this card (request_secret): {id, name, origin, purpose, kind}.
+  /// Cleared once answered; [secretAnswer] then says how.
+  Map<String, Object?>? secretAsk;
+
+  /// 'saved' / 'declined' / an error, once the person answered.
+  String? secretAnswer;
 }
 
 class Note extends Entry {
@@ -145,6 +152,9 @@ class Workbench extends ChangeNotifier {
 
   /// Skills installed on the open Agent (empty for groups — skills live on people).
   List<Skill> skills = const [];
+
+  /// The open DM's agent's secrets: names and where they may be used, never values.
+  List<Secret> secrets = const [];
 
   final Api api;
 
@@ -314,6 +324,7 @@ class Workbench extends ChangeNotifier {
     selfMemoryFor = null;
     routines = const [];
     skills = const [];
+    secrets = const [];
     tasks = const [];
     _taskSig = '';
     sessions = const [];
@@ -323,6 +334,7 @@ class Workbench extends ChangeNotifier {
     unawaited(_loadMemory(c, ticket));
     unawaited(loadRoutines());
     unawaited(loadSkills());
+    unawaited(loadSecrets());
     unawaited(loadTasks());
     await _loadSessions(c);
     if (ticket != _shown) return;
@@ -485,6 +497,35 @@ class Workbench extends ChangeNotifier {
     } on ApiException catch (_) {
       // Best effort, like memory: the panel keeps what it had.
     }
+  }
+
+  Future<void> loadSecrets() async {
+    final c = current;
+    if (c == null || c.isGroup) return;
+    try {
+      final list = await api.secrets(c.id);
+      if (current?.id != c.id) return;
+      secrets = list;
+      notifyListeners();
+    } on ApiException catch (_) {
+      // Best effort, like skills.
+    }
+  }
+
+  /// The person's answer to a request_secret card: the value (stored, never shown), or null for no.
+  Future<void> answerSecret(Ran card, String? value) async {
+    final ask = card.secretAsk;
+    if (ask == null) return;
+    card.secretAsk = null;
+    notifyListeners();
+    try {
+      await api.answerSecret('${ask['id']}', value);
+      card.secretAnswer = value == null ? 'declined' : 'saved';
+    } on ApiException catch (e) {
+      card.secretAnswer = e.message;
+    }
+    notifyListeners();
+    unawaited(loadSecrets());
   }
 
   Future<void> loadSkills() async {
@@ -729,6 +770,19 @@ class Workbench extends ChangeNotifier {
               add(Note(tr('state.trimmed', {'n': ev.data['dropped']})));
               break;
             }
+            if (phase == 'secret') {
+              // The card asking is the tool running right now (its own event carries no tool name).
+              final card = cards.values.lastWhere((x) => x.running && x.secretAsk == null && x.secretAnswer == null,
+                  orElse: () => Ran(speaker: name, color: colour, label: ''));
+              card.secretAsk = Map<String, Object?>.from(ev.data);
+              break;
+            }
+            if (phase == 'secret_done') {
+              for (final card in cards.values) {
+                if (card.secretAsk?['id'] == ev.data['id']) card.secretAsk = null;
+              }
+              break;
+            }
             if (phase == 'interject') {
               // What the person said meanwhile reached the model: what it writes next is a
               // new bubble, below that message.
@@ -853,6 +907,8 @@ class Workbench extends ChangeNotifier {
     'read_file' => tr('tool.read', {'path': args['path'] ?? ''}),
     'write_file' => tr('tool.write', {'path': args['path'] ?? ''}),
     'browser' => tr('tool.browser', {'what': _browserLabel(args)}),
+    'http_request' => '${'${args['method'] ?? 'GET'}'.toUpperCase()} ${args['url'] ?? ''}${args['secret'] != null ? '  · ${args['secret']}' : ''}',
+    'request_secret' => tr('tool.requestSecret', {'name': args['name'] ?? ''}),
     _ => '$tool',
   };
 

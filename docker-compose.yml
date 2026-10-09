@@ -55,6 +55,10 @@ services:
       BOT_LLM_PROTOCOL: ${BOT_LLM_PROTOCOL:-}
       BOT_LLM_NAME: ${BOT_LLM_NAME:-}
       BOT_LLM_CONTEXT: ${BOT_LLM_CONTEXT:-}
+      # agents' secrets are sealed with this; empty = a key generated into the workspace (.secret-key)
+      SECRET_KEY: ${SECRET_KEY:-}
+      # https origins http_request may reach although they are internal (a service on your LAN), comma-separated
+      HTTP_REQUEST_ALLOW: ${HTTP_REQUEST_ALLOW:-}
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH}:/app/workspace

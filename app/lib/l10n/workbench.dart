@@ -193,6 +193,18 @@ const Map<String, List<String>> workbenchStrings = {
   // A tool call waiting for a person
   'ap.asks': ['Waiting for you', '等你决定', '等你決定'],
   'ap.always': ['Always allow', '总是允许', '總是允許'],
+  'sec.title': ['Secrets', '密钥', '密鑰'],
+  'sec.add': ['Add a secret', '添加密钥', '新增密鑰'],
+  'sec.kindHeader': ['API key / token', 'API 密钥 / 令牌', 'API 金鑰 / 權杖'],
+  'sec.kindLogin': ['Website password', '网站密码', '網站密碼'],
+  'sec.delete': ['Delete this secret', '删除这个密钥', '刪除這個密鑰'],
+  'sec.deleteQ': ['Delete the secret “{name}”? The Agent can no longer use it.', '删除密钥「{name}」？之后 Agent 就用不了了。', '刪除密鑰「{name}」？之後 Agent 就無法使用了。'],
+  'sec.asks': ['Wants a secret “{name}”, to be used only on {origin}', '要一个密钥「{name}」，只用于 {origin}', '要一個密鑰「{name}」，只用於 {origin}'],
+  'sec.typeValue': ['Paste the key or token — the Agent never sees it', '粘贴密钥或令牌——Agent 看不到', '貼上金鑰或權杖——Agent 看不到'],
+  'sec.typePassword': ['Type the password — the Agent never sees it', '输入密码——Agent 看不到', '輸入密碼——Agent 看不到'],
+  'sec.decline': ['Don’t give it', '不给', '不給'],
+  'sec.saved': ['Saved — the Agent can use it, not see it', '已保存——Agent 能用，但看不到', '已儲存——Agent 能用，但看不到'],
+  'sec.declined': ['Not given', '没有给', '沒有給'],
   'ap.alwaysPattern': [
     'Approve, and from now on let this Agent run commands matching {what} without asking',
     '批准，并且以后这个 Agent 运行匹配 {what} 的命令都不再问',

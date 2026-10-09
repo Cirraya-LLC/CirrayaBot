@@ -85,11 +85,15 @@ class EntryView extends StatelessWidget {
     required this.names,
     required this.colorOf,
     this.onApprove,
+    this.onSecret,
     this.news,
     this.files,
   });
 
   final Entry entry;
+
+  /// Answer an agent's request for a credential: the value, or null for no.
+  final void Function(Ran card, String? value)? onSecret;
   final List<String> names;
 
   /// Answer a tool call that is waiting for a person. Null where nothing can wait.
@@ -116,7 +120,7 @@ class EntryView extends StatelessWidget {
         ),
       ),
     ),
-    Ran r => _ToolCard(r, onApprove),
+    Ran r => _ToolCard(r, onApprove, onSecret),
     News n => news?.call(n) ?? const SizedBox.shrink(),
     Said s => _Bubble(said: s, names: names, colorOf: colorOf, files: files),
     SentFile f => _SentFile(sent: f, files: files),
@@ -281,9 +285,10 @@ String alwaysWhat(List<String> always) =>
     always.any((p) => p.isEmpty) ? tr('ap.alwaysTool') : tr('ap.alwaysPattern', {'what': always.join('  ')});
 
 class _ToolCard extends StatelessWidget {
-  const _ToolCard(this.ran, this.onApprove);
+  const _ToolCard(this.ran, this.onApprove, this.onSecret);
   final Ran ran;
   final void Function(Ran card, bool ok, bool always)? onApprove;
+  final void Function(Ran card, String? value)? onSecret;
 
   @override
   Widget build(BuildContext context) {
@@ -342,6 +347,19 @@ class _ToolCard extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
                 child: Image.memory(ran.image!, gaplessPlayback: true),
               ),
+            ),
+          ],
+          if (ran.secretAsk != null)
+            _SecretAsk(key: ValueKey(ran.secretAsk!['id']), ask: ran.secretAsk!, onAnswer: onSecret == null ? null : (v) => onSecret!(ran, v))
+          else if (ran.secretAnswer != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              ran.secretAnswer == 'saved'
+                  ? tr('sec.saved')
+                  : ran.secretAnswer == 'declined'
+                  ? tr('sec.declined')
+                  : ran.secretAnswer!,
+              style: TextStyle(fontSize: 11.5, color: C.dim2),
             ),
           ],
           if (ran.approvalId != null) ...[
@@ -431,6 +449,71 @@ class _SentFile extends StatelessWidget {
                 if (files != null) files!([sent.file], false),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// An agent asks for a credential: where it may be used and why, then a password field. What is typed
+/// goes straight to the store — the agent hears only "saved" — so the field never shows it again.
+class _SecretAsk extends StatefulWidget {
+  const _SecretAsk({super.key, required this.ask, required this.onAnswer});
+  final Map<String, Object?> ask;
+  final void Function(String? value)? onAnswer;
+
+  @override
+  State<_SecretAsk> createState() => _SecretAskState();
+}
+
+class _SecretAskState extends State<_SecretAsk> {
+  final _value = TextEditingController();
+
+  @override
+  void dispose() {
+    _value.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final v = _value.text;
+    if (v.isEmpty) return;
+    _value.clear();
+    widget.onAnswer?.call(v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final a = widget.ask;
+    final purpose = '${a['purpose'] ?? ''}';
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(tr('sec.asks', {'name': a['name'] ?? '', 'origin': a['origin'] ?? ''}), style: TextStyle(fontSize: 12, color: C.warn)),
+          if (purpose.isNotEmpty) Text(purpose, style: const TextStyle(fontSize: 12.5)),
+          const SizedBox(height: 6),
+          TextField(
+            controller: _value,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            autofocus: true,
+            onSubmitted: (_) => _save(),
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: tr(a['kind'] == 'login' ? 'sec.typePassword' : 'sec.typeValue'),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            children: [
+              TextButton(onPressed: widget.onAnswer == null ? null : () => widget.onAnswer!(null), child: Text(tr('sec.decline'))),
+              FilledButton(onPressed: widget.onAnswer == null ? null : _save, child: Text(tr('common.save'))),
+            ],
           ),
         ],
       ),
