@@ -35,7 +35,7 @@ the product does not run on dsh; it uses its own agent loop (`web/server.mjs`).
 2.6–2.11 are kept because the dsh source-code findings in them still hold and will be needed the day
 we plug in the runtime.
 
-**For the current shape see 2.12, 2.18, 2.31** (background tasks), **2.32** (files), **2.33–2.35** (Android, HTTPS, notifications), **2.37** (voice): PostgreSQL + one container per Agent + one-command
+**For the current shape see 2.12, 2.18, 2.31** (background tasks), **2.32** (files), **2.33–2.35** (Android, HTTPS, notifications), **2.37** (voice, calls), **2.38** (desktop, files), **2.39** (side effects across restarts): PostgreSQL + one container per Agent + one-command
 compose deployment.
 
 **Branch `feat/studio` (2026-09-25, not merged by the boss's decision)** turns the product into an AI
@@ -173,11 +173,14 @@ source, not the README:
   (cost is recorded per call, nothing limits on it); the default **Team computer is one container for every bot in
   a space** (same user, files, X11 — their own docs say it is not a boundary); phone push only through Expo's hosted
   service (`exp.host` → FCM/APNs), so none where Google is unavailable.
-- **Same as us, not a difference** (I first listed these as their weaknesses — wrong): egress open by default, LAN
-  and 169.254.169.254 included (they at least ship an opt-in `restrict-computer-egress.sh`; we have nothing); no web
-  push (both only notify while a tab is open).
-- Theirs is better on one isolation point: the computer runs as uid 1000 with no capabilities; ours is root with a
-  reduced set.
+- **Same as us, not a difference** (I first listed it as their weakness — wrong): no web push (both only notify
+  while a tab is open).
+- **Closed since** (2.36–2.39, 2026-10-09 → 10-11): fallback models, secrets the model never sees, steering
+  (interjecting) mid-turn, a scripted-model e2e harness, uid 1000 with no capabilities, LAN / host / metadata egress
+  blocked by default (they only ship an opt-in script), voice incl. calls, a graphical desktop + terminal + file
+  browser per agent, no repeated side effects after a restart + Idempotency-Key. **Still ahead of us, in scope**:
+  subscription sign-in for models, Ollama / LM Studio presets (we take any OpenAI-style URL, but ship no presets —
+  3.1), a reconciler with run leases (we have one process), iOS.
 
 ## 2.7 So what's left — after checking one by one, only one and a half items
 
@@ -2217,7 +2220,7 @@ output masked; validation; tasks get no request_secret. `app/test/secret_test.da
 
 ### 2.36.8 Agents as an ordinary user, kept off the host and the LAN
 
-- **Image `multi-agent-worker:3`**: user `agent` (uid 1000, home `/work`), `iptables` (for the egress helper
+- **Image `multi-agent-worker:3`** (`:4` since 2.38, + the desktop): user `agent` (uid 1000, home `/work`), `iptables` (for the egress helper
   below), `/etc/profile.d/agent-path.sh` (⚠️ commands run in `bash -lc`, and Debian's `/etc/profile` **resets
   PATH** — an `ENV PATH` in the image is lost there), `PIP_USER=1 PIP_BREAK_SYSTEM_PACKAGES=1`,
   `NPM_CONFIG_PREFIX=/work/.npm-global`. `AGENT_IMAGE=multi-agent-worker:1/2` in an old .env is taken as :3.
@@ -2293,14 +2296,13 @@ Android first, the device's own speech by default and an upstream as the option.
   script — a Chinese sentence gets a Chinese voice whatever the interface is — and each agent gets its own pitch/pace.
 - **Web** (`web/speech.js`): mic in the composer (Enter while it listens sends what was heard, Esc throws it away),
   🔊 on each agent message, a read-aloud toggle and a call button in the header, the call overlay (`#call`).
-  Talking over the agent cuts in **only on an upstream voice**: echo cancellation removes sound the page plays, and
-  a device voice is played by the OS — the mic would hear the agent interrupt itself. Otherwise tap / Space.
-  Firefox has no recognizer: the page says to pick an upstream.
+  Talking over the agent: see 2.37.1. Tap / Space always works. Firefox has no recognizer: the page says to pick
+  an upstream.
 - **Android**: `VoiceBridge.kt` over channel `cirraya/voice` (recognizer, TTS, `AudioRecord` → WAV with the web's
   silence rule, `MediaPlayer`); RECORD_AUDIO is asked on the first tap. ⚠️ **Since Android 11 the recognizer and
   TTS are invisible without `<queries>`** for `RecognitionService` / `TTS_SERVICE`. The call button takes Send's
-  place while the box is empty (a phone header has no room left); voice settings are a footer icon. No cutting in by
-  voice on Android (tap). Desktop Flutter has no voice (no plugin).
+  place while the box is empty (a phone header has no room left); voice settings are a footer icon. Cutting in by
+  voice only with device recognition (2.37.1); with an upstream recognizer, tap. Desktop Flutter has no voice (no plugin).
 - **A call**: listen → send (into the turn at work, if any) → read the answer → listen. Cutting in leaves the rest
   of that answer unread until the interjection reaches the turn. A passing recognizer error is retried; three in a
   row, or a missing permission / recognizer / language, ends the call with a message.
@@ -2325,7 +2327,96 @@ Lin on the real model (France → "Paris", 3 + 4 → "7"); one segmented session
 whole sentence heard; two dictated sentences joined; the upstream path against the box's fake (`/tmp/cbfake.mjs`
 answers `/audio/*` now): a 269 KB WAV uploaded, the reply's audio played by MediaPlayer to the last frame.
 **Not verified**: a real upstream's speech (66hxhx has no audio endpoints — 404); cutting in by voice on real
-speakers on the web; Safari; iOS and desktop have no voice.
+speakers (2.37.1); Safari; iOS and desktop have no voice.
+
+### 2.37.1 Calls: talking over the agent, tones, hanging up, one card (2026-10-11)
+
+From the second Rakazo comparison, the boss: 「1 2 3 4做一下」 (items 1–4 of my recommendations: this, 2.38, 2.39).
+
+- **Cutting in on a device voice**: the OS plays it, so no echo cancellation removes it and the recognizer hears the
+  agent. So what is heard is compared with what was said aloud in the last 30 s (`SpokenMemory` in `web/voice.mjs`,
+  twin in `app/lib/data/voice.dart`): tokens are words, or **character pairs for CJK** (single characters like 的 / 是
+  repeat in any two sentences). While it speaks, a share ≥ 0.4 of agent words = echo, dropped. Not echo and ≥ 2
+  words (CJK counts two characters a word) cuts in — an interim must stay that way for 300 ms (it is still being
+  revised); a final one also cuts in on an interruption word alone (stop / wait / 等等 / 别说了 …). The recognizer keeps
+  listening while the agent speaks (web `textBarge`, Android `canBargeIn` = device recognition).
+- With an upstream recognizer **and** an upstream voice the web still cuts in by loudness (`loudBarge`; the page plays
+  the audio, so echo cancellation works). An upstream recognizer on Android: tap.
+- **Tones**: connect (rising two notes), a soft pulse every 1.8 s while the agent thinks, hang-up (falling). Web:
+  WebAudio oscillators (`callSound`); Android: `ToneGenerator` (two volumes, `VoiceBridge.tone`).
+- **The agent can hang up**: tool `end_call {farewell, title}`, offered only in a call turn (the chat body carries
+  `call: {id}`; the system prompt gets a voice-call section: short spoken sentences, no Markdown). The farewell is
+  streamed as the end of the reply (`withFarewell`), then the stream sends `call_end`; the client reads it out and
+  closes. The person hanging up posts `POST /api/calls/end {kind, id, session, call}`.
+- **One card per call**: event rows `{kind:'call', phase:'start'|'end', call, title?}`, each written once
+  (`db.callMarked`). Clients fold everything between start and end into one card (title, length, "N said"), opened by
+  a click; search hits inside a call open its card. The model reads them as `[Platform]` lines (`eventForModel`).
+
+Verified: `test/e2e/calls.test.mjs` (call prompt + end_call + marks once; person hangs up; no end_call outside a
+call), Flutter `voice_controller_test` (barge-in from a fake engine: echo dropped, a different sentence cuts in,
+agent hangs up, cards fold), `voice_layout_test` (card at 277 logical px), web in headless Chromium (stubbed
+engines: echo ignored, cut in, end_call, hang-up card). **Not verified**: a real phone or real speakers — whether
+a device's echo really scores ≥ 0.4 depends on how well its recognizer hears its own voice.
+
+## 2.38 A desktop, a terminal and the files on each agent's machine (2026-10-11)
+
+Item 3 of the same list — the gap to Rakazo that remained after 2.36: a whole graphical desktop, not just a browser.
+
+- **Image `multi-agent-worker:4`**: + xvfb, openbox, xterm, x11-xserver-utils, fonts-dejavu-core, python3-xlib,
+  python3-pil. `:1`/`:2`/`:3` in an old .env are taken as `:4`; old containers are recreated on their next turn.
+- **`deploy/desktopd.py`**, pushed in like browserd (not in the image; `DESKTOPD_UP` checks `command -v Xvfb`, so a
+  container from an older image says "rebuild" instead of failing oddly): Xvfb `:1` 1280×800 + openbox, MJPEG on
+  127.0.0.1:9240 (frames only while someone watches, only when the screen changed), input lines on 9241. The same
+  viewer as the browser (2.22.1/2.22.2) — `SCREENS` in server.mjs, `kind` on the web (`bwKind`) and in
+  `browser_view.dart`; the WebSocket route is `/api/(browser|desktop)/:id/input`. The desktop view hides the address
+  bar / back / reload and has a **Terminal** button (an xterm on the desktop).
+- ⚠️ **Typing Chinese through XTest**: a character the keymap doesn't have goes through one borrowed keycode,
+  remapped each time. Without a 30 ms pause after each remap (and after the key), programs read the mapping late and
+  `中文也可以` comes out as the last character five times. Hence `type_text` is async.
+- Grabbing frames runs in a worker thread on a **second X connection** (`self.g`): one Xlib connection isn't
+  thread-safe, and input stays on the event loop's own.
+- **People**: `POST /api/desktop/:id/act` takes only `start` / `terminal` (anything else a person does goes through the
+  input socket); `shot` / `stream` like the browser's. Watching doesn't start it; `act` always runs `ensureContainer`.
+- **Agents**: tool `computer` (screenshot, click, double/right click, move, drag, scroll, type, key, terminal); every
+  action answers with a screenshot. Programs are started from bash with `DISPLAY=:1`. Gated like the browser
+  (`ACTING_TOOLS`), and a side effect for 2.39 except screenshot / move. The prompt names it only when tools are on.
+- **Files** (side panel, DMs): the agent's desk and its group drives — browse, open (web: the 2.32 preview;
+  client: download and open with the OS app), download, upload into the current folder (never replaces:
+  `a (2).txt`). `GET /api/bots/:id/files?path=`, `GET …/files/get?path=` (served with `servedHeaders`, so HTML stays
+  text), `POST …/files/put?path=&name=` (raw body, `UPLOAD_MAX_MB`). **Everything through `docker exec` as uid 1000**
+  (2.32's rule): the path is resolved inside the container and must land under `/work` or `/groups/<gid>` — and the
+  container only mounts its own groups. Uploads are owned by the agent.
+- ⚠️ `DESK_LIST` is a shell script in a JS template literal: a `\0` there is a NUL byte in the spawn argument
+  (the list came back empty) — it is `\\0`.
+
+Verified on the test box with real containers: image built, desktop started, frames streamed, a person typing
+English and Chinese over the WebSocket into xterm, the `computer` tool driven by the scripted model (click, type,
+key, screenshot back to the model), files listed / uploaded (unique names, owner uid 1000) / downloaded (an `.html`
+as text/plain), `/etc` and a planted link to `/etc` refused. Web over HTTPS in headless Chromium: desktop thumbnail,
+full view, typing a command in its terminal ran it, file list, upload, Markdown preview, zero page errors.
+`test/e2e/desktop.test.mjs`, `app/test/browser_touch_test.dart` (desktop view at 277 logical px). **Not verified**:
+the Android build of these screens on the phone, macOS/Windows.
+
+## 2.39 Side effects are not redone after a restart (2026-10-11)
+
+Item 4. 2.36.6 resumes a turn from its last saved step, so a call that ran (or was running) when the process died
+would be made again — a second `git push`, a second charge.
+
+- **Which calls count** (`hasEffect`, `web/effects.mjs`): bash, send_file, start/answer/cancel_task, browser except
+  reading (open, read, screenshot, back, scroll, reload), computer except screenshot/move, http_request except
+  GET/HEAD/OPTIONS. write_file and install_packages are the same run twice.
+- **The log**: table `effects` (run = `front:<session>` or `task:<id>`, `call_key` = sha256 of name + arguments with
+  sorted keys, `boot` = a uuid per server process, status started → done + result). `runOnce` wraps every tool call
+  in `runAgent`. When a call matches an entry **from an earlier boot**, the log answers instead: its result if done,
+  else "may or may not have finished — check before trying again" (`answerFromLog`); the entry is then consumed, so
+  asking again after checking really runs it.
+- **Idempotency-Key**: `http_request` sends one; the retry of a call whose outcome was unknown reuses the same key,
+  so an API that honours it drops the duplicate.
+- A run that ends normally (answered, failed, stopped) drops its log; startup prunes entries older than 2 days. The
+  restart note (2.36.6) says so.
+
+Verified: `test/e2e/effects.test.mjs` (a POST in flight when the server is SIGKILLed is not sent again and, asked
+again, goes out with the same key; a finished bash answers from the log and runs again in a later turn).
 
 ## 3. What runs now
 
@@ -2342,7 +2433,8 @@ node web/autonomy.mjs      # self-test for auto mode: limits, the plan, nudges
 node web/tasks.mjs         # self-test for background tasks: input, who gets it, what the front thread is told
 node web/files.mjs         # self-test for attachments: types, what they're served as, names, what send_file may read
 node web/secrets.mjs       # self-test for secrets: sealing, origins, masking, internal addresses
-node web/voice.mjs         # self-test for what is read aloud and how a streaming reply is cut into sentences
+node web/voice.mjs         # self-test for what is read aloud, sentences, and echo vs. cutting in on a call
+node web/effects.mjs       # self-test for which tool calls are side effects and what the log answers after a restart
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)
