@@ -18,6 +18,7 @@ export function hasEffect(name, args = {}) {
   switch (name) {
     case 'bash': case 'send_file': case 'start_task': case 'answer_task': case 'cancel_task': return true
     case 'browser': return !READ_ACTIONS.has(String(args.action ?? ''))
+    case 'computer': return !['screenshot', 'move'].includes(String(args.action ?? ''))
     case 'http_request': return !['GET', 'HEAD', 'OPTIONS'].includes(String(args.method || 'GET').toUpperCase())
     default: return false   // write_file and install_packages give the same result run twice; the rest read or talk
   }

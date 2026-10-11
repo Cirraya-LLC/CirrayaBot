@@ -37,7 +37,7 @@ services:
       DATABASE_URL: postgres://multiagent:${POSTGRES_PASSWORD}@db:5432/multiagent
       ACCESS_TOKEN: ${ACCESS_TOKEN:?run ./start.sh first to generate .env}
       AGENT_TOOLS: ${AGENT_TOOLS:-off}
-      AGENT_IMAGE: ${AGENT_IMAGE:-multi-agent-worker:3}
+      AGENT_IMAGE: ${AGENT_IMAGE:-multi-agent-worker:4}
       # where the agent image's apt downloads from when it is built: empty = Debian's own CDN
       AGENT_APT_MIRROR: ${AGENT_APT_MIRROR:-}
       # internet (default): agents reach the internet but not the host or the LAN; open: everything

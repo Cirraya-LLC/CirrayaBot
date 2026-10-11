@@ -277,6 +277,7 @@ This group's shared drive is /groups/${groupId}: everyone in the group sees it. 
 put it there; what colleagues give you is there too. (Other directories under /groups belong to your other groups.)` : ''}
 Commands have a ${EXEC_TIMEOUT / 1000}-second limit; past that we stop waiting (though it may still be running).
 You also have your own browser (the browser tool): open pages, click buttons, fill forms, take screenshots to see the page.
+And a desktop (the computer tool, DISPLAY=:1) for programs that only have a window.
 Files the user sends are copied to ${groupId ? `/groups/${groupId}/inbox` : '/work/inbox'} (the message says where each one is).
 To give the user a file — a report, an image, a document, an archive — make it, then send it with send_file;
 they can preview it right in the conversation. Don't paste a long file into your reply when you can send it.`)
@@ -374,9 +375,9 @@ ${recall.trim()}`)
 // network of ours with container-to-container traffic off, and a short capability list.
 // The platform's code and .env aren't in there; it can't reach them.
 const CLI = env.CONTAINER_CLI || 'docker'
-// The agent image. :1 and :2 (agents ran as root) are named in older .env files; they are taken as
-// the current one, since the container rules now assume the image's `agent` account.
-const IMAGE = !env.AGENT_IMAGE || /^multi-agent-worker:[12]$/.test(env.AGENT_IMAGE) ? 'multi-agent-worker:3' : env.AGENT_IMAGE
+// The agent image. :1 and :2 (agents ran as root) and :3 (no desktop) are named in older .env files;
+// they are taken as the current one, since the container rules and tools assume what it has.
+const IMAGE = !env.AGENT_IMAGE || /^multi-agent-worker:[123]$/.test(env.AGENT_IMAGE) ? 'multi-agent-worker:4' : env.AGENT_IMAGE
 const EXEC_TIMEOUT = Number(env.AGENT_EXEC_TIMEOUT || 120) * 1000
 const OUT_MAX = 12_000
 // Container names are global on the whole host. Two deployments on the same machine that don't change the prefix
@@ -823,6 +824,21 @@ const TOOL_SPECS = [
       secret: { type: 'string', description: 'For fill_secret: the name of one of your login secrets. It is typed into element `index` ' +
         'only while the page is on the site it was saved for — you never see it. submit presses Enter after.' } } } } },
   { type: 'function', function: {
+    name: 'computer',
+    description: 'Use the graphical desktop on your machine (a 1280x800 screen) — for programs that only have a window. ' +
+      'Every action answers with a screenshot of the screen afterwards; coordinates are pixels on that screenshot. ' +
+      'Start a program from bash with DISPLAY=:1 (e.g. `DISPLAY=:1 nohup gimp >/dev/null 2>&1 &`), then use it here. ' +
+      'For web pages prefer the browser tool, for files and commands bash — this is for what neither can do. ' +
+      'The user can watch this desktop and use it themselves (the terminal on it is theirs too).',
+    parameters: { type: 'object', required: ['action'], properties: {
+      action: { type: 'string', enum: ['screenshot', 'click', 'double_click', 'right_click', 'move', 'drag', 'scroll', 'type', 'key', 'terminal'] },
+      x: { type: 'integer', description: 'Pixels from the left (click, move, drag start, scroll)' },
+      y: { type: 'integer', description: 'Pixels from the top' },
+      to_x: { type: 'integer', description: 'For drag: where to let go' }, to_y: { type: 'integer' },
+      dy: { type: 'integer', description: 'For scroll: steps, positive = down' },
+      text: { type: 'string', description: 'For type: the text, typed into whatever has focus' },
+      keys: { type: 'string', description: 'For key: e.g. Return, ctrl+c, alt+F4, shift+Tab' } } } } },
+  { type: 'function', function: {
     name: 'http_request',
     description: 'An HTTPS request sent by the platform — the way to call an API with one of your secrets (secret = its name): the ' +
       'platform adds the credential, only for the site it was saved for, and you never see it. Without a secret it is a plain ' +
@@ -940,6 +956,90 @@ for i in $(seq 60); do curl -sf http://127.0.0.1:9230/ >/dev/null && exit 0; sle
 tail -n 20 /tmp/browserd.log; exit 1
 `
 
+// ── The desktop: desktopd.py, pushed in and started on demand, like the browser daemon ──
+const DESKTOPD = await readFile(join(ROOT, 'deploy', 'desktopd.py'), 'utf8')
+const DESKTOPD_UP = `
+cat > /tmp/desktopd.new
+if ! cmp -s /tmp/desktopd.new /tmp/desktopd.py; then
+  mv /tmp/desktopd.new /tmp/desktopd.py
+  if [ -f /tmp/desktopd.pid ]; then kill "$(cat /tmp/desktopd.pid)" 2>/dev/null; sleep 1; fi
+  rm -f /tmp/desktopd.pid
+fi
+curl -sf http://127.0.0.1:9240/ >/dev/null && exit 0
+command -v Xvfb >/dev/null || { echo "this machine's image has no desktop (old image)"; exit 3; }
+setsid nohup python3 /tmp/desktopd.py >/tmp/desktopd.log 2>&1 </dev/null &
+echo $! > /tmp/desktopd.pid
+for i in $(seq 60); do curl -sf http://127.0.0.1:9240/ >/dev/null && exit 0; sleep 0.5; done
+tail -n 20 /tmp/desktopd.log; exit 1
+`
+// The two screens an agent has, as the routes and the input socket see them.
+const SCREENS = {
+  browser: { daemon: () => BROWSERD, up: () => BROWSERD_UP, port: 9230 },
+  desktop: { daemon: () => DESKTOPD, up: () => DESKTOPD_UP, port: 9240 },
+}
+
+async function desktopPost(c, args, lang = 'en') {
+  const r = await cliRun(['exec', '-i', c, 'curl', '-s', '--max-time', '30', '-X', 'POST',
+    '-H', 'content-type: application/json', '--data-binary', '@-', 'http://127.0.0.1:9240/'], JSON.stringify(args), 40_000)
+  try { return JSON.parse(r.out) } catch { return { ok: false, error: tr(lang, 'desktop.noResponse', { detail: (r.err || r.out).trim().slice(0, 200) }) } }
+}
+
+/** Start the desktop if it isn't running (and swap in a changed daemon). '' when it is up, else why not. */
+async function desktopUp(c) {
+  const up = await execIn(c, ['-i', c, 'bash', '-c', DESKTOPD_UP], DESKTOPD)
+  return up.code === 0 ? '' : (up.out + up.err).trim().slice(-600) || `exit ${up.code}`
+}
+
+/** The agent's computer tool: one action on its desktop, answered with a screenshot. */
+async function runComputer(c, args, ctx) {
+  const why = await desktopUp(c)
+  if (why) return `The desktop would not start: ${why}`
+  const j = await desktopPost(c, args)
+  if (!j.ok) return `Desktop error: ${j.error}`
+  const done = args.action === 'screenshot' ? 'The screen' : `Done (${args.action}). The screen now`
+  return ctx.noImages
+    ? `${done} — but the current model can't see images. Use bash for what you can.`
+    : { text: `${done} is attached to the next message (${j.width}x${j.height}).`, image: `data:image/jpeg;base64,${j.image}` }
+}
+
+// ── A person browsing an agent's files: its desk (/work) and the group drives it has ──
+// Everything goes through `docker exec` as the agent — never the host path of its desk, which would follow
+// any link it planted (2.32). A path must resolve, inside the container, under /work or /groups/<gid>.
+const DESK_ROOTS = `case "$r" in /work|/work/*|/groups/?*) ;; *) echo "ERR outside"; exit 0;; esac`
+const DESK_LIST = `
+r=$(realpath -e -- "$1" 2>/dev/null) || { echo "ERR missing"; exit 0; }
+${DESK_ROOTS}
+[ -d "$r" ] || { echo "ERR notdir"; exit 0; }
+printf 'OK %s\\0' "$r"
+find "$r" -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T@\\t%f\\0' 2>/dev/null | head -z -n 2000
+`
+const DESK_STAT = `
+r=$(realpath -e -- "$1" 2>/dev/null) || { echo "ERR missing"; exit 0; }
+${DESK_ROOTS}
+[ -f "$r" ] || { echo "ERR notfile"; exit 0; }
+printf 'OK %s\t%s' "$(stat -c %s -- "$r")" "$r"
+`
+// A new file never replaces one: "a.txt" → "a (2).txt". A dangling link counts as taken.
+const DESK_PUT = `
+r=$(realpath -e -- "$1" 2>/dev/null) || { echo "ERR missing"; exit 0; }
+${DESK_ROOTS}
+[ -d "$r" ] || { echo "ERR notdir"; exit 0; }
+n="$2"; base="\${n%.*}"; ext=""
+if [ "$base" != "$n" ] && [ -n "$base" ]; then ext=".\${n##*.}"; else base="$n"; fi
+f="$r/$n"; i=2
+while [ -e "$f" ] || [ -L "$f" ]; do f="$r/$base ($i)$ext"; i=$((i+1)); done
+cat > "$f" || { echo "ERR write"; exit 0; }
+printf 'OK %s' "$f"
+`
+const DESK_ERR = { missing: [404, 'files.missing'], outside: [400, 'files.outside'], notdir: [400, 'files.notDir'],
+  notfile: [400, 'files.notFile'], write: [500, 'files.cantWrite'] }
+function deskAnswer(out) {
+  const m = /^ERR (\w+)/.exec(out)
+  if (m) { const [code, key] = DESK_ERR[m[1]] ?? [500, 'files.cantWrite']; throw new Say(key, {}, code) }
+  if (!out.startsWith('OK ')) throw new Say('files.cantWrite', {}, 502)
+  return out.slice(3)
+}
+
 // ── A human watching / taking over an agent's browser ──
 // Watching (screenshots) only works when his browser is already open: just looking shouldn't start chromium for him.
 // Taking over (actions) starts it when needed — the human has to log in first so the agent can carry on.
@@ -1029,12 +1129,12 @@ async function voiceFailed(r, base) {
     : new Say('voice.upstreamFailed', { status: r.status, detail }, 424)
 }
 /** The request body as bytes, refused past `max` (413) rather than read whole. */
-async function readBytes(req, max) {
+async function readBytes(req, max, tooBig = () => new Say('voice.tooBig', { mb: Math.round(max / 1048576) }, 413)) {
   const parts = []
   let size = 0
   for await (const c of req) {
     size += c.length
-    if (size > max) throw new Say('voice.tooBig', { mb: Math.round(max / 1048576) }, 413)
+    if (size > max) throw tooBig()
     parts.push(c)
   }
   return Buffer.concat(parts)
@@ -1263,6 +1363,7 @@ async function runToolRaw(name, args, ctx) {
   if (name === 'request_secret') return requestSecret(ctx, args)
   if (name === 'browser' && args.action === 'fill_secret') return fillSecret(c, args, ctx)
   if (name === 'browser') return runBrowser(c, args, ctx)
+  if (name === 'computer') return runComputer(c, args, ctx)
   if (name === 'read_skill') {
     const mine = await db.skillsFor(ctx.bot.id)
     const k = mine.find(x => x.name.toLowerCase() === String(args.name ?? '').trim().toLowerCase())
@@ -2697,6 +2798,84 @@ const server = createServer(async (req, res) => {
       if (bw[2] === 'act' && req.method === 'POST') return send(200, await humanBrowserAct(bw[1], await readBody(req), lang))
     }
 
+    // ---- An agent's desktop: watching it, using it (start, a new terminal); input goes over the socket ----
+    const dk = url.pathname.match(/^\/api\/desktop\/([a-z0-9-]+)\/(shot|act|stream)$/)
+    if (dk) {
+      if (!await db.getAgent(dk[1])) return send(404, { error: t('err.noAgent') })
+      if (!CFG.tools) return send(400, { error: t('browser.toolsOff') })
+      const c = cname(dk[1])
+      const alive = async () => (await cliRun(['exec', c, 'curl', '-sf', 'http://127.0.0.1:9240/'], null, 10_000)).code === 0
+      if (dk[2] === 'stream' && req.method === 'GET') {
+        if (!await alive()) { res.writeHead(204); return res.end() }
+        await desktopUp(c)                       // a changed daemon is swapped in (no-op otherwise)
+        const pidFile = `/tmp/dstream-${process.pid}-${Date.now().toString(36)}.pid`
+        const child = spawn(CLI, ['exec', c, 'sh', '-c', `echo $$ > ${pidFile}; exec curl -sN http://127.0.0.1:9240/stream`],
+          { stdio: ['ignore', 'pipe', 'ignore'] })
+        res.writeHead(200, { 'content-type': 'multipart/x-mixed-replace; boundary=frame', 'cache-control': 'no-store' })
+        child.stdout.pipe(res)
+        res.on('close', () => {
+          child.kill('SIGKILL')
+          cliRun(['exec', c, 'sh', '-c', `kill $(cat ${pidFile}) 2>/dev/null; rm -f ${pidFile}`], null, 10_000)
+        })
+        child.on('close', () => res.end())
+        return
+      }
+      if (dk[2] === 'shot' && req.method === 'GET') {
+        if (!await alive()) { res.writeHead(204); return res.end() }
+        const j = await desktopPost(c, { action: 'screenshot' }, lang)
+        if (!j.ok || !j.image) return send(502, { error: j.error ?? t('browser.noShot') })
+        res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store', 'x-page-title': 'Desktop' })
+        return res.end(Buffer.from(j.image, 'base64'))
+      }
+      if (dk[2] === 'act' && req.method === 'POST') {
+        // A person opening the desktop, or another terminal on it. Everything else is the input socket.
+        const action = str((await readBody(req)).action)
+        if (!['start', 'terminal'].includes(action)) return send(400, { error: t('browser.badAction', { action }) })
+        await ensureContainer(dk[1], null)       // running, and on the current image (an old one has no desktop)
+        const why = await desktopUp(c)
+        if (why) return send(502, { error: t('desktop.cantStart', { detail: why }) })
+        if (action === 'terminal') await desktopPost(c, { action: 'terminal' }, lang)
+        return send(200, { ok: true })
+      }
+    }
+
+    // ---- An agent's files: list a folder, fetch a file, put one in ----
+    const df = url.pathname.match(/^\/api\/bots\/([a-z0-9-]+)\/files(?:\/(get|put))?$/)
+    if (df) {
+      if (!await db.getAgent(df[1])) return send(404, { error: t('err.noAgent') })
+      if (!CFG.tools) return send(400, { error: t('browser.toolsOff') })
+      const c = cname(df[1])
+      await ensureContainer(df[1], null)
+      if (!df[2] && req.method === 'GET') {
+        const r = await execIn(c, [c, 'bash', '-c', DESK_LIST, '_', str(url.searchParams.get('path') || '/work')])
+        const [head, ...rows] = r.out.split('\0')
+        const path = deskAnswer(head)
+        const kinds = { d: 'dir', f: 'file', l: 'link' }
+        const entries = rows.filter(Boolean).map(row => {
+          const [y, size, mtime, ...name] = row.split('\t')
+          return { name: name.join('\t'), type: kinds[y] ?? 'other', size: Number(size) || 0, mtime: Math.round(Number(mtime) * 1000) || 0 }
+        }).sort((a, b) => (a.type !== 'dir') - (b.type !== 'dir') || a.name.localeCompare(b.name))
+        return send(200, { path, entries })
+      }
+      if (df[2] === 'get' && req.method === 'GET') {
+        const r = await execIn(c, [c, 'bash', '-c', DESK_STAT, '_', str(url.searchParams.get('path'))])
+        const [size, path] = deskAnswer(r.out).split('\t')
+        const name = path.split('/').pop()
+        res.writeHead(200, { ...servedHeaders({ name, mime: mimeOf(name) }, url.searchParams.get('download') === '1'),
+          'content-length': Number(size) })
+        const child = spawn(CLI, ['exec', c, 'cat', '--', path], { stdio: ['ignore', 'pipe', 'ignore'] })
+        child.stdout.pipe(res)
+        res.on('close', () => child.kill('SIGKILL'))
+        return
+      }
+      if (df[2] === 'put' && req.method === 'POST') {
+        const body = await readBytes(req, UPLOAD_MAX, () => new Say('file.tooBig', { max: sizeText(UPLOAD_MAX) }, 413))
+        const r = await cliRun(['exec', '-i', c, 'bash', '-c', DESK_PUT, '_', str(url.searchParams.get('dir') || '/work'),
+          safeName(url.searchParams.get('name'))], body, 300_000)
+        return send(200, { path: deskAnswer(r.out) })
+      }
+    }
+
     // ---- Skill library ----
     if (url.pathname === '/api/skills' && req.method === 'GET') return send(200, await db.listSkills())
     if (url.pathname === '/api/skills' && req.method === 'POST') {
@@ -3338,17 +3517,18 @@ function cleanInput(raw) {
 
 server.on('upgrade', async (req, socket) => {
   const url = new URL(req.url, 'http://x')
-  const m = url.pathname.match(/^\/api\/browser\/([a-z0-9-]+)\/input$/)
+  const m = url.pathname.match(/^\/api\/(browser|desktop)\/([a-z0-9-]+)\/input$/)
   const refuse = code => socket.end(`HTTP/1.1 ${code}\r\nconnection: close\r\n\r\n`)
   socket.on('error', () => {})
   if (!m || !req.headers['sec-websocket-key']) return refuse('404 Not Found')
   if (!authed(req, url)) return refuse('401 Unauthorized')
-  if (!CFG.tools || !await db.getAgent(m[1])) return refuse('404 Not Found')
+  if (!CFG.tools || !await db.getAgent(m[2])) return refuse('404 Not Found')
+  const screen = SCREENS[m[1]]
   const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`)
 
   // The channel connects in the background; events arriving before that are queued, not dropped
-  const c = cname(m[1]), pending = []
+  const c = cname(m[2]), pending = []
   let child = null, closed = false
   const pidFile = `/tmp/input-${process.pid}-${Date.now().toString(36)}.pid`
   const send = line => { if (child) child.stdin.write(line + '\n'); else pending.push(line) }
@@ -3363,11 +3543,11 @@ server.on('upgrade', async (req, socket) => {
   }
   ;(async () => {
     if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
-      await ensureContainer(m[1], null)
-    const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
+      await ensureContainer(m[2], null)
+    const up = await execIn(c, ['-i', c, 'bash', '-c', screen.up()], screen.daemon())
     if (up.code !== 0 || closed) return close()
     // After exec, cat keeps bash's pid, so $$ is the one to kill
-    child = spawn(CLI, ['exec', '-i', c, 'bash', '-c', `echo $$ > ${pidFile}; exec 3<>/dev/tcp/127.0.0.1/9231; exec cat >&3`],
+    child = spawn(CLI, ['exec', '-i', c, 'bash', '-c', `echo $$ > ${pidFile}; exec 3<>/dev/tcp/127.0.0.1/${screen.port + 1}; exec cat >&3`],
       { stdio: ['pipe', 'ignore', 'ignore'] })
     child.on('close', close)
     child.stdin.on('error', () => {})
