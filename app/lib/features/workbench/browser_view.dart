@@ -35,6 +35,9 @@ mixin _ShotPoller<T extends StatefulWidget> on State<T> {
   String get agentId;
   Duration get every;
 
+  /// `browser`, or `desktop`: the same picture, from the agent's desktop.
+  String get kind => 'browser';
+
   _Shot? shot;
   bool loaded = false;
   bool streaming = false;
@@ -58,7 +61,7 @@ mixin _ShotPoller<T extends StatefulWidget> on State<T> {
   void _connect() {
     if (_live != null) return;
     _live = api
-        .browserStream(agentId)
+        .browserStream(agentId, kind: kind)
         .listen(
           (s) {
             if (!mounted) return;
@@ -88,7 +91,7 @@ mixin _ShotPoller<T extends StatefulWidget> on State<T> {
     if (_inFlight) return;
     _inFlight = true;
     try {
-      final s = await api.browserShot(agentId);
+      final s = await api.browserShot(agentId, kind: kind);
       if (!mounted) return;
       setState(() {
         shot = s;
@@ -118,6 +121,7 @@ class BrowserThumb extends StatefulWidget {
     required this.agentId,
     required this.name,
     this.hideWhenOff = false,
+    this.kind = 'browser',
   });
   final Api api;
   final String agentId;
@@ -125,6 +129,9 @@ class BrowserThumb extends StatefulWidget {
 
   /// In a group only the members whose browser is open are worth a tile.
   final bool hideWhenOff;
+
+  /// `browser`, or `desktop`.
+  final String kind;
 
   @override
   State<BrowserThumb> createState() => _BrowserThumbState();
@@ -135,6 +142,8 @@ class _BrowserThumbState extends State<BrowserThumb> with _ShotPoller {
   Api get api => widget.api;
   @override
   String get agentId => widget.agentId;
+  @override
+  String get kind => widget.kind;
   @override
   Duration get every => const Duration(seconds: 3);
 
@@ -147,7 +156,7 @@ class _BrowserThumbState extends State<BrowserThumb> with _ShotPoller {
   Future<void> _open() async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => BrowserPage(api: widget.api, agentId: widget.agentId, name: widget.name),
+        builder: (_) => BrowserPage(api: widget.api, agentId: widget.agentId, name: widget.name, kind: widget.kind),
       ),
     );
     refresh();
@@ -163,11 +172,11 @@ class _BrowserThumbState extends State<BrowserThumb> with _ShotPoller {
         child: Row(
           children: [
             Expanded(
-              child: Text(tr('br.notOpen'), style: TextStyle(fontSize: 12, color: C.dim2)),
+              child: Text(tr(kind == 'desktop' ? 'dk.notOn' : 'br.notOpen'), style: TextStyle(fontSize: 12, color: C.dim2)),
             ),
             TextButton(
               onPressed: _open,
-              child: Text(tr('br.open'), style: const TextStyle(fontSize: 12)),
+              child: Text(tr(kind == 'desktop' ? 'dk.open' : 'br.open'), style: const TextStyle(fontSize: 12)),
             ),
           ],
         ),
@@ -176,7 +185,7 @@ class _BrowserThumbState extends State<BrowserThumb> with _ShotPoller {
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
       child: Tooltip(
-        message: tr('br.takeOver', {'name': widget.name}),
+        message: tr(kind == 'desktop' ? 'dk.use' : 'br.takeOver', {'name': widget.name}),
         child: InkWell(
           onTap: _open,
           borderRadius: BorderRadius.circular(8),
@@ -223,10 +232,14 @@ class BrowserPage extends StatefulWidget {
     required this.name,
     this.debugShot,
     this.debugInput,
+    this.kind = 'browser',
   });
   final Api api;
   final String agentId;
   final String name;
+
+  /// `browser`, or `desktop` — no address bar there, and a way to open another terminal.
+  final String kind;
 
   /// Tests: start on this picture instead of waiting for the server.
   @visibleForTesting
@@ -274,6 +287,9 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
   @override
   String get agentId => widget.agentId;
   @override
+  String get kind => widget.kind;
+  bool get _desk => widget.kind == 'desktop';
+  @override
   Duration get every => const Duration(milliseconds: 1200);
 
   final _address = TextEditingController();
@@ -299,15 +315,22 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
       shot = widget.debugShot;
       loaded = true;
     }
-    startPolling();
     _ime.addListener(_onIme);
     _keys.addListener(() => setState(() {}));
-    if (widget.debugInput == null) _connectInput();
+    // The desktop runs only once someone opens it (or the agent uses it): start it, then watch.
+    if (_desk && widget.debugShot == null) {
+      _act({'action': 'start'}).then((_) {
+        if (mounted) startPolling();
+      });
+    } else {
+      startPolling();
+      if (widget.debugInput == null) _connectInput();
+    }
   }
 
   Future<void> _connectInput() async {
     try {
-      final ws = await widget.api.browserInput(widget.agentId);
+      final ws = await widget.api.browserInput(widget.agentId, kind: widget.kind);
       if (!mounted) {
         await ws.close();
         return;
@@ -357,7 +380,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
     final ws = _ws;
     if (ws != null) {
       ws.add(jsonEncode(e));
-    } else if (e['t'] == 'down') {
+    } else if (e['t'] == 'down' && !_desk) {
       // No input channel (older server, blocked WebSocket): a click still works.
       _act({'action': 'click_xy', 'x': e['x'], 'y': e['y']});
     }
@@ -369,7 +392,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
       error = '';
     });
     try {
-      await widget.api.browserAct(widget.agentId, action);
+      await widget.api.browserAct(widget.agentId, action, kind: widget.kind);
       // The browser may have just been started by this: now there is something to stream.
       if (_ws == null) _connectInput();
     } on ApiException catch (e) {
@@ -571,7 +594,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
           children: [
             Flexible(
               child: Text(
-                tr('br.title', {'name': widget.name}),
+                tr(_desk ? 'dk.title' : 'br.title', {'name': widget.name}),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 14.5),
@@ -589,22 +612,30 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: tr('br.back'),
-            onPressed: _busy || s == null ? null : () => _act({'action': 'back'}),
-            icon: const Icon(Icons.arrow_back_ios_new, size: 16),
-          ),
-          IconButton(
-            tooltip: tr('common.refresh'),
-            onPressed: _busy || s == null ? null : () => _act({'action': 'reload'}),
-            icon: const Icon(Icons.refresh, size: 18),
-          ),
+          if (_desk)
+            IconButton(
+              tooltip: tr('dk.terminal'),
+              onPressed: _busy ? null : () => _act({'action': 'terminal'}),
+              icon: const Icon(Icons.terminal, size: 18),
+            )
+          else ...[
+            IconButton(
+              tooltip: tr('br.back'),
+              onPressed: _busy || s == null ? null : () => _act({'action': 'back'}),
+              icon: const Icon(Icons.arrow_back_ios_new, size: 16),
+            ),
+            IconButton(
+              tooltip: tr('common.refresh'),
+              onPressed: _busy || s == null ? null : () => _act({'action': 'reload'}),
+              icon: const Icon(Icons.refresh, size: 18),
+            ),
+          ],
           const SizedBox(width: 8),
         ],
       ),
       body: Column(
         children: [
-          Padding(
+          if (_desk) const SizedBox(height: 8) else Padding(
             padding: EdgeInsets.fromLTRB(side, 10, side, 8),
             child: Row(
               children: [

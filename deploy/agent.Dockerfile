@@ -28,6 +28,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 ENV CHROMIUM=/usr/bin/chromium
 
+# A desktop of its own: a screen for GUI programs and a terminal, which the person can watch and use
+# (desktopd.py, pushed in and started on demand like browserd.py — nothing runs until it is opened).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xvfb openbox xterm x11-xserver-utils fonts-dejavu-core python3-xlib python3-pil \
+ && rm -rf /var/lib/apt/lists/*
+
 # The Agent's account. Its home is its desk, so what it installs for itself (pip --user, npm -g)
 # lands in /work and survives the container being recreated.
 RUN useradd --uid 1000 --home-dir /work --no-create-home --shell /bin/bash agent \

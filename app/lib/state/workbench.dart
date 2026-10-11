@@ -986,6 +986,11 @@ class Workbench extends ChangeNotifier {
     'browser' => tr('tool.browser', {'what': _browserLabel(args)}),
     'http_request' => '${'${args['method'] ?? 'GET'}'.toUpperCase()} ${args['url'] ?? ''}${args['secret'] != null ? '  · ${args['secret']}' : ''}',
     'request_secret' => tr('tool.requestSecret', {'name': args['name'] ?? ''}),
+    'computer' => tr('tool.computer', {
+      'what': [args['action'], args['keys'] ?? (args['text'] != null ? '"${args['text']}"' : null), args['x'] != null ? '${args['x']},${args['y']}' : null]
+          .whereType<Object>()
+          .join(' '),
+    }),
     _ => '$tool',
   };
 
@@ -1026,8 +1031,18 @@ class Workbench extends ChangeNotifier {
     return tr('tool.plan', {'done': done, 'n': steps.length});
   }
 
+  /// Work still in flight when this is dropped (a reply finishing after the server was switched, a call
+  /// ending) has no one left to tell: it must not throw for trying.
+  bool _disposed = false;
+
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
+
   @override
   void dispose() {
+    _disposed = true;
     _poller.cancel();
     _runTimer?.cancel();
     _taskTimer?.cancel();

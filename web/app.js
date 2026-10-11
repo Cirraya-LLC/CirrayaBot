@@ -297,7 +297,7 @@ async function openConv(c) {
   loadRoutines()
   loadBotSkills()
   loadBotSecrets()
-  loadBrowsers()
+  loadBrowsers(); loadDesktop()
   TASKS = []; taskSig = ''; openTask = null; renderTasks()
 
   await loadSessions(c)
@@ -626,6 +626,8 @@ function toolLabel(name, args = {}) {
   }
   if (name === 'http_request') return `${String(args.method || 'GET').toUpperCase()} ${args.url ?? ''}${args.secret ? `  · ${args.secret}` : ''}`
   if (name === 'request_secret') return t('tool.requestSecret', { name: args.name ?? '' })
+  if (name === 'computer') return t('tool.computer', { what: [args.action, args.keys ?? (args.text != null ? quote(args.text) : ''),
+    args.x != null ? `${args.x},${args.y}` : ''].filter(Boolean).join(' ') })
   return name === 'bash' ? args.command
     : name === 'read_file' ? t('tool.read', { path: args.path })
     : name === 'write_file' ? t('tool.write', { path: args.path })
@@ -1865,7 +1867,8 @@ function browserLabel(a) {
 // ═══ Agent browser: watch + take over ═══
 // The view is MJPEG from Chromium's screencast, which <img> plays natively. With no browser open the
 // server answers 204 and the image fails; retry every few seconds (it shows up once they open one).
-const bwStream = id => withLang(api(`/api/browser/${id}/stream`)) + `&t=${Date.now()}`
+const screenStream = (kind, id) => withLang(api(`/api/${kind}/${id}/stream`)) + `&t=${Date.now()}`
+const bwStream = id => screenStream('browser', id)
 let bwTimers = []
 function loadBrowsers() {
   bwTimers.forEach(clearTimeout); bwTimers = []
@@ -1893,26 +1896,128 @@ function loadBrowsers() {
   }
 }
 
+// ═══ The agent's desktop and files (one agent: shown in its DM) ═══
+// The desktop is a screen of its own (desktopd.py): watched and used through the same viewer as the
+// browser. Nothing runs until someone opens it — or the agent uses its computer tool.
+function loadDesktop() {
+  const solo = cur?.kind === 'agent'
+  $('#s2desk').hidden = $('#s2files').hidden = !solo
+  const box = $('#dks'); box.innerHTML = ''
+  if (!solo) return
+  const c = cur, b = bot(c.id); if (!b) return
+  const el = document.createElement('div')
+  const show = () => {
+    el.className = 'bw'
+    el.innerHTML = `<img alt="${esc(t('dk.altNamed', { name: b.name }))}"><small>${esc(t('dk.use'))}</small>`
+    const img = el.querySelector('img')
+    img.onerror = () => { if (cur !== c) return; off(); bwTimers.push(setTimeout(show, 8000)) }
+    img.src = screenStream('desktop', b.id)
+    el.onclick = () => openScreen(b, 'desktop')
+  }
+  const off = () => {
+    el.className = 'bwoff'; el.innerHTML = `${esc(t('dk.notOn'))} <button class="btn">${esc(t('dk.open'))}</button>`
+    el.querySelector('button').onclick = e => { e.stopPropagation(); openScreen(b, 'desktop') }
+  }
+  show(); box.appendChild(el)
+  loadFiles('/work')
+}
+
+/** A file on the agent's machine, shaped for the preview. */
+const DESK_KINDS = { image: /\.(png|jpe?g|gif|webp|bmp)$/i, video: /\.(mp4|webm|mov|m4v)$/i, audio: /\.(mp3|wav|ogg|m4a|flac)$/i,
+  pdf: /\.pdf$/i, markdown: /\.(md|markdown)$/i,
+  text: /\.(txt|log|csv|tsv|json|jsonl|ya?ml|toml|ini|conf|cfg|env|xml|html?|css|m?js|ts|tsx|jsx|py|sh|bash|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sql|swift|lua|r|pl|diff|patch)$|^[^.]*$/i }
+function deskFile(id, dir, e) {
+  const path = `${dir}/${e.name}`
+  const u = dl => api(`/api/bots/${id}/files/get?path=${encodeURIComponent(path)}${dl ? '&download=1' : ''}`)
+  const kind = Object.keys(DESK_KINDS).find(k => DESK_KINDS[k].test(e.name)) ?? 'other'
+  return { name: e.name, size: e.size, mime: dir, kind, url: u(false), dlUrl: u(true) }
+}
+
+let deskPath = '/work'
+async function loadFiles(path = deskPath) {
+  if (cur?.kind !== 'agent') return
+  const c = cur
+  const r = await fetch(api(`/api/bots/${c.id}/files?path=${encodeURIComponent(path)}`)).catch(() => null)
+  if (cur !== c) return
+  const list = $('#dflist'), crumbs = $('#dfpath')
+  if (!r?.ok) { crumbs.innerHTML = ''; list.innerHTML = `<small class="dfmsg">${esc(r ? await errText(r) : t('df.failed'))}</small>`; return }
+  const j = await r.json()
+  deskPath = j.path
+  // /work/a/b → work › a › b, each a way back up
+  crumbs.innerHTML = ''
+  const parts = j.path.split('/').filter(Boolean)
+  parts.forEach((p, i) => {
+    const b = document.createElement('button')
+    b.textContent = p; b.onclick = () => loadFiles('/' + parts.slice(0, i + 1).join('/'))
+    if (i) crumbs.append(' › ')
+    crumbs.append(b)
+  })
+  list.innerHTML = ''
+  if (!j.entries.length) list.innerHTML = `<small class="dfmsg">${esc(t('df.empty'))}</small>`
+  for (const e of j.entries) {
+    const row = document.createElement('button')
+    row.className = 'dfrow'
+    row.innerHTML = `<span class="ic">${e.type === 'dir' ? '▸' : e.type === 'link' ? '↪' : '·'}</span><span class="nm"></span>${
+      e.type === 'file' ? `<small>${esc(fsize(e.size))}</small>` : ''}`
+    row.querySelector('.nm').textContent = e.name
+    row.onclick = async () => {
+      if (e.type === 'dir') return loadFiles(`${j.path}/${e.name}`)
+      // a link may lead to a folder or a file: try it as a folder first
+      if (e.type === 'link') {
+        const ok = await fetch(api(`/api/bots/${c.id}/files?path=${encodeURIComponent(`${j.path}/${e.name}`)}`)).then(x => x.ok).catch(() => false)
+        if (ok) return loadFiles(`${j.path}/${e.name}`)
+      }
+      openPreview(deskFile(c.id, j.path, e))
+    }
+    list.appendChild(row)
+  }
+}
+$('#dfup').onclick = () => $('#dfpick').click()
+$('#dfpick').onchange = async e => {
+  if (cur?.kind !== 'agent') return
+  const c = cur, dir = deskPath
+  for (const f of [...e.target.files]) {
+    const r = await fetch(api(`/api/bots/${c.id}/files/put?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(f.name)}`),
+      { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f }).catch(() => null)
+    if (!r?.ok) note('⚠ ' + (r ? await errText(r) : t('df.failed')))
+  }
+  e.target.value = ''
+  if (cur === c) loadFiles(dir)
+}
+
 // ⚠️ Chrome keeps naturalWidth at 0 while playing MJPEG, so it can't tell "is there a picture".
 // Only onerror (no browser → 204) means reconnect.
 // Full screen: direct control. Mouse move/down/up/wheel, keys and typed text all go over one
 // WebSocket; the picture comes from the stream.
 // Keyboard: clicking the view focuses an invisible textarea — IMEs only type into real inputs —
 // and committed text is taken from it and sent; non-text keys (Enter, arrows, Backspace, Ctrl/⌘ combos) go as key events.
-let bwBot = null, bwOff = false, bwWs = null, bwComposing = false
-const bwNoteDefault = () => bwBot ? t('bw.note', { name: bwBot.name }) : ''
-function openBrowser(b) {
-  bwBot = b; bwOff = false
-  $('#bwname').textContent = t('bw.altNamed', { name: b.name })
-  $('#bwnote').textContent = bwNoteDefault()
-  $('#bwimg').src = bwStream(b.id)
-  $('#bwimg').onerror = () => { bwOff = true; $('#bwnote').textContent = t('bw.offNote') }
+let bwBot = null, bwOff = false, bwWs = null, bwComposing = false, bwKind = 'browser'
+const bwNoteDefault = () => bwBot ? t(bwKind === 'desktop' ? 'dk.note' : 'bw.note', { name: bwBot.name }) : ''
+const openBrowser = b => openScreen(b, 'browser')
+/** The full view of one of an agent's screens: its browser, or its desktop (which is started first). */
+async function openScreen(b, kind = 'browser') {
+  bwBot = b; bwOff = false; bwKind = kind
+  const desk = kind === 'desktop'
+  $('#bwurl').hidden = $('#bwnav').hidden = $('#bwreload').hidden = desk
+  $('#bwterm').hidden = !desk
+  $('#bwname').textContent = t(desk ? 'dk.altNamed' : 'bw.altNamed', { name: b.name })
+  $('#bwnote').textContent = desk ? t('dk.starting') : bwNoteDefault()
+  $('#bwimg').removeAttribute('src')
   $('#bwfull').hidden = false
+  if (desk) {
+    const r = await fetch(api(`/api/desktop/${b.id}/act`), { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'start' }) }).catch(() => null)
+    if (bwBot !== b) return
+    if (!r?.ok) { $('#bwnote').textContent = r ? await errText(r) : t('df.failed'); return }
+    $('#bwnote').textContent = bwNoteDefault()
+  }
+  $('#bwimg').src = screenStream(kind, b.id)
+  $('#bwimg').onerror = () => { bwOff = true; $('#bwnote').textContent = t(desk ? 'dk.off' : 'bw.offNote') }
   bwConnect()
 }
 function bwConnect() {
   if (!bwBot || bwWs) return
-  const u = new URL(withLang(api(`/api/browser/${bwBot.id}/input`)), location.href)
+  const u = new URL(withLang(api(`/api/${bwKind}/${bwBot.id}/input`)), location.href)
   u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
   const ws = new WebSocket(u); bwWs = ws
   ws.onclose = () => { if (bwWs === ws) bwWs = null }
@@ -1920,25 +2025,26 @@ function bwConnect() {
 function closeBrowser() {
   $('#bwfull').hidden = true; $('#bwimg').removeAttribute('src')   // stop the stream so frames don't keep arriving in the background
   bwWs?.close(); bwWs = null
-  bwBot = null; loadBrowsers()
+  bwBot = null; loadBrowsers(); loadDesktop()
 }
 function bwSend(e) {
   if (bwWs?.readyState === 1) bwWs.send(JSON.stringify(e))
-  else if (e.t === 'down') bwAct({ action:'click_xy', x:e.x, y:e.y })     // no channel: at least clicks still work
+  else if (e.t === 'down' && bwKind === 'browser') bwAct({ action:'click_xy', x:e.x, y:e.y })     // no channel: at least clicks still work
 }
 async function bwAct(action) {
   if (!bwBot) return
-  const r = await fetch(api(`/api/browser/${bwBot.id}/act`), { method:'POST', headers:{'content-type':'application/json'},
+  const r = await fetch(api(`/api/${bwKind}/${bwBot.id}/act`), { method:'POST', headers:{'content-type':'application/json'},
     body: JSON.stringify(action) }).then(r => r.json()).catch(e => ({ ok:false, error:String(e) }))
   if (!r.ok) { $('#bwnote').textContent = r.error; return }
   if (r.url && document.activeElement !== $('#bwurl')) $('#bwurl').value = r.url
   // went from closed to open: stream and input channel exist only now, reconnect
-  if (bwOff) { bwOff = false; $('#bwimg').src = bwStream(bwBot.id); $('#bwnote').textContent = bwNoteDefault() }
+  if (bwOff) { bwOff = false; $('#bwimg').src = screenStream(bwKind, bwBot.id); $('#bwnote').textContent = bwNoteDefault() }
   bwConnect()
 }
 $('#bwback').onclick = closeBrowser
 $('#bwnav').onclick = () => bwAct({ action:'back' })
 $('#bwreload').onclick = () => bwAct({ action:'reload' })
+$('#bwterm').onclick = () => bwAct({ action:'terminal' })
 $('#bwurl').onkeydown = e => { if (e.key === 'Enter' && e.target.value.trim()) bwAct({ action:'open', url:e.target.value.trim() }) }
 
 // Mouse
@@ -2145,11 +2251,11 @@ async function openPreview(f) {
   body.innerHTML = ''
   $('#pvname').textContent = f.name
   $('#pvmeta').textContent = `${fsize(f.size)} · ${f.mime}`
-  $('#pvdl').href = fileUrl(f.id, true)
+  $('#pvdl').href = f.dlUrl ?? fileUrl(f.id, true)
   $('#pvdl').setAttribute('download', f.name)
   $('#pv').hidden = false
   $('#pvx').focus()
-  const url = fileUrl(f.id)
+  const url = f.url ?? fileUrl(f.id)
   if (f.kind === 'image' || f.kind === 'video' || f.kind === 'audio') {
     body.classList.add('center')
     const el = document.createElement(f.kind === 'image' ? 'img' : f.kind)
@@ -2179,7 +2285,7 @@ async function openPreview(f) {
     }
   } else {
     body.classList.add('center')
-    body.innerHTML = `<div class="none">${esc(t('file.noPreview'))}<br><a class="btn" href="${esc(fileUrl(f.id, true))}" download="${esc(f.name)}">${esc(t('file.download'))}</a></div>`
+    body.innerHTML = `<div class="none">${esc(t('file.noPreview'))}<br><a class="btn" href="${esc(f.dlUrl ?? fileUrl(f.id, true))}" download="${esc(f.name)}">${esc(t('file.download'))}</a></div>`
   }
 }
 function closePreview() {

@@ -165,6 +165,24 @@ class Agent {
   );
 }
 
+/// One entry in a folder on an agent's machine.
+class DeskEntry {
+  const DeskEntry({required this.name, required this.type, required this.size, required this.mtime});
+  final String name;
+
+  /// `dir`, `file`, `link` or `other`.
+  final String type;
+  final int size;
+  final int mtime;
+
+  static DeskEntry fromJson(Map<String, Object?> j) => DeskEntry(
+    name: (j['name'] as String?) ?? '',
+    type: (j['type'] as String?) ?? 'other',
+    size: (j['size'] as num?)?.toInt() ?? 0,
+    mtime: (j['mtime'] as num?)?.toInt() ?? 0,
+  );
+}
+
 /// One line in the transcript. [speaker] is empty for the person using the
 /// app; in a group it is the Agent's display name.
 ///
@@ -1041,8 +1059,9 @@ class Api {
 
   /// The Agent's browser as it is right now. null = he has not opened one
   /// (looking never starts it — only acting does).
-  Future<({Uint8List image, String url, String title})?> browserShot(String agentId) async {
-    final res = await _send('GET', '/api/browser/${Uri.encodeComponent(agentId)}/shot');
+  /// [kind]: `browser`, or `desktop` — the agent's desktop answers the same way.
+  Future<({Uint8List image, String url, String title})?> browserShot(String agentId, {String kind = 'browser'}) async {
+    final res = await _send('GET', '/api/$kind/${Uri.encodeComponent(agentId)}/shot');
     final bytes = await res.fold<BytesBuilder>(BytesBuilder(copy: false), (b, d) => b..add(d));
     if (res.statusCode == 204) return null;
     if (res.statusCode >= 400) throw ApiException(ApiFailure.server, tr('api.shotFailed', {'code': res.statusCode}));
@@ -1053,8 +1072,8 @@ class Api {
   /// The Agent's browser as a live stream (Chromium's screencast, relayed as
   /// MJPEG): a frame each time the page changes. Ends at once, with no frames,
   /// when he has no browser open — callers fall back to [browserShot].
-  Stream<({Uint8List image, String url, String title})> browserStream(String agentId) async* {
-    final res = await _send('GET', '/api/browser/${Uri.encodeComponent(agentId)}/stream');
+  Stream<({Uint8List image, String url, String title})> browserStream(String agentId, {String kind = 'browser'}) async* {
+    final res = await _send('GET', '/api/$kind/${Uri.encodeComponent(agentId)}/stream');
     if (res.statusCode != 200) {
       await res.drain<void>();
       if (res.statusCode == 204) return;
@@ -1070,17 +1089,64 @@ class Api {
 
   /// The live input channel into the Agent's browser: one JSON event per
   /// message (mouse move/down/up/wheel, keydown/keyup/press, text).
-  Future<WebSocket> browserInput(String agentId) {
-    final u = _uri('/api/browser/${Uri.encodeComponent(agentId)}/input');
+  Future<WebSocket> browserInput(String agentId, {String kind = 'browser'}) {
+    final u = _uri('/api/$kind/${Uri.encodeComponent(agentId)}/input');
     return WebSocket.connect(u.replace(scheme: u.scheme == 'https' ? 'wss' : 'ws').toString())
         .timeout(const Duration(seconds: 20));
   }
 
   /// A person acting in the Agent's browser: open, back, reload, click_xy,
   /// type_raw, press, wheel. Starts the browser if it is not running.
-  Future<void> browserAct(String agentId, Map<String, Object?> action) async {
-    final j = await _map('POST', '/api/browser/${Uri.encodeComponent(agentId)}/act', action);
+  Future<void> browserAct(String agentId, Map<String, Object?> action, {String kind = 'browser'}) async {
+    final j = await _map('POST', '/api/$kind/${Uri.encodeComponent(agentId)}/act', action);
     if (j['ok'] != true) throw ApiException(ApiFailure.server, (j['error'] as String?) ?? tr('api.browserRefused'));
+  }
+
+  // ── An agent's files: its desk (/work) and its group drives ──
+
+  /// A folder on the agent's machine: where it really is, and what is in it (folders first).
+  Future<({String path, List<DeskEntry> entries})> deskList(String agentId, String path) async {
+    final j = await _map('GET', '/api/bots/${Uri.encodeComponent(agentId)}/files?path=${Uri.encodeQueryComponent(path)}');
+    return (
+      path: (j['path'] as String?) ?? path,
+      entries: [for (final e in (j['entries'] as List?) ?? const []) if (e is Map) DeskEntry.fromJson(e.cast<String, Object?>())],
+    );
+  }
+
+  /// Where a file on the agent's machine is fetched from (the token rides in the query).
+  Uri deskFileUri(String agentId, String path, {bool download = false}) => _uri(
+    '/api/bots/${Uri.encodeComponent(agentId)}/files/get?path=${Uri.encodeQueryComponent(path)}${download ? '&download=1' : ''}',
+  );
+
+  /// Fetch a file from the agent's machine into [to].
+  Future<void> deskDownload(String agentId, String path, File to) async {
+    final res = await _net(() async {
+      final req = await _client.openUrl('GET', deskFileUri(agentId, path, download: true));
+      req.headers.set('X-Lang', currentLang.value.code);
+      return req.close();
+    });
+    if (res.statusCode >= 400) await _fail(res);
+    final sink = to.openWrite();
+    await res.pipe(sink);
+  }
+
+  /// Put a file from this device into a folder on the agent's machine. Never replaces one: the path it got.
+  Future<String> deskUpload(String agentId, String dir, String localPath) async {
+    final file = File(localPath);
+    final name = localPath.split(RegExp(r'[\\/]')).last;
+    final res = await _net(() async {
+      final req = await _client.openUrl('POST', _uri(
+        '/api/bots/${Uri.encodeComponent(agentId)}/files/put?dir=${Uri.encodeQueryComponent(dir)}&name=${Uri.encodeQueryComponent(name)}',
+      ));
+      req.headers.set('X-Lang', currentLang.value.code);
+      req.headers.contentType = ContentType.binary;
+      req.contentLength = await file.length();
+      await req.addStream(file.openRead());
+      return req.close();
+    });
+    if (res.statusCode >= 400) await _fail(res);
+    final j = jsonDecode(await res.transform(utf8.decoder).join());
+    return (j is Map ? j['path'] as String? : null) ?? dir;
   }
 
   Future<List<Skill>> skills() async {

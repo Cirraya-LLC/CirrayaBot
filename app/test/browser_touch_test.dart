@@ -13,6 +13,38 @@ import 'package:multi_agent/theme/app_theme.dart';
 final _png = base64Decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==');
 
 void main() {
+  // The agent's desktop uses the same view: no address bar, back or reload — a "New terminal" instead —
+  // and the same touch handling, at the narrowest phone width.
+  testWidgets('the desktop view at 360x640 ×1.3: a terminal button, no address bar, taps click', (tester) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final sent = <Map<String, Object?>>[];
+    final api = Api(const Settings(baseUrl: 'http://127.0.0.1:1', token: 't'));
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+      builder: (context, child) => UiScale(scale: 1.3, child: child!),
+      home: BrowserPage(
+        api: api,
+        agentId: 'op',
+        name: 'Operator',
+        kind: 'desktop',
+        debugShot: (image: _png, url: '', title: 'Desktop'),
+        debugInput: sent.add,
+      ),
+    ));
+    await tester.pump();
+    expect(find.byIcon(Icons.terminal), findsOneWidget);
+    expect(find.byType(TextField), findsOneWidget, reason: 'only the hidden typing field: no address bar');
+    expect(find.byIcon(Icons.refresh), findsNothing);
+    final page = find.ancestor(of: find.byType(Image), matching: find.byType(Listener)).first;
+    await tester.tapAt(tester.getRect(page).center, kind: PointerDeviceKind.touch);
+    await tester.pump();
+    expect(sent.map((e) => e['t']), ['down', 'up']);
+    expect(tester.takeException(), isNull);
+    api.close();
+  });
+
   // On a phone the Agent's browser should feel like a phone's browser: a tap clicks there,
   // a drag scrolls the page (as wheel turns) instead of dragging the mouse — and a mouse still
   // behaves exactly as on a desktop.

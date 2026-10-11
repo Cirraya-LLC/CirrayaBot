@@ -27,6 +27,7 @@ import '../settings/providers_page.dart';
 import '../settings/skills_page.dart';
 import '../settings/voice_page.dart';
 import 'call_page.dart';
+import 'files_page.dart';
 import 'message_view.dart';
 import 'attachments.dart';
 import 'session_panel.dart';
@@ -1877,6 +1878,28 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       name: bench.agentById(id)?.name ?? id,
                       hideWhenOff: c.isGroup,
                     ),
+                ],
+                if (c != null && !c.isGroup) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('dk.heading'))),
+                  BrowserThumb(key: ValueKey('desktop-${c.id}'), api: bench.api, agentId: c.id, name: c.name, kind: 'desktop'),
+                  InkWell(
+                    key: const ValueKey('open-files'),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(builder: (_) => FilesPage(api: bench.api, agentId: c.id, name: c.name)),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                      child: Row(
+                        children: [
+                          Icon(Icons.folder_outlined, size: 18, color: C.dim),
+                          const SizedBox(width: 10),
+                          Expanded(child: Text(tr('df.open', {'name': c.name}), style: const TextStyle(fontSize: 13))),
+                          Icon(Icons.chevron_right, size: 18, color: C.dim2),
+                        ],
+                      ),
+                    ),
+                  ),
                 ],
                 if (c != null && !c.isGroup) ...[
                   const Divider(height: 22),
