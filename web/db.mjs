@@ -264,6 +264,23 @@ create table if not exists secrets (
 );
 create unique index if not exists secrets_name_idx on secrets (agent_id, lower(name));
 
+-- Calls with side effects, logged per run (front:<session> / task:<id>) so a run picked up again after a
+-- restart doesn't do them twice (effects.mjs). A run that ends normally clears its rows; boot = which
+-- server process ran the call; idem = the Idempotency-Key a request was sent with.
+create table if not exists effects (
+  id        bigserial primary key,
+  run       text not null,
+  call_key  text not null,
+  name      text not null,
+  boot      text not null,
+  status    text not null default 'started',
+  result    text,
+  idem      text not null,
+  consumed  boolean not null default false,
+  at        timestamptz not null default now()
+);
+create index if not exists effects_run_idx on effects (run, call_key, id desc);
+
 -- The voice an agent speaks with on an upstream voice (settings.voice.tts): '' = the default one.
 alter table agents add column if not exists voice text not null default '';
 
@@ -450,6 +467,30 @@ export async function addEvent(scope, scopeId, session, speaker, event) {
     [scope, scopeId, session, 'event', speaker, JSON.stringify(event)])
   if (session) await q('update sessions set updated_at = now() where id = $1', [session])
 }
+
+// ---------- Side effects across a restart (effects.mjs) ----------
+/** The newest unanswered log entry for this call from an earlier server process. */
+export async function priorEffect(run, key, boot) {
+  return (await q(`select * from effects where run = $1 and call_key = $2 and boot <> $3 and not consumed
+    order by id desc limit 1`, [run, key, boot])).rows[0] ?? null
+}
+/** The Idempotency-Key of an attempt at this call that never finished — a retry reuses it. */
+export async function unfinishedIdem(run, key, boot) {
+  return (await q(`select idem from effects where run = $1 and call_key = $2 and boot <> $3 and status = 'started'
+    order by id desc limit 1`, [run, key, boot])).rows[0]?.idem ?? null
+}
+export async function startEffect(run, key, name, boot, idem) {
+  return Number((await q('insert into effects (run, call_key, name, boot, idem) values ($1,$2,$3,$4,$5) returning id',
+    [run, key, name, boot, idem])).rows[0].id)
+}
+export async function finishEffect(id, result) {
+  await q(`update effects set status = 'done', result = $2 where id = $1`, [id, String(result ?? '').slice(0, 20_000)])
+}
+export async function consumeEffect(id) { await q('update effects set consumed = true where id = $1', [id]) }
+/** A run that ended normally: nothing of it is left to redo. */
+export async function dropEffects(run) { await q('delete from effects where run = $1', [run]) }
+/** Entries nobody picked up (a session deleted while interrupted, say). */
+export async function pruneEffects() { await q(`delete from effects where at < now() - interval '2 days'`) }
 
 /** Whether a voice call's start / end is already marked in this session. */
 export async function callMarked(session, call, phase) {

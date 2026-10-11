@@ -173,6 +173,13 @@ export async function startStack({ tools = false, env = {} } = {}) {
       return (await s.api('GET', `/api/dm/${agentId}${q}`)).body
     },
 
+    /** A query on the server's own database (to look at, or set up, what it keeps). */
+    async sql(text, params = []) {
+      const c = new pg.Client({ connectionString: dbUrl(name) })
+      await c.connect()
+      try { return (await c.query(text, params)).rows } finally { await c.end() }
+    },
+
     stop, start,
     /** Kill the process (no clean shutdown) and start it again on the same database. */
     async restart({ signal = 'SIGKILL' } = {}) { await stop(signal); await start() },
