@@ -26,6 +26,20 @@ class FakeEngine implements VoiceEngine {
   Duration sayTime = const Duration(milliseconds: 5);
   Completer<String>? _hearing;
   String _partial = '';
+  void Function(String)? _onPartial;
+
+  bool get hearing => !(_hearing?.isCompleted ?? true);
+
+  /// The recognizer revises what it has heard so far.
+  void partial(String text) {
+    _partial = text;
+    _onPartial?.call(text);
+  }
+
+  /// The recognizer settles on what was said.
+  void finish(String text) {
+    if (hearing) _hearing!.complete(text);
+  }
   Completer<void>? _saying;
 
   @override
@@ -37,6 +51,7 @@ class FakeEngine implements VoiceEngine {
     if (errors.isNotEmpty) return Future.error(VoiceError(errors.removeAt(0)));
     final c = _hearing = Completer<String>();
     _partial = '';
+    _onPartial = onPartial;
     if (heard.isNotEmpty) {
       final next = heard.removeAt(0);
       Timer(const Duration(milliseconds: 20), () {
@@ -254,6 +269,44 @@ void main() {
 
     await t.voice.endCall();
     expect(t.voice.inCall, isFalse);
+    t.voice.dispose();
+    t.bench.dispose();
+    await f.server.close(force: true);
+  });
+
+  test('talking over the agent cuts in; its own voice coming back does not', () async {
+    final f = await fakeServer();
+    final t = await start(f.server);
+    t.engine.sayTime = const Duration(milliseconds: 400);
+    t.engine.heard.add('first question');
+    expect(await t.voice.startCall(), isNull);
+    await until(() => t.voice.callState == CallState.speaking && t.engine.hearing, reason: 'listening while it speaks');
+    // its own words through the mic — only what has already been played can come back
+    await until(() => t.voice.saying == 'Here is the command:');
+    t.engine.partial('Sure here is the command');
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    expect(t.voice.speaking, isTrue, reason: 'echo does not cut in');
+    expect(t.voice.heard, isNot(contains('Sure')), reason: 'and is not shown as what the person said');
+    // the person
+    t.engine.partial('hang on what about');
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(t.voice.speaking, isTrue, reason: 'not before it has stood for a moment');
+    t.engine.partial('hang on what about the tests');
+    await until(() => !t.voice.speaking && t.voice.callState == CallState.listening, reason: 'cut in');
+    final read = t.engine.said.length;
+    expect(read, lessThan(expected.length), reason: 'the rest of the answer was not read');
+    t.engine.finish('hang on what about the tests');
+    await until(() => f.chats.length == 2, reason: 'what they said is the next message');
+    expect(f.chats.last['text'], 'hang on what about the tests');
+    await until(() => t.voice.speaking);
+    t.engine.sayTime = const Duration(milliseconds: 5);
+    await until(() => !t.voice.speaking && t.voice.callState == CallState.listening);
+    // a final that is only the echo of what it just said is dropped, not sent
+    t.engine.finish('that lists the files anything else');
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(f.chats.length, 2, reason: 'its own voice is not sent back to it');
+    expect(t.engine.hearing, isTrue, reason: 'and it keeps listening');
+    await t.voice.endCall();
     t.voice.dispose();
     t.bench.dispose();
     await f.server.close(force: true);

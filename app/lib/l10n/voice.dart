@@ -50,6 +50,11 @@ const Map<String, List<String>> voiceStrings = {
     '它说话时点圆圈可以打断，你说话时点圆圈立刻发送。它干活时你说的话，会在它下一步时交给它。',
     '它說話時點圓圈可以打斷，你說話時點圓圈立刻送出。它工作時你說的話，會在它下一步時交給它。',
   ],
+  'vo.hintTalk': [
+    'Just start talking to cut in while it speaks, or tap the circle. Tap it while you talk to send at once. What you say while it works reaches it at its next step.',
+    '它说话时直接开口就能打断，也可以点圆圈。你说话时点圆圈立刻发送。它干活时你说的话，会在它下一步时交给它。',
+    '它說話時直接開口就能打斷，也可以點圓圈。你說話時點圓圈立刻送出。它工作時你說的話，會在它下一步時交給它。',
+  ],
   'vo.hear': ['Hearing you', '听你说话', '聽你說話'],
   'vo.speak': ['Speaking', '说话', '說話'],
   'vo.engine': ['Done by', '由谁来做', '由誰來做'],

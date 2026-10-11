@@ -425,7 +425,7 @@ const M = {
   'vo.state.speaking': ['Speaking', '正在说', '正在說'],
   'vo.state.muted': ['Microphone muted', '麦克风已静音', '麥克風已靜音'],
   'vo.hintTalk': ['Just start talking to cut in — or tap the circle, or press Space. Esc ends the call.', '直接开口就能打断它，也可以点圆圈或按空格。Esc 挂断。', '直接開口就能打斷它，也可以點圓圈或按空白鍵。Esc 掛斷。'],
-  'vo.hintTap': ['To cut in, tap the circle or press Space (a device voice can’t be talked over: the mic would hear it). Esc ends the call.', '要打断它请点圆圈或按空格（设备语音没法直接开口打断：麦克风会听到它自己）。Esc 挂断。', '要打斷它請點圓圈或按空白鍵（裝置語音無法直接開口打斷：麥克風會聽到它自己）。Esc 掛斷。'],
+  'vo.hintTap': ['To cut in, tap the circle or press Space — with an upstream recognizer and this device’s voice, talking over it can’t be told apart from its own voice. Esc ends the call.', '要打断它请点圆圈或按空格——用上游识别加设备语音时，分不清是你在说还是它自己的声音。Esc 挂断。', '要打斷它請點圓圈或按空白鍵——使用上游辨識加裝置語音時，分不清是你在說還是它自己的聲音。Esc 掛斷。'],
   'vo.hear': ['Hearing you', '听你说话', '聽你說話'],
   'vo.speak': ['Speaking', '说话', '說話'],
   'vo.modeDevice': ['This device', '用这台设备', '用這台裝置'],

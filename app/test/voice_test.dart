@@ -62,6 +62,30 @@ void main() {
     }
   });
 
+  test('cutting in: the agent\'s own voice coming back is not the person', () {
+    expect(tokens('Hello, World 42'), ['hello', 'world', '42']);
+    expect(tokens('巴黎是首都'), ['巴黎', '黎是', '是首', '首都']);
+    expect(wordCount('what is three'), 3);
+    expect(wordCount('等一下'), 1.5);
+    const t0 = 1000000;
+    final mem = SpokenMemory()..add('The capital of France is Paris.', now: t0);
+    expect(mem.isEcho('capital of France is', now: t0 + 500), isTrue);
+    expect(mem.isEcho('what about Germany', now: t0 + 500), isFalse);
+    expect(isBargeIn('France is Paris', mem, now: t0 + 500), isFalse, reason: 'echo never cuts in');
+    expect(isBargeIn('what about Germany', mem, now: t0 + 500), isTrue);
+    expect(isBargeIn('Stop!', mem, now: t0 + 500) && isBargeIn('等一下', mem, now: t0 + 500), isTrue);
+    expect(isBargeIn('okay', mem, now: t0 + 500) || isBargeIn('好的', mem, now: t0 + 500), isFalse);
+    expect(isInterimBargeIn('stop', mem, now: t0 + 500), isFalse);
+    expect(isInterimBargeIn('wait a second', mem, now: t0 + 500), isTrue);
+    final zh = SpokenMemory()..add('图片中是一台安装在墙上的空调。', now: t0);
+    expect(zh.isEcho('一台安装在墙上的', ratio: 0.4, now: t0 + 100), isTrue);
+    expect(zh.isEcho('那温度是多少', ratio: 0.4, now: t0 + 100), isFalse);
+    expect(isBargeIn('那温度是多少呢', zh, now: t0 + 100), isTrue);
+    expect(isBargeIn('墙上的空调', zh, now: t0 + 100), isFalse);
+    final old = SpokenMemory()..add('The capital of France is Paris.', now: t0);
+    expect(old.isEcho('capital of France is', now: t0 + 31000), isFalse, reason: 'forgotten after half a minute');
+  });
+
   test('settings round trip', () {
     final v = VoiceSettings.fromJson({
       'stt': {'mode': 'upstream', 'provider_id': 'p1', 'model': 'm'},

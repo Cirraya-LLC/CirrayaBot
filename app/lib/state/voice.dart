@@ -191,6 +191,9 @@ class VoiceController extends ChangeNotifier {
   /// What is being said right now ('' = nothing).
   String saying = '';
 
+  /// What was said aloud lately: the agent's voice coming back through the mic is not the person.
+  final _memory = SpokenMemory();
+
   /// The message whose 🔊 is playing (the text it started from), for its button to show it.
   String? reading;
 
@@ -232,6 +235,7 @@ class VoiceController extends ChangeNotifier {
     final first = _playing == null;
     _playing = p;
     saying = p.text;
+    _memory.add(p.text);
     if (first) {
       _spoke(true);
     } else {
@@ -350,6 +354,9 @@ class VoiceController extends ChangeNotifier {
   double level = 0;
   bool _thrown = false;
 
+  /// Takes the words heard so far instead of showing them (a call, while the agent speaks).
+  void Function(String text)? _onPartial;
+
   Future<String> _listen({required bool continuous}) async {
     heard = '';
     _thrown = false;
@@ -380,6 +387,8 @@ class VoiceController extends ChangeNotifier {
       lang: hearLang,
       continuous: continuous,
       onPartial: (t) {
+        final take = _onPartial;
+        if (take != null) return take(t);
         heard = t;
         _notify();
       },
@@ -483,20 +492,67 @@ class VoiceController extends ChangeNotifier {
     _notify();
   }
 
+  /// Cutting in by voice needs words while the agent speaks: the phone's own recognizer has them, a
+  /// recording for an upstream has none until it ends (there, tap the circle).
+  bool get canBargeIn => !settings.stt.upstream;
+
+  /// The person is talking over the agent: silence it; what they say is the next message, and the rest
+  /// of this answer stays unread until that reaches the turn.
+  void _cutIn() {
+    if (!inCall || !speaking) return;
+    muteTurn = true;
+    unawaited(stopSpeaking());
+    _state(CallState.listening);
+  }
+
+  /// The label for what the call is doing when nothing more specific applies.
+  void _settle() {
+    if (!inCall) return;
+    if (speaking) {
+      _state(CallState.speaking);
+    } else if (bench.busy) {
+      _state(CallState.thinking);
+    } else {
+      _state(muted ? CallState.muted : CallState.listening);
+    }
+  }
+
   Future<void> _callListen() async {
     if (!inCall || _listening) return;
     if (muted) {
-      _state(CallState.muted);
+      _settle();
       return;
     }
-    _state(CallState.listening);
+    _settle();
     _listening = true;
     final gen = ++_listenGen;
     final began = DateTime.now();
+    // While the agent speaks, what is heard is checked rather than shown: most of it is its own voice.
+    // Something that keeps counting as cutting in for a moment stops it.
+    Timer? hold;
+    _onPartial = (t) {
+      if (!speaking) {
+        heard = t;
+        _notify();
+        return;
+      }
+      if (!isInterimBargeIn(t, _memory)) {
+        hold?.cancel();
+        hold = null;
+        return;
+      }
+      heard = t;
+      hold ??= Timer(const Duration(milliseconds: interimBargeInMs), () {
+        hold = null;
+        if (gen == _listenGen && isInterimBargeIn(heard, _memory)) _cutIn();
+      });
+    };
     String text;
     try {
       text = await _listen(continuous: false);
     } catch (e) {
+      hold?.cancel();
+      _onPartial = null;
       _listening = false;
       if (gen != _listenGen || !inCall) return;
       final passing = e is VoiceError && !_fatal.contains(e.code);
@@ -509,12 +565,26 @@ class VoiceController extends ChangeNotifier {
       await endCall();
       return;
     }
+    hold?.cancel();
+    _onPartial = null;
     _listening = false;
     _failures = 0;
     if (gen != _listenGen || !inCall) return;
+    final gaveUp = text.isEmpty;
+    // Its own voice after all, or — while it is still talking — not enough to interrupt it.
+    if (text.isNotEmpty && _memory.isEcho(text)) text = '';
+    if (text.isNotEmpty && speaking) {
+      if (isBargeIn(text, _memory)) {
+        _cutIn();
+      } else {
+        text = '';
+      }
+    }
     if (text.isEmpty) {
       // Nothing said: listen again — after a pause if the recognizer gave up at once, so a broken one can't spin.
-      if (DateTime.now().difference(began).inMilliseconds < 1000) await Future<void>.delayed(const Duration(milliseconds: 800));
+      if (gaveUp && DateTime.now().difference(began).inMilliseconds < 1000) {
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      }
       if (gen == _listenGen) unawaited(_callListen());
       return;
     }
@@ -534,19 +604,25 @@ class VoiceController extends ChangeNotifier {
 
   /// The turn ended (or a message was handed to one still at work): listen once it's quiet.
   void _afterTurn() {
-    if (!inCall || bench.busy || _listening || speaking) return;
-    unawaited(_callListen());
+    if (!inCall || bench.busy || speaking) return;
+    if (_listening) {
+      _settle();
+    } else {
+      unawaited(_callListen());
+    }
   }
 
   void _spoke(bool on) {
     _notify();
     if (!inCall) return;
     if (on) {
-      if (!_listening) _state(CallState.speaking);
+      _settle();
+      // Keep listening while it speaks, so the person can talk over it.
+      if (canBargeIn && !_listening && !muted) unawaited(_callListen());
       return;
     }
     if (bench.busy) {
-      if (!_listening) _state(CallState.thinking);
+      _settle();
     } else {
       _afterTurn();
     }
@@ -582,8 +658,8 @@ class VoiceController extends ChangeNotifier {
         _thrown = true;
         await engine.cancelListening().catchError((Object _) {});
       }
-      if (!speaking && !bench.busy) _state(CallState.muted);
-    } else if (!speaking && !bench.busy) {
+      _settle();
+    } else if ((!speaking && !bench.busy) || canBargeIn) {
       unawaited(_callListen());
     }
     _notify();
