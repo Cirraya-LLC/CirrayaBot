@@ -161,6 +161,89 @@ String scriptOf(String text) {
   return '';
 }
 
+// ── Cutting in on a call (web/voice.mjs has the same rules) ──
+// The agent's own voice comes back through the microphone and is transcribed like any other, so what
+// is heard is compared with what was said in the last half minute: mostly the same words = echo.
+// Words for spaced scripts; pairs of characters for Chinese / Japanese / Korean.
+final _cjk = RegExp(r'[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]', unicode: true);
+final _run = RegExp(r'[\p{L}\p{N}]+', unicode: true);
+
+List<String> tokens(String text) {
+  final out = <String>[];
+  for (final m in _run.allMatches(text.toLowerCase())) {
+    final run = m[0]!;
+    if (!_cjk.hasMatch(run)) {
+      out.add(run);
+      continue;
+    }
+    final chars = run.runes.map(String.fromCharCode).toList();
+    if (chars.length == 1) out.add(run);
+    for (var i = 0; i + 1 < chars.length; i++) {
+      out.add(chars[i] + chars[i + 1]);
+    }
+  }
+  return out;
+}
+
+/// How much was said: spaced words, plus CJK characters counted two to a word.
+double wordCount(String text) {
+  var n = 0.0;
+  for (final m in _run.allMatches(text)) {
+    n += _cjk.hasMatch(m[0]!) ? m[0]!.runes.length / 2 : 1;
+  }
+  return n;
+}
+
+class SpokenMemory {
+  SpokenMemory({this.keepMs = 30000});
+  final int keepMs;
+  final _items = <({int at, Set<String> words})>[];
+
+  void add(String text, {int? now}) {
+    _items.add((at: now ?? DateTime.now().millisecondsSinceEpoch, words: tokens(text).toSet()));
+    _prune(now);
+  }
+
+  void clear() => _items.clear();
+
+  void _prune(int? now) {
+    final t = now ?? DateTime.now().millisecondsSinceEpoch;
+    _items.removeWhere((x) => t - x.at >= keepMs);
+  }
+
+  /// The share of what was heard that the agent itself said lately (0–1).
+  double echoShare(String text, {int? now}) {
+    _prune(now);
+    final heard = tokens(text);
+    if (heard.isEmpty || _items.isEmpty) return 0;
+    return heard.where((w) => _items.any((x) => x.words.contains(w))).length / heard.length;
+  }
+
+  bool isEcho(String text, {double ratio = 0.6, int? now}) => echoShare(text, now: now) >= ratio;
+}
+
+const _interrupt = {'stop', 'wait', 'hold on', 'hang on', 'pause', 'no', 'enough',
+  '停', '停下', '停一下', '等等', '等一下', '别说了', '不对', '暂停', '好了', '够了'};
+String _clean(String t) =>
+    t.toLowerCase().replaceAll(RegExp(r'[^\p{L}\p{N}\s]+', unicode: true), ' ').trim().replaceAll(RegExp(r'\s+'), ' ');
+
+/// Heard while the agent speaks — does it cut in? A sentence that isn't its own voice coming back
+/// (while it plays, a lower share already counts as echo), or one interruption word.
+bool isBargeIn(String text, SpokenMemory? memory, {int? now}) {
+  final c = _clean(text);
+  if (c.isEmpty || (memory?.isEcho(c, ratio: 0.4, now: now) ?? false)) return false;
+  return wordCount(c) >= 2 || _interrupt.contains(c);
+}
+
+/// The same for a transcript still being revised: never on one word, which may yet change.
+bool isInterimBargeIn(String text, SpokenMemory? memory, {int? now}) {
+  final c = _clean(text);
+  return c.isNotEmpty && wordCount(c) >= 2 && !(memory?.isEcho(c, ratio: 0.4, now: now) ?? false);
+}
+
+/// How long an interim must keep counting as cutting in before playback stops.
+const interimBargeInMs = 300;
+
 /// Each agent's own pitch and pace on a device voice, from its id — so in a group you hear who
 /// is speaking. The same numbers as the web gives the same agent (FNV-1a over the code points).
 ({double pitch, double rate}) deviceTone(String? agentId) {

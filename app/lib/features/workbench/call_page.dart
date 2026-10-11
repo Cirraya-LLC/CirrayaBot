@@ -183,7 +183,7 @@ class _CallPageState extends State<CallPage> with SingleTickerProviderStateMixin
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 14, 24, 18),
               child: Text(
-                tr('vo.hintTap'),
+                tr(v.canBargeIn ? 'vo.hintTalk' : 'vo.hintTap'),
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 12, color: C.dim2),
               ),

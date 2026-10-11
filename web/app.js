@@ -1,6 +1,6 @@
 import { lang, t, setLang, applyDom, LANG_NAMES } from './i18n.js'
 import { renderMarkdown } from './markdown.mjs'
-import { Reader, speakable, sentences } from './voice.mjs'
+import { Reader, speakable, sentences, SpokenMemory, isBargeIn, isInterimBargeIn, INTERIM_BARGE_IN_MS } from './voice.mjs'
 import { Speaker, Listener, Mic, Voice, canHear, canRecord, canSpeak, hearLang, deviceVoices } from './speech.js'
 
 const $ = s => document.querySelector(s)
@@ -977,12 +977,19 @@ async function loadVoice() {
 }
 
 const call = { on: false, state: '', mic: null, listener: null, muteTurn: false, paused: false, target: null, watch: null }
+// What was said aloud lately: the agent's voice coming back through the mic is not the person.
+const spoken = new SpokenMemory()
+// Cutting in by voice: with the browser's recognizer, by what is heard (the words are there while it
+// speaks); with a recording for an upstream there are no words until it ends — then only by loudness,
+// and only when the voice is the page's own audio (echo cancellation takes that back out of the mic).
+const textBarge = () => VOICE.stt.mode === 'device'
+const loudBarge = () => VOICE.stt.mode === 'upstream' && VOICE.tts.mode === 'upstream'
 let readingBub = null
 const speaker = new Speaker({
   mode: () => VOICE.tts.mode, speakUrl: api('/api/voice/speak'), fetch,
   preferred: () => ls('ma_voice_name'), uiLang: () => lang,
   onState: speaking => onSpeaking(speaking),
-  onSay: text => { if (call.on) $('#csaid').textContent = text },
+  onSay: text => { spoken.add(text); if (call.on) $('#csaid').textContent = text },
   onError: e => note('⚠ ' + t('vo.speakFailed', { msg: e.message ?? e })),
 })
 
@@ -1045,9 +1052,14 @@ paintRead()
 function onSpeaking(speaking) {
   if (!speaking) { readingBub = null; document.querySelectorAll('.say.on').forEach(x => x.classList.remove('on')) }
   if (!call.on) return
-  if (speaking) { if (!call.listener) { callState('speaking'); startWatch() } return }
+  if (speaking) {
+    callSettle()
+    if (textBarge()) { if (!call.listener && !call.paused) callListen() }   // keep listening while it speaks
+    else startWatch()
+    return
+  }
   stopWatch()
-  if (busy) { if (!call.listener) callState('thinking') } else callAfterTurn()
+  if (busy) callSettle(); else callAfterTurn()
 }
 
 // ── Dictation: the mic in the composer types what you say; you read it, then send ──
@@ -1099,14 +1111,10 @@ async function startCall() {
   $('#cname').textContent = c.name
   $('#cheard').textContent = ''; $('#csaid').textContent = ''
   $('#cmute').setAttribute('aria-pressed', 'false')
-  // Talking over the agent can only be heard when its voice comes out of this page (an upstream voice):
-  // that is the sound echo cancellation takes back out of the microphone. A device voice is played by
-  // the system, and the mic would hear the agent interrupting itself.
-  const bargeIn = VOICE.tts.mode === 'upstream'
-  $('#chint').textContent = t(bargeIn ? 'vo.hintTalk' : 'vo.hintTap')
+  $('#chint').textContent = t(textBarge() || loudBarge() ? 'vo.hintTalk' : 'vo.hintTap')
   $('#call').hidden = false; $('#corb').focus()
   speaker.stop(); dictating?.abort()
-  if (VOICE.stt.mode === 'upstream' || bargeIn) {
+  if (VOICE.stt.mode === 'upstream') {
     try { call.mic = await new Mic().open() }
     catch (e) { endCall(); note('⚠ ' + voiceError({ code: e.name === 'NotAllowedError' ? 'denied' : 'mic', message: e.message })); return }
   }
@@ -1124,29 +1132,56 @@ function endCall() {
   $('#call').hidden = true
   $('#hcall').focus()
 }
+/** What the call is doing, when nothing more specific applies. */
+function callSettle() {
+  if (!call.on) return
+  callState(speaker.busy ? 'speaking' : busy ? 'thinking' : call.paused ? 'muted' : 'listening')
+}
+/** The person is talking over the agent: silence it; what they say is the next message. */
+function cutIn() {
+  if (!call.on || !speaker.busy) return
+  call.muteTurn = true
+  speaker.stop()
+  callState('listening')
+}
 async function callListen() {
   if (!call.on || call.listener) return
-  if (call.paused) { callState('muted'); return }
-  stopWatch()
-  callState('listening')
+  if (call.paused) { callSettle(); return }
+  if (!speaker.busy) stopWatch()
+  callSettle()
   const L = call.listener = new Listener(), began = Date.now()
-  let text = ''
+  let text = '', hold = null
+  // While the agent speaks, what is heard is checked rather than shown: most of it is its own voice.
+  // Something that keeps counting as cutting in for a moment stops it.
+  const heard = x => {
+    if (!speaker.busy) { $('#cheard').textContent = x; return }
+    if (!isInterimBargeIn(x, spoken)) { clearTimeout(hold); hold = null; return }
+    $('#cheard').textContent = x
+    hold ??= setTimeout(() => { hold = null; if (call.listener === L && isInterimBargeIn($('#cheard').textContent, spoken)) cutIn() },
+      INTERIM_BARGE_IN_MS)
+  }
   try {
     text = await L.start({ mode: VOICE.stt.mode, lang: hearIn(), mic: call.mic,
       transcribe: (blob, l) => { if (call.on) callState('transcribing'); return transcribe(blob, l) },
       onInterim: x => {
-        if (typeof x === 'string') $('#cheard').textContent = x
+        if (typeof x === 'string') heard(x)
         else $('#cring').style.setProperty('--lvl', (1 + Math.min(x * 9, 0.35)).toFixed(3))
       } })
   } catch (e) {
+    clearTimeout(hold)
     if (call.listener === L) call.listener = null
     if (call.on && !L.thrown) { note('⚠ ' + voiceError(e)); endCall() }
     return
   }
+  clearTimeout(hold)
   if (call.listener === L) call.listener = null
   if (!call.on || L.thrown) return
+  const gaveUp = !text
+  // Its own voice after all, or — while it is still talking — not enough to interrupt it.
+  if (text && spoken.isEcho(text)) text = ''
+  if (text && speaker.busy) { if (isBargeIn(text, spoken)) cutIn(); else text = '' }
   // Nothing said: listen again — after a pause if the recognizer gave up at once, so a broken one can't spin
-  if (!text) { setTimeout(callListen, Date.now() - began < 1000 ? 800 : 0); return }
+  if (!text) { setTimeout(callListen, gaveUp && Date.now() - began < 1000 ? 800 : 0); return }
   $('#cheard').textContent = text; $('#csaid').textContent = ''
   if (!cur || cur.kind !== call.target.kind || cur.id !== call.target.id) { endCall(); return }
   callState('thinking')
@@ -1154,12 +1189,12 @@ async function callListen() {
 }
 /** The turn ended (or a message was handed to one still working): listen once the voice is quiet. */
 function callAfterTurn() {
-  if (!call.on || busy || call.listener || speaker.busy) return
-  callListen()
+  if (!call.on || busy || speaker.busy) return
+  if (call.listener) callSettle(); else callListen()
 }
-// Cutting in: by voice (upstream voices only, see above) or by a tap / Space.
+// Cutting in by loudness (an upstream recognizer with an upstream voice, see above), or a tap / Space.
 function startWatch() {
-  if (!call.mic || VOICE.tts.mode !== 'upstream' || call.watch || call.paused) return
+  if (!call.mic || !loudBarge() || call.watch || call.paused) return
   const v = new Voice({ min: 0.03, onsetMs: 260 })
   call.watch = setInterval(() => { if (v.tick(call.mic.level())) callInterrupt() }, 50)
 }
@@ -1184,9 +1219,9 @@ $('#cmute').onclick = () => {
   call.paused = !call.paused
   $('#cmute').setAttribute('aria-pressed', String(call.paused))
   $('#cmute').title = t(call.paused ? 'vo.unmute' : 'vo.mute')
-  if (call.paused) { stopWatch(); call.listener?.abort(); call.listener = null; if (!speaker.busy && !busy) callState('muted') }
-  else if (speaker.busy) startWatch()
-  else if (!busy) callListen()
+  if (call.paused) { stopWatch(); call.listener?.abort(); call.listener = null; callSettle() }
+  else if (!speaker.busy && !busy) callListen()
+  else if (speaker.busy) { if (textBarge()) callListen(); else startWatch() }
 }
 document.addEventListener('keydown', e => {
   if (!call.on) return

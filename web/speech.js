@@ -88,8 +88,10 @@ export class Speaker {
   async next() {
     const it = this.queue.shift()
     if (!it) { if (this.playing !== null) { this.playing = null; this.onState(false) } return }
-    if (!this.playing) this.onState(true)
+    // Playing before saying so: a listener asking "is it speaking?" from onState must hear yes.
+    const first = !this.playing
     this.playing = it
+    if (first) this.onState(true)
     this.onSay(it.text, it.agent)
     try {
       if (this.mode() === 'upstream') { this.prefetch(); await this.playUpstream(it) }

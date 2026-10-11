@@ -146,6 +146,68 @@ export function scriptOf(text) {
   return ''
 }
 
+// ---------- Cutting in on a call ----------
+// The agent's own voice comes back through the microphone while it speaks, and a recognizer turns it
+// into words like any other. So what is heard is compared with what was said in the last half minute:
+// mostly the same words = echo. Words for spaced scripts; pairs of characters for Chinese / Japanese /
+// Korean, where single characters (的, 是) repeat in any two sentences.
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+export function tokens(text) {
+  const out = []
+  for (const run of String(text ?? '').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+    if (!CJK.test(run)) { out.push(run); continue }
+    const chars = [...run]
+    if (chars.length === 1) out.push(run)
+    for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1])
+  }
+  return out
+}
+
+/** How much was said: spaced words, plus CJK characters counted two to a word. */
+export function wordCount(text) {
+  let n = 0
+  for (const run of String(text ?? '').match(/[\p{L}\p{N}]+/gu) ?? []) n += CJK.test(run) ? [...run].length / 2 : 1
+  return n
+}
+
+export class SpokenMemory {
+  constructor({ keepMs = 30_000 } = {}) { this.items = []; this.keepMs = keepMs }
+  add(text, now = Date.now()) { this.items.push({ at: now, words: new Set(tokens(text)) }); this.prune(now) }
+  prune(now = Date.now()) { this.items = this.items.filter(x => now - x.at < this.keepMs) }
+  clear() { this.items = [] }
+  /** The share of what was heard that the agent itself said lately (0–1). */
+  echoShare(text, now = Date.now()) {
+    this.prune(now)
+    const heard = tokens(text)
+    if (!heard.length || !this.items.length) return 0
+    return heard.filter(w => this.items.some(x => x.words.has(w))).length / heard.length
+  }
+  isEcho(text, ratio = 0.6, now = Date.now()) { return this.echoShare(text, now) >= ratio }
+}
+
+/** Short enough to mean "stop talking" on their own. */
+const INTERRUPT = new Set(['stop', 'wait', 'hold on', 'hang on', 'pause', 'no', 'enough',
+  '停', '停下', '停一下', '等等', '等一下', '别说了', '不对', '暂停', '好了', '够了'])
+const clean = t => String(t ?? '').toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').trim().replace(/\s+/g, ' ')
+
+/**
+ * Heard while the agent speaks — does it cut in? A sentence that isn't the agent's own voice (while it
+ * plays, most of what the mic hears IS the agent, so a lower share already counts as echo), or one
+ * interruption word.
+ */
+export function isBargeIn(text, memory, now = Date.now()) {
+  const c = clean(text)
+  if (!c || memory?.isEcho(c, 0.4, now)) return false
+  return wordCount(c) >= 2 || INTERRUPT.has(c)
+}
+/** The same for a transcript still being revised: never on one word, which may yet change. */
+export function isInterimBargeIn(text, memory, now = Date.now()) {
+  const c = clean(text)
+  return !!c && wordCount(c) >= 2 && !memory?.isEcho(c, 0.4, now)
+}
+/** How long an interim must keep counting as cutting in before playback stops. */
+export const INTERIM_BARGE_IN_MS = 300
+
 /**
  * A voice of its own for each agent on a device voice: the same voice, a slightly different pitch
  * and pace, picked from the agent's id — so in a group you hear who is speaking. 1 = unchanged.
@@ -199,6 +261,24 @@ if (typeof process !== 'undefined' && import.meta.url === `file://${process.argv
   a.ok(new Reader().push('word '.repeat(80)).length >= 1, 'a long run starts being read before it ends')
   a.equal(scriptOf('你好'), 'zh'); a.equal(scriptOf('こんにちは'), 'ja'); a.equal(scriptOf('안녕'), 'ko')
   a.equal(scriptOf('Привет'), 'ru'); a.equal(scriptOf('Hello'), '')
+  a.deepEqual(tokens('Hello, World 42'), ['hello', 'world', '42'])
+  a.deepEqual(tokens('巴黎是首都'), ['巴黎', '黎是', '是首', '首都'])
+  a.equal(wordCount('what is three'), 3); a.equal(wordCount('等一下'), 1.5); a.equal(wordCount('请等我说完'), 2.5)
+  const mem = new SpokenMemory(), t0 = 1_000_000
+  mem.add('The capital of France is Paris.', t0)
+  a.ok(mem.isEcho('capital of France is', 0.6, t0 + 500), 'the reply coming back through the mic')
+  a.ok(!mem.isEcho('what about Germany', 0.6, t0 + 500))
+  const old = new SpokenMemory(); old.add('The capital of France is Paris.', t0)
+  a.ok(!old.isEcho('capital of France is', 0.6, t0 + 31_000), 'forgotten after half a minute')
+  a.ok(!isBargeIn('France is Paris', mem, t0 + 500), 'echo never cuts in')
+  a.ok(isBargeIn('what about Germany', mem, t0 + 500), 'a sentence of their own does')
+  a.ok(isBargeIn('Stop!', mem, t0 + 500) && isBargeIn('等一下', mem, t0 + 500), 'one interruption word does')
+  a.ok(!isBargeIn('okay', mem, t0 + 500) && !isBargeIn('好的', mem, t0 + 500), 'one ordinary word does not')
+  a.ok(!isInterimBargeIn('stop', mem, t0 + 500), 'an interim single word never cuts')
+  a.ok(isInterimBargeIn('wait a second', mem, t0 + 500))
+  const zh = new SpokenMemory(); zh.add('图片中是一台安装在墙上的空调。', t0)
+  a.ok(zh.isEcho('一台安装在墙上的', 0.4, t0 + 100) && !zh.isEcho('那温度是多少', 0.4, t0 + 100))
+  a.ok(isBargeIn('那温度是多少呢', zh, t0 + 100) && !isBargeIn('墙上的空调', zh, t0 + 100))
   const t1 = deviceTone('chief'), t2 = deviceTone('operator')
   a.ok(t1.pitch >= 0.85 && t1.pitch <= 1.15 && t1.rate >= 0.94 && t1.rate <= 1.06)
   a.deepEqual(deviceTone('chief'), t1, 'stable per agent')
