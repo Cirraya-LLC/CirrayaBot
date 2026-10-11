@@ -113,12 +113,18 @@ class FakeEngine implements VoiceEngine {
 
   @override
   Future<List<({String name, String lang})>> voices() async => const [];
+
+  final tones = <String>[];
+  @override
+  Future<void> tone(String kind) async => tones.add(kind);
 }
 
 /// The fake server: one agent "a", /api/chat streams [reply] in pieces, records what was sent.
-Future<({HttpServer server, List<Map<String, Object?>> chats, List<String> spoken})> fakeServer({bool upstream = false}) async {
+Future<({HttpServer server, List<Map<String, Object?>> chats, List<String> spoken, List<Map<String, Object?>> ended})> fakeServer(
+    {bool upstream = false, List<Map<String, Object?>> history = const []}) async {
   final chats = <Map<String, Object?>>[];
   final spoken = <String>[];
+  final ended = <Map<String, Object?>>[];
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   server.listen((req) async {
     final res = req.response..headers.contentType = ContentType.json;
@@ -134,6 +140,11 @@ Future<({HttpServer server, List<Map<String, Object?>> chats, List<String> spoke
         res.write(jsonEncode(upstream
             ? {'stt': {'mode': 'upstream', 'provider_id': '', 'model': 'm'}, 'tts': {'mode': 'upstream', 'provider_id': '', 'model': 't', 'voice': 'v'}}
             : {'stt': {'mode': 'device'}, 'tts': {'mode': 'device'}}));
+      case '/api/dm/a':
+        res.write(jsonEncode(history));
+      case '/api/calls/end':
+        ended.add(jsonDecode(body) as Map<String, Object?>);
+        res.write('{"ok":true}');
       case '/api/voice/transcribe':
         res.write(jsonEncode({'text': 'heard by the upstream'}));
       case '/api/voice/speak':
@@ -148,6 +159,15 @@ Future<({HttpServer server, List<Map<String, Object?>> chats, List<String> spoke
         void ev(String name, Map<String, Object?> d) => res.write('event: $name\ndata: ${jsonEncode(d)}\n\n');
         ev('session', {'id': 's1'});
         ev('start', {'botId': 'a'});
+        // "bye": the agent hangs up — its farewell is the reply, then the call ends
+        if ('${(jsonDecode(body) as Map)['text']}'.contains('bye')) {
+          ev('delta', {'botId': 'a', 'text': 'Talk soon!'});
+          ev('end', {'botId': 'a'});
+          ev('call_end', {'title': 'Quick chat'});
+          ev('done', {});
+          await res.close();
+          return;
+        }
         for (final piece in reply) {
           ev('delta', {'botId': 'a', 'text': piece});
           await res.flush();
@@ -160,7 +180,7 @@ Future<({HttpServer server, List<Map<String, Object?>> chats, List<String> spoke
     }
     await res.close();
   });
-  return (server: server, chats: chats, spoken: spoken);
+  return (server: server, chats: chats, spoken: spoken, ended: ended);
 }
 
 Future<void> until(bool Function() f, {String reason = ''}) async {
@@ -307,6 +327,44 @@ void main() {
     expect(f.chats.length, 2, reason: 'its own voice is not sent back to it');
     expect(t.engine.hearing, isTrue, reason: 'and it keeps listening');
     await t.voice.endCall();
+    t.voice.dispose();
+    t.bench.dispose();
+    await f.server.close(force: true);
+  });
+
+  test('the agent hangs up: its farewell is read, then the call ends with a tone', () async {
+    final f = await fakeServer();
+    final t = await start(f.server);
+    t.engine.heard.add('ok bye');
+    expect(await t.voice.startCall(), isNull);
+    final id = t.voice.callId;
+    await until(() => !t.voice.inCall, reason: 'hung up by the agent');
+    expect(t.engine.said.map((x) => x.text), ['Talk soon!'], reason: 'the farewell was read first');
+    expect((f.chats.single['call'] as Map)['id'], id, reason: 'what was said carried the call id');
+    expect(t.engine.tones, ['connect', 'hangup']);
+    await until(() => f.ended.isNotEmpty);
+    expect(f.ended.single, {'session': 's1', 'call': id});
+    t.voice.dispose();
+    t.bench.dispose();
+    await f.server.close(force: true);
+  });
+
+  test('a call in the history folds into one card', () async {
+    final f = await fakeServer(history: [
+      {'id': 1, 'role': 'user', 'content': 'before the call', 'at': 1000},
+      {'id': 2, 'role': 'event', 'at': 2000, 'event': {'kind': 'call', 'phase': 'start', 'call': 'call-x'}},
+      {'id': 3, 'role': 'user', 'content': 'plan the weekend', 'at': 3000},
+      {'id': 4, 'role': 'assistant', 'content': 'Sure.', 'at': 4000},
+      {'id': 5, 'role': 'event', 'at': 182000, 'event': {'kind': 'call', 'phase': 'end', 'call': 'call-x', 'title': 'Weekend plan'}},
+      {'id': 6, 'role': 'user', 'content': 'after the call', 'at': 190000},
+    ]);
+    final t = await start(f.server);
+    final e = t.bench.entries;
+    expect(e.length, 3);
+    expect((e[0] as Said).text, 'before the call');
+    final card = e[1] as CallCard;
+    expect([card.heading, card.said, card.lines.length, (card.lastAt - card.startAt) ~/ 60000], ['Weekend plan', 1, 2, 3]);
+    expect((e[2] as Said).text, 'after the call');
     t.voice.dispose();
     t.bench.dispose();
     await f.server.close(force: true);

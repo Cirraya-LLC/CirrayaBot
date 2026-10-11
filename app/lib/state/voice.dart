@@ -10,6 +10,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -341,6 +342,9 @@ class VoiceController extends ChangeNotifier {
         if (inCall) _afterTurn();
       case 'sent':
         if (inCall) _afterTurn();
+      case 'call_end':
+        // The agent hung up: once its farewell has been read, the call ends.
+        if (inCall) _ending = true;
     }
   }
 
@@ -443,6 +447,12 @@ class VoiceController extends ChangeNotifier {
 
   Conversation? callWith;
   bool get inCall => callWith != null;
+
+  /// This call's id, sent with every message said in it; whether anything was said; whether the agent hung up.
+  String callId = '';
+  bool _sent = false;
+  bool _ending = false;
+  Timer? _waiting;
   CallState callState = CallState.listening;
   bool muted = false;
   bool _listening = false;
@@ -454,6 +464,13 @@ class VoiceController extends ChangeNotifier {
   static const _fatal = {'denied', 'unavailable', 'language'};
 
   void _state(CallState s) {
+    // A soft pulse while it works, so a silent line doesn't sound dead.
+    if (s == CallState.thinking) {
+      _waiting ??= Timer.periodic(const Duration(milliseconds: 1800), (_) => engine.tone('wait').catchError((Object _) {}));
+    } else {
+      _waiting?.cancel();
+      _waiting = null;
+    }
     callState = s;
     _notify();
   }
@@ -472,6 +489,11 @@ class VoiceController extends ChangeNotifier {
     muteTurn = false;
     heard = '';
     _failures = 0;
+    _sent = false;
+    _ending = false;
+    final r = Random.secure();
+    callId = 'call-${List.generate(16, (_) => r.nextInt(16).toRadixString(16)).join()}';
+    engine.tone('connect').catchError((Object _) {});
     if (bench.busyHere) {
       _state(CallState.thinking); // a reply already streaming is read from now on
     } else {
@@ -482,7 +504,11 @@ class VoiceController extends ChangeNotifier {
 
   Future<void> endCall() async {
     if (!inCall) return;
+    final c = callWith!;
     callWith = null;
+    _waiting?.cancel();
+    _waiting = null;
+    engine.tone('hangup').catchError((Object _) {});
     _listenGen++;
     if (_listening) {
       _thrown = true;
@@ -490,6 +516,16 @@ class VoiceController extends ChangeNotifier {
     }
     await stopSpeaking();
     _notify();
+    // Mark the end (the agent hanging up has marked it already), then show the call as its card.
+    final s = bench.session;
+    if (_sent && s != null && bench.current?.id == c.id && bench.current?.kind == c.kind) {
+      try {
+        await bench.api.endCall(s, callId);
+      } on ApiException {
+        // the card shows without an end
+      }
+      await bench.redrawHistory();
+    }
   }
 
   /// Cutting in by voice needs words while the agent speaks: the phone's own recognizer has them, a
@@ -595,16 +631,21 @@ class VoiceController extends ChangeNotifier {
       return;
     }
     _state(CallState.thinking);
+    _sent = true;
     if (bench.atWork) {
-      await bench.interject(text, spoken: true);
+      await bench.interject(text, spoken: true, call: callId);
     } else {
-      await bench.send(text, spoken: true);
+      await bench.send(text, spoken: true, call: callId);
     }
   }
 
   /// The turn ended (or a message was handed to one still at work): listen once it's quiet.
   void _afterTurn() {
     if (!inCall || bench.busy || speaking) return;
+    if (_ending) {
+      unawaited(endCall()); // its farewell has been read
+      return;
+    }
     if (_listening) {
       _settle();
     } else {
@@ -670,6 +711,7 @@ class VoiceController extends ChangeNotifier {
     _disposed = true;
     if (bench.onSpeech == _onStream) bench.onSpeech = null;
     callWith = null;
+    _waiting?.cancel();
     _gen++;
     _queue.clear();
     engine.silence().catchError((Object _) {});

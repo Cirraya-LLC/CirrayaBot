@@ -48,6 +48,7 @@ export const serverStrings = {
   'voice.ttsDevice':     ['Reading aloud is set to this device, not an upstream', '朗读设置的是用设备自带的，不是上游', '朗讀設定的是用裝置內建的，不是上游'],
   'voice.noEndpoint':    ['“{name}” has no speech endpoint (404) — use an upstream that offers /audio/transcriptions and /audio/speech', '「{name}」没有语音接口（404）——换一个提供 /audio/transcriptions 和 /audio/speech 的上游', '「{name}」沒有語音介面（404）——換一個提供 /audio/transcriptions 與 /audio/speech 的上游'],
   'voice.upstreamFailed': ['The voice upstream answered {status}: {detail}', '语音上游返回 {status}：{detail}', '語音上游回傳 {status}：{detail}'],
+  'call.unknown':        ['There is no such call in this session', '这个会话里没有这通通话', '這個工作階段裡沒有這通通話'],
   'voice.unreachable':   ['Couldn\'t reach the voice upstream "{name}": {detail}', '连不上语音上游「{name}」：{detail}', '連不上語音上游「{name}」：{detail}'],
   'voice.empty':         ['Nothing to say or to hear', '没有内容', '沒有內容'],
   'voice.tooLong':       ['At most {n} characters at a time', '一次最多 {n} 个字符', '一次最多 {n} 個字元'],

@@ -229,6 +229,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   /// entry may not be built yet: jump near where it should be, let a frame lay
   /// it out, then bring it properly into view.
   Future<void> _jumpTo(int id) async {
+    // Said in a call: open its card, and go to the card.
+    for (final e in bench.entries) {
+      if (e is CallCard && e.lines.any((l) => l.id == id)) {
+        e.open = true;
+        id = e.id ?? id;
+      }
+    }
     final i = bench.entries.indexWhere((e) => e.id == id);
     if (i < 0) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(tr('ses.tooOld', {'n': 300}))));
@@ -1288,7 +1295,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       news: (n) => NewsCard(bench: bench, news: n),
                       files: (files, mine) => AttachmentList(api: bench.api, files: files, alignEnd: mine),
                       onRead: _voice == null ? null : (said) => _voice!.readMessage(said.text, bench.agentByName(said.speaker)?.id),
-                      reading: _voice?.reading != null && e is Said && e.text == _voice!.reading,
+                      readingText: _voice?.reading,
                     );
                     return e.id != null && e.id == _flashId
                         ? _Flash(key: _flashKey, motion: _motion(context), child: view)

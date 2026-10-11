@@ -89,14 +89,14 @@ class EntryView extends StatelessWidget {
     this.news,
     this.files,
     this.onRead,
-    this.reading = false,
+    this.readingText,
   });
 
   final Entry entry;
 
-  /// Read an agent's message aloud (where this device can speak); [reading] = it is being read now.
+  /// Read an agent's message aloud (where this device can speak); [readingText] = the one being read now.
   final void Function(Said said)? onRead;
-  final bool reading;
+  final String? readingText;
 
   /// Answer an agent's request for a credential: the value, or null for no.
   final void Function(Ran card, String? value)? onSecret;
@@ -128,9 +128,74 @@ class EntryView extends StatelessWidget {
     ),
     Ran r => _ToolCard(r, onApprove, onSecret),
     News n => news?.call(n) ?? const SizedBox.shrink(),
-    Said s => _Bubble(said: s, names: names, colorOf: colorOf, files: files, onRead: onRead, reading: reading),
+    Said s => _Bubble(said: s, names: names, colorOf: colorOf, files: files, onRead: onRead, reading: s.text == readingText),
     SentFile f => _SentFile(sent: f, files: files),
+    CallCard c => _CallCardView(card: c, line: (e) => EntryView(entry: e, names: names, colorOf: colorOf,
+        onApprove: onApprove, onSecret: onSecret, news: news, files: files, onRead: onRead, readingText: readingText)),
   };
+}
+
+/// A voice call as one card: what it was about, how long, how much was said — and the exchange itself,
+/// folded away until tapped.
+class _CallCardView extends StatefulWidget {
+  const _CallCardView({required this.card, required this.line});
+  final CallCard card;
+  final Widget Function(Entry e) line;
+
+  @override
+  State<_CallCardView> createState() => _CallCardViewState();
+}
+
+class _CallCardViewState extends State<_CallCardView> {
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.card;
+    final min = ((c.lastAt - c.startAt) / 60000).round();
+    final meta = [min < 1 ? tr('call.short') : tr('call.min', {'n': min}), tr('call.said', {'n': c.said})].join(' · ');
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 860),
+        decoration: BoxDecoration(color: C.panel, borderRadius: BorderRadius.circular(12), border: Border.all(color: C.line)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            InkWell(
+              key: ValueKey('callcard-${c.call}'),
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => setState(() => c.open = !c.open),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 9, 10, 9),
+                child: Row(
+                  children: [
+                    CircleAvatar(radius: 13, backgroundColor: C.chip, child: Icon(Icons.call, size: 14, color: C.accent)),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        tr('call.card', {'title': c.heading.isEmpty ? tr('call.untitled') : c.heading}),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(meta, style: TextStyle(fontSize: 11.5, color: C.dim)),
+                    Icon(c.open ? Icons.expand_less : Icons.expand_more, size: 18, color: C.dim2),
+                  ],
+                ),
+              ),
+            ),
+            if (c.open)
+              Container(
+                padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),
+                decoration: BoxDecoration(border: Border(top: BorderSide(color: C.line))),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [for (final e in c.lines) widget.line(e)]),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _Bubble extends StatelessWidget {

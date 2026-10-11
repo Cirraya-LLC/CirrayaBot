@@ -6,6 +6,7 @@ import 'package:multi_agent/data/api.dart';
 import 'package:multi_agent/data/settings.dart';
 import 'package:multi_agent/data/speech.dart';
 import 'package:multi_agent/features/workbench/call_page.dart';
+import 'package:multi_agent/features/workbench/message_view.dart';
 import 'package:multi_agent/features/workbench/workbench_page.dart';
 import 'package:multi_agent/l10n.dart';
 import 'package:multi_agent/state/voice.dart';
@@ -32,6 +33,8 @@ class QuietEngine implements VoiceEngine {
   Future<void> silence() async {}
   @override
   Future<List<({String name, String lang})>> voices() async => const [];
+  @override
+  Future<void> tone(String kind) async {}
 }
 
 const op = Conversation(kind: 'agent', id: 'op', name: 'Operator', tag: 'Puts well-thought-out changes into effect',
@@ -39,6 +42,31 @@ const op = Conversation(kind: 'agent', id: 'op', name: 'Operator', tag: 'Puts we
 
 // Its own file: a testWidgets beside real-HttpServer tests breaks them (fake-async binding).
 void main() {
+  testWidgets('a call card at 277 logical px: folded, then open, no overflow', (tester) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final card = CallCard(call: 'call-x', startAt: 0)
+      ..endAt = 185000
+      ..title = 'A rather long title about planning the whole weekend trip'
+      ..lines.addAll([
+        Said(mine: true, speaker: 'User', color: '', text: 'plan the weekend'),
+        Said(mine: false, speaker: 'Operator', color: '#f0a040', text: 'Sure. Saturday morning works.'),
+      ]);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+      builder: (context, child) => UiScale(scale: 1.3, child: child!),
+      home: Scaffold(body: ListView(children: [EntryView(entry: card, names: const ['Operator'], colorOf: (_) => Colors.orange)])),
+    ));
+    expect(find.textContaining('Voice call · A rather long'), findsOneWidget);
+    expect(find.text('3 min · 1 said'), findsOneWidget);
+    expect(find.text('plan the weekend'), findsNothing, reason: 'folded');
+    await tester.tap(find.byKey(const ValueKey('callcard-call-x')));
+    await tester.pump();
+    expect(find.text('plan the weekend'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   // The narrowest phone layouts (360 wide at 130% is 277 logical pixels): the composer gains a
   // microphone and, while nothing is typed, a call button in place of Send.
   for (final (size, scale) in const [(Size(393, 851), 1.15), (Size(360, 640), 1.3)]) {

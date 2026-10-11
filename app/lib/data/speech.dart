@@ -47,6 +47,9 @@ abstract class VoiceEngine {
 
   /// This device's voices.
   Future<List<({String name, String lang})>> voices();
+
+  /// A short call tone: `connect`, `wait` (a soft pulse while it works) or `hangup`.
+  Future<void> tone(String kind);
 }
 
 class ChannelVoice implements VoiceEngine {
@@ -129,6 +132,9 @@ class ChannelVoice implements VoiceEngine {
 
   @override
   Future<void> silence() => _ch.invokeMethod<void>('silence');
+
+  @override
+  Future<void> tone(String kind) => _ch.invokeMethod<void>('tone', {'kind': kind});
 
   @override
   Future<List<({String name, String lang})>> voices() async {

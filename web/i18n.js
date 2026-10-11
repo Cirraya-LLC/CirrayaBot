@@ -455,6 +455,12 @@ const M = {
   'vo.noMic': ['No microphone could be opened', '打不开麦克风', '無法開啟麥克風'],
   'vo.network': ['The browser’s speech service couldn’t be reached', '连不上浏览器的语音服务', '連不上瀏覽器的語音服務'],
   'vo.noVoices': ['This browser can’t speak — pick one of your upstreams in Voice settings', '这个浏览器不能发声，请在语音设置里改用你的上游', '這個瀏覽器無法發聲，請在語音設定裡改用你的上游'],
+  'call.card': ['Voice call · {title}', '语音通话 · {title}', '語音通話 · {title}'],
+  'call.untitled': ['nothing said', '没说话', '沒說話'],
+  'call.short': ['under a minute', '不到一分钟', '不到一分鐘'],
+  'call.min': ['{n} min', '{n} 分钟', '{n} 分鐘'],
+  'call.said': ['{n} said', '说了 {n} 次', '說了 {n} 次'],
+  'vo.state.ended': ['Call ended', '通话已结束', '通話已結束'],
   'b.voicePh': ['Voice name for this agent (upstream voices only; empty = the default)', '这个 Agent 的音色名（仅上游语音；留空用默认）', '這個 Agent 的音色名稱（僅上游語音；留空用預設）'],
   'b.voiceHint': ['Used when replies are read by an upstream (Voice settings). Device voices give each agent its own pitch instead.', '用上游朗读时生效（见语音设置）。用设备语音时，每个 Agent 会自动有不同的音调。', '用上游朗讀時生效（見語音設定）。使用裝置語音時，每個 Agent 會自動有不同的音調。'],
 }

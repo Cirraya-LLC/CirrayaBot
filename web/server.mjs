@@ -260,7 +260,7 @@ async function groupRecallFor(bot) {
  *   tools off — no machine, no tasks.
  */
 function systemFor(bot, memory, { peers = null, box = null, recall = '', skills = [], lead = null, auto = false,
-  groupId = null, task = null, byName = '', open = [], nameOf = id => id, secrets = [] } = {}) {
+  groupId = null, task = null, byName = '', open = [], nameOf = id => id, secrets = [], call = false } = {}) {
   const parts = [bot.persona]
   parts.push(`
 
@@ -336,6 +336,15 @@ ${skills.map(k => `- ${k.name}: ${k.description}`).join('\n')}` : `
 --- Your skills ---
 When a task matches, follow the procedure below.
 ${skills.map(k => `### ${k.name}\nWhen to use: ${k.description}\n\n${k.body}`).join('\n\n')}`)
+  if (call) parts.push(`
+
+--- You are on a voice call ---
+What you write is read aloud as you write it. Answer the way you would speak: short, plain sentences, the
+important thing first. No Markdown, tables, lists or code unless asked for; say numbers, names and links the way
+you would say them aloud. Keep each answer brief — the person can ask for more. Work you would normally do still
+gets done (tools, background tasks); say in a sentence what you are doing so the line isn't silent.
+When the person wants to hang up, or the conversation has clearly come to an end, call end_call with a short
+farewell: it is spoken, then the call ends — so don't also say goodbye in your reply.`)
   if (memory.own?.trim()) parts.push(`\n\n--- Your memory (maintained by humans, only you can read it) ---\n${memory.own.trim()}`)
   if (memory.self?.trim()) parts.push(`
 
@@ -894,6 +903,13 @@ const REQUEST_SECRET = fn('request_secret', 'Ask the user for a credential you n
   format: { type: 'string', description: 'For header: how the value is written, default "Bearer {value}"' } },
 ['name', 'purpose', 'origin'])
 
+// Offered only in a turn that came from a voice call (POST /api/chat with `call`).
+const END_CALL = fn('end_call', 'End the voice call. Use it when the person asks to hang up, or the conversation has clearly ' +
+  'come to an end. Your farewell is spoken as the call ends, so don\'t also say goodbye in your reply. Anything still to do ' +
+  'carries on in the chat afterwards.',
+{ farewell: { type: 'string', description: 'A short goodbye, spoken before hanging up' },
+  title: { type: 'string', description: 'What the call was about, 2-5 words, e.g. "Weekend trip plan"' } }, ['farewell'])
+
 // What each kind of turn may call. Tools off means no machine: only the task tools, which need none.
 const specsFor = ({ task = false, group = false, dispatch = true } = {}) => [
   ...CFG.tools ? TOOL_SPECS : [],
@@ -1202,6 +1218,12 @@ async function runToolRaw(name, args, ctx) {
   // Only what this turn was offered: a model that names a tool it wasn't given doesn't get to use it.
   if (ctx.specs && !ctx.specs.some(s => s.function.name === name)) return `You have no tool called ${name}.`
   if (TASK_TOOL_NAMES.has(name)) return runTaskTool(name, args, ctx)
+  if (name === 'end_call') {
+    if (!ctx.call) return 'There is no call to end.'
+    ctx.call.end = { farewell: clipText(str(args.farewell).trim(), 300), title: clipText(str(args.title).trim(), 40) }
+    ctx.halt = true
+    return 'The call ends once your farewell has been spoken.'
+  }
   if (name === 'http_request') return httpRequest(ctx, args)
   if (name === 'install_packages') return installPackages(c, args)
   if (name === 'request_secret') return requestSecret(ctx, args)
@@ -1553,6 +1575,15 @@ async function openTasksIn(scope, scopeId, session) {
   return { open, nameOf: id => names.get(id) ?? id }
 }
 
+/** The agent hung up (end_call): its farewell is the end of the reply — streamed, so it is read aloud, and kept. */
+function withFarewell(reply, call, onDelta) {
+  const bye = call?.end?.farewell
+  if (!bye) return reply
+  const add = reply ? `\n\n${bye}` : bye
+  onDelta(add)
+  return reply + add
+}
+
 // One-on-one. The user's message is already stored (converse does that before waiting its turn).
 function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session, resume = null) {
   return withAgent(bot.id, async () => {
@@ -1564,7 +1595,8 @@ function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session, r
     const container = CFG.tools ? await ensureContainer(bot.id, null) : null
     const { open, nameOf } = await openTasksIn('dm', bot.id, session)
     const system = systemFor(bot, memory, { box: CFG.tools ? '/work' : null, recall: await groupRecallFor(bot),
-      skills: await db.skillsFor(bot.id), auto: gate.autonomy === 'auto', open, nameOf, secrets: await db.listSecrets(bot.id) })
+      skills: await db.skillsFor(bot.id), auto: gate.autonomy === 'auto', open, nameOf, secrets: await db.listSecrets(bot.id),
+      call: !!gate.call })
     const write = content => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content })
     const later = resume ? await forModel((await db.recent('dm', bot.id, FETCH_MAX, { session }))
       .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto))) : []
@@ -1572,9 +1604,10 @@ function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session, r
     await turn.save(turn.messages)
     const full = await stopNoted(write, signal, () => runAgent(p, turn.messages,
       onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, front: true,
-        specs: specsFor({ dispatch: CFG.tools }), saveReply: write, onStep: turn.save, ...gate }))
-    await write(full)
-    return full
+        specs: [...specsFor({ dispatch: CFG.tools }), ...gate.call ? [END_CALL] : []], saveReply: write, onStep: turn.save, ...gate }))
+    const said = withFarewell(full, gate.call, onDelta)
+    await write(said)
+    return said
   })
 }
 
@@ -1584,7 +1617,7 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
     const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
     const { open, nameOf } = await openTasksIn('group', groupId, session)
     const system = systemFor(bot, memory, { peers, box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id),
-      lead, auto: gate.autonomy === 'auto', groupId, open, nameOf, secrets: await db.listSecrets(bot.id) })
+      lead, auto: gate.autonomy === 'auto', groupId, open, nameOf, secrets: await db.listSecrets(bot.id), call: !!gate.call })
     const rows = readHistory(await db.recent('group', groupId, FETCH_MAX, { session, upto: resume?.read_upto ?? null }), session)
     const later = resume ? await forModel((await db.recent('group', groupId, FETCH_MAX, { session }))
       .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto)), bot) : []
@@ -1593,9 +1626,10 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
     const write = content => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content })
     const reply = await stopNoted(write, signal, () => runAgent(p, turn.messages, onDelta, onTool,
       { container, signal, bot, peers, lang, scope: 'group', scopeId: groupId, session, front: true,
-        specs: specsFor({ group: true }), saveReply: write, onStep: turn.save, ...gate }))
-    await write(reply)
-    return reply
+        specs: [...specsFor({ group: true }), ...gate.call ? [END_CALL] : []], saveReply: write, onStep: turn.save, ...gate }))
+    const said = withFarewell(reply, gate.call, onDelta)
+    await write(said)
+    return said
   })
 }
 
@@ -1634,7 +1668,7 @@ const waitingRuns = new Set()
  */
 async function converse(bots, groupId, providers, text, emit, controller, lang = 'en',
   { unattended = false, session: want = null, run = newRun(), wake = null, files: fileIds = [], interject = false,
-    resume = null } = {}) {
+    resume = null, call = null } = {}) {
   const signal = controller.signal
   const scope = groupId || bots.length > 1 ? 'group' : 'dm'
   const scopeId = groupId ?? (bots.length > 1 ? 'main' : bots[0].id)
@@ -1649,6 +1683,9 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
     // Stored before waiting its turn: the message was sent now, even if the agent is still on the last one.
     // Its attachments become this session's, and are copied into the agent's machine (any member's will
     // do in a group: they all mount its drive); the message keeps where each one landed.
+    // A voice call starts with its first message: the transcript folds what was said in it into one card.
+    if (call && text != null && !await db.callMarked(session, call.id, 'start'))
+      await db.addEvent(scope, scopeId, session, '', { kind: 'call', phase: 'start', call: call.id })
     if (text != null) {
       const files = await deliverToInbox((await db.attachFiles(fileIds, scope, scopeId, session)).map(fileView),
         bots[0], scope === 'group' ? scopeId : null)
@@ -1701,8 +1738,15 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
     const platform = await db.defaultAutonomy()
     // Per agent: its own setting wins, otherwise the platform's. Resolved here so one turn can't
     // change its mind halfway through because someone saved the settings dialog.
+    // From a voice call: the agent speaks briefly and may hang up (end_call sets callState.end).
+    const callState = call ? { id: call.id, end: null } : null
     const gateFor = b => ({ unattended, run, autonomy: resolveAutonomy(b.autonomy, platform),
-      approval: { ...policy, mode: b.approval || policy.mode } })
+      approval: { ...policy, mode: b.approval || policy.mode }, call: callState })
+    const hungUp = async () => {
+      if (!callState?.end) return
+      await endCall(scope, scopeId, session, callState.id, callState.end.title)
+      emit('call_end', { title: callState.end.title })
+    }
     const tool = id => t => emit('tool', { botId: id, ...t, output: t.output?.slice(0, TOOL_TRACE) })
     if (scope === 'dm') {
       const bot = bots[0]
@@ -1712,6 +1756,7 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
         { own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id) },
         d => emit('delta', { botId: bot.id, text: d }), tool(bot.id), signal, lang, gateFor(bot), session, resume)
       emit('end', { botId: bot.id })
+      await hungUp()
       notify({ kind: 'reply', conv: { kind: 'agent', id: bot.id, name: bot.name }, session, agent: bot.name, text: reply })
       return
     }
@@ -1730,7 +1775,14 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
       scopeId, signal, lang, gateFor(speaker), session, resume)
     notify({ kind: 'reply', conv: { kind: 'group', id: scopeId, name: g?.name ?? scopeId }, session, agent: speaker.name, text: reply })
     emit('end', { botId: speaker.id })
+    await hungUp()
   }
+}
+
+/** A call's end, marked once — by end_call, or by the client when the person hangs up. */
+async function endCall(scope, scopeId, session, id, title = '') {
+  if (await db.callMarked(session, id, 'end')) return
+  await db.addEvent(scope, scopeId, session, '', { kind: 'call', phase: 'end', call: id, ...title ? { title } : {} })
 }
 
 // ---------- Notifications ----------
@@ -3030,7 +3082,9 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       // target: {type:'agent'|'group', id}. botIds is the old field, kept for compatibility.
-      const { target, botIds = [], text = '', session = null, files: fileIds = [], interject = false } = await readBody(req)
+      const { target, botIds = [], text = '', session = null, files: fileIds = [], interject = false, call = null } = await readBody(req)
+      // From a voice call: { id } (letters, digits, dashes), the same on every message of that call.
+      const callId = /^[a-z0-9-]{6,40}$/i.test(str(call?.id)) ? str(call.id) : null
       const all = await loadBots()
       let bots, groupId = null
       if (target?.type === 'group') {
@@ -3076,10 +3130,20 @@ const server = createServer(async (req, res) => {
       res.on('close', () => { if (!res.writableEnded) auto ? detachRun(run) : ac.abort() })
 
       try {
-        await converse(bots, groupId, providers, str(text), emit, ac, lang, { session: want, run, files: ids, interject: interject === true })
+        await converse(bots, groupId, providers, str(text), emit, ac, lang,
+          { session: want, run, files: ids, interject: interject === true, call: callId ? { id: callId } : null })
       } finally { clearInterval(ping) }
       emit('done', {})
       return res.end()
+    }
+
+    // The person hung up: mark the call's end in its session (the agent hanging up marks it itself).
+    if (url.pathname === '/api/calls/end' && req.method === 'POST') {
+      const b = await readBody(req)
+      const s = await db.getSession(str(b.session))
+      if (!s || !await db.callMarked(s.id, str(b.call), 'start')) return send(404, { error: t('call.unknown') })
+      await endCall(s.scope, s.scope_id, s.id, str(b.call))
+      return send(200, { ok: true })
     }
 
     // Groups: an entity with a name and members

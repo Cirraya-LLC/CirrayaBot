@@ -1283,6 +1283,11 @@ class Api {
 
   // ── Voice ──
 
+  /// The person hung up: mark the call's end (the agent hanging up has marked it already).
+  Future<void> endCall(String session, String call) async {
+    await _json('POST', '/api/calls/end', {'session': session, 'call': call});
+  }
+
   Future<VoiceSettings> voiceSettings() async => VoiceSettings.fromJson(await _map('GET', '/api/settings/voice'));
 
   Future<VoiceSettings> saveVoiceSettings(VoiceSettings v) async =>
@@ -1377,13 +1382,16 @@ class Api {
   /// block at the end.
   /// [session] null starts a new one; the server says which with a `session` event.
   /// [interject]: the session is at work; this goes into the turn running there, at its next step.
-  Stream<ChatEvent> chat(Conversation c, String text, {String? session, List<String> files = const [], bool interject = false}) async* {
+  /// [call]: said in a voice call (its id) — the agent then speaks briefly and may hang up.
+  Stream<ChatEvent> chat(Conversation c, String text,
+      {String? session, List<String> files = const [], bool interject = false, String? call}) async* {
     final res = await _send('POST', '/api/chat', {
       'target': {'type': c.kind, 'id': c.id},
       'text': text,
       'session': session ?? 'new',
       if (files.isNotEmpty) 'files': files,
       if (interject) 'interject': true,
+      if (call != null) 'call': {'id': call},
     });
     if (res.statusCode >= 400) {
       final body = await res.transform(utf8.decoder).join();
