@@ -20,6 +20,7 @@ import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, atta
   VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { checkVoice, DEFAULT_VOICE, SPEAK_MAX, AUDIO_MAX } from './voice.mjs'
+import { hasEffect, callKey, answerFromLog } from './effects.mjs'
 import { checkSecret, NEEDS, seal, open as unseal, parseKey, newKey, redact, headerFor, isPrivateAddress } from './secrets.mjs'
 import { createServer } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -1138,6 +1139,9 @@ async function httpRequest(ctx, args) {
   }
   const body = method === 'GET' || method === 'HEAD' ? undefined : String(args.body ?? '')
   let r
+  // A request that changes something carries a key of its own, the same on a retry after a restart: an
+  // API that honours Idempotency-Key then does it once (runOnce sets ctx.idem).
+  if (ctx.idem && !Object.keys(headers).some(k => k.toLowerCase() === 'idempotency-key')) headers['Idempotency-Key'] = ctx.idem
   try { r = await sendHttps(url, { method, headers, body }) }
   catch (e) { return `Request failed: ${e.message}` }
   if (secret) db.touchSecret(secret.id).catch(() => {})
@@ -1205,6 +1209,36 @@ async function fillSecret(c, args, ctx) {
  * Run one tool call. Whatever comes back is read by the model, so a secret's value that shows up in
  * it — echoed by a command, an API, a page — is masked first.
  */
+// ---------- Not twice across a restart (effects.mjs) ----------
+const BOOT = randomUUID()            // this server process; log entries from another one are from before a restart
+const effectRun = ctx => ctx.task ? `task:${ctx.task.id}` : ctx.session ? `front:${ctx.session}` : null
+
+/**
+ * Run a call — unless it changes something outside and the log says this very call was already made
+ * before the server restarted, in this same run: then the log answers (its result, or "outcome unknown").
+ */
+async function runOnce(name, args, ctx) {
+  const run = effectRun(ctx)
+  const call = () => runTool(name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
+  if (!run || !hasEffect(name, args)) return call()
+  const key = callKey(name, args)
+  const prior = await db.priorEffect(run, key, BOOT)
+  if (prior) {
+    await db.consumeEffect(prior.id)          // asked again after this, it runs
+    console.warn(`[effects] ${name} not run again after a restart (${prior.status}) in ${run}`)
+    return answerFromLog(name, args, prior)
+  }
+  // A retry of a request whose outcome was unknown goes out with the same key, so an API that honours
+  // Idempotency-Key drops the duplicate.
+  ctx.idem = await db.unfinishedIdem(run, key, BOOT) ?? randomUUID()
+  const id = await db.startEffect(run, key, name, BOOT, ctx.idem)
+  try {
+    const res = await call()
+    await db.finishEffect(id, typeof res === 'string' ? res : res?.text ?? '')
+    return res
+  } finally { delete ctx.idem }
+}
+
 async function runTool(name, args, ctx) {
   const res = await runToolRaw(name, args, ctx)
   const secrets = await secretValues(ctx)
@@ -1421,7 +1455,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       // The refusal goes back as the tool result so the agent adapts instead of retrying: it is the
       // only thing it will ever see about this call.
       const res = allowed
-        ? await runTool(c.name, args, ctx).catch(e => `Tool error: ${errorText(e, 'en')}`)
+        ? await runOnce(c.name, args, ctx)
         : `Refused${ctx.task ? ' by the user' : ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)'
           : ctx.run?.detached ? ' (the user closed the page, so nobody was there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
 Do not try this again. Do it another way, or say why you cannot.`
@@ -1540,7 +1574,8 @@ const storable = messages => messages.map(({ images, ...m }) =>
   images ? { ...m, content: `${m.content ?? ''}\n(a screenshot was here)` } : m)
 
 const RESTART_NOTE = '[Platform] The server restarted while you were working on this turn. What you did before that is above; ' +
-  'a command that was running may or may not have finished. Check where things stand before redoing anything, then carry on.'
+  'a command that was running may or may not have finished. Check where things stand before redoing anything, then carry on. ' +
+  '(A call that changes something and had already been made is not run a second time: you get what it returned, or are told its outcome is unknown.)'
 
 /**
  * The model messages for a front turn, and how to save it after every step. A fresh turn reads the
@@ -1719,8 +1754,9 @@ async function converse(bots, groupId, providers, text, emit, controller, lang =
       runs.set(session, run)
       try { await turn() } finally {
         if (runs.get(session) === run) runs.delete(session)
-        // Finished one way or another (answered, failed, stopped): nothing for a restart to pick up.
+        // Finished one way or another (answered, failed, stopped): nothing for a restart to pick up, nor to redo.
         await db.dropFrontRun(session).catch(e => console.warn(`[resume] could not clear ${session}: ${e.message}`))
+        await db.dropEffects(`front:${session}`).catch(e => console.warn(`[effects] could not clear ${session}: ${e.message}`))
       }
       // Something arrived after the turn's last look at its inbox: answer it rather than drop it.
       // Not after Stop — that stops what was sent along with it.
@@ -1924,6 +1960,8 @@ async function runTask(id) {
       await taskEvent(t, 'failed', message)
   } finally {
     taskAborts.delete(id)
+    // This run is over (done, waiting, failed, stopped): its saved transcript has everything it did.
+    await db.dropEffects(`task:${id}`).catch(e => console.warn(`[effects] could not clear task ${id}: ${e.message}`))
   }
 }
 
@@ -3262,6 +3300,7 @@ if (await db.seedProviderFromEnv(env)) console.log('Created the default upstream
 await mkdir(join(LOCALWORK, 'agents'), { recursive: true })
 await mkdir(join(LOCALWORK, 'groups'), { recursive: true })
 await mkdir(FILES_DIR, { recursive: true })
+await db.pruneEffects().catch(e => console.warn(`[effects] could not prune: ${e.message}`))
 await recoverTasks()
 await recoverFrontRuns()
 
