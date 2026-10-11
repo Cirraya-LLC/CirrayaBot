@@ -91,6 +91,29 @@ class Note extends Entry {
 
 /// News about a background task: it asked something, finished, failed, was
 /// stopped. Whether it can still be answered is read from [Workbench.tasks].
+/// A voice call, folded into one card: what was said in it ([lines]), when it started and ended,
+/// and what it was about — the agent's own title when it hung up, else the first thing the person said.
+class CallCard extends Entry {
+  CallCard({required this.call, required this.startAt});
+  final String call;
+  final int startAt;
+  int? endAt;
+  String title = '';
+  final List<Entry> lines = [];
+
+  /// Unfolded — by a tap, or to show a search hit inside it.
+  bool open = false;
+
+  int get said => lines.whereType<Said>().where((s) => s.mine).length;
+  int get lastAt => endAt ?? startAt;
+
+  String get heading {
+    if (title.isNotEmpty) return title;
+    final first = lines.whereType<Said>().where((s) => s.mine).firstOrNull?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+    return first.length > 60 ? '${first.substring(0, 59)}…' : first;
+  }
+}
+
 class News extends Entry {
   News(this.event);
   final Map<String, Object?> event;
@@ -423,7 +446,7 @@ class Workbench extends ChangeNotifier {
       if (ticket != _shown) return; // two quick clicks: the older answer loses
       entries
         ..clear()
-        ..addAll(history.map((m) => _entryOf(m, c)));
+        ..addAll(_foldCalls(history, c));
       error = null;
     } on ApiException catch (e) {
       error = e.message;
@@ -672,7 +695,7 @@ class Workbench extends ChangeNotifier {
   /// the server hands it to that turn at its next step (or, if it has just ended, starts one). The
   /// answer arrives through the stream already open here, or the history redraw of a running one.
   /// [spoken]: said in a call — the composer's attachments stay where they are.
-  Future<void> interject(String text, {bool spoken = false}) async {
+  Future<void> interject(String text, {bool spoken = false, String? call}) async {
     final c = current;
     final files = spoken ? <Attachment>[] : [for (final p in pending) if (p.attachment != null) p.attachment!];
     if (c == null || (text.trim().isEmpty && files.isEmpty) || (!spoken && uploading)) return;
@@ -685,7 +708,7 @@ class Workbench extends ChangeNotifier {
     if (!spoken) pending.removeWhere((p) => p.attachment != null);
     notifyListeners();
     try {
-      await for (final ev in api.chat(c, text.trim(), session: session, files: [for (final f in files) f.id], interject: true)) {
+      await for (final ev in api.chat(c, text.trim(), session: session, files: [for (final f in files) f.id], interject: true, call: call)) {
         if (ev.name == 'note') add(Note(ev.text));
         if (ev.name == 'error') add(Note('⚠ ${ev.data['message'] ?? ''}'));
       }
@@ -699,7 +722,7 @@ class Workbench extends ChangeNotifier {
 
   /// Sends and streams the reply. Returns when the turn is over. [spoken]: said in a call — the
   /// composer's attachments stay where they are.
-  Future<void> send(String text, {bool spoken = false}) async {
+  Future<void> send(String text, {bool spoken = false, String? call}) async {
     final c = current;
     // A message may be only files; it waits while any is still uploading.
     final files = spoken ? <Attachment>[] : [for (final p in pending) if (p.attachment != null) p.attachment!];
@@ -727,7 +750,7 @@ class Workbench extends ChangeNotifier {
     Said? live;
 
     try {
-      await for (final ev in api.chat(c, text.trim(), session: session, files: [for (final f in files) f.id])) {
+      await for (final ev in api.chat(c, text.trim(), session: session, files: [for (final f in files) f.id], call: call)) {
         if (ev.name == 'session') {
           // Which session this went into — a new one's id, the first time.
           // Remembered even if the person switched away, so coming back lands
@@ -852,6 +875,9 @@ class Workbench extends ChangeNotifier {
                   ..image = _decodeImage(ev.data['image']);
               }
             }
+          case 'call_end':
+            // The agent hung up: the call ends once its farewell has been read.
+            onSpeech?.call('call_end', '', '${ev.data['title'] ?? ''}');
           case 'done':
             break;
         }
@@ -903,6 +929,40 @@ class Workbench extends ChangeNotifier {
 
   /// A stored line becomes a bubble or a finished tool card. A card from history
   /// has no screenshot: only text is stored.
+  /// The history as entries, a voice call's lines folded into its card.
+  List<Entry> _foldCalls(List<Message> history, Conversation c) {
+    final out = <Entry>[];
+    CallCard? open;
+    for (final m in history) {
+      final e = m.event;
+      if (e != null && e['kind'] == 'call') {
+        if (e['phase'] == 'start') {
+          open = CallCard(call: '${e['call']}', startAt: m.at)..id = m.id;
+          out.add(open);
+        } else if (open != null && open.call == '${e['call']}') {
+          open
+            ..endAt = m.at
+            ..title = '${e['title'] ?? ''}';
+          open = null;
+        }
+        continue;
+      }
+      final entry = _entryOf(m, c);
+      if (open != null) {
+        open.lines.add(entry);
+      } else {
+        out.add(entry);
+      }
+    }
+    return out;
+  }
+
+  /// Draw the open conversation's history again (a call just ended: show it as its card).
+  Future<void> redrawHistory() async {
+    final c = current;
+    if (c != null && !busy) await _drawHistory(c, _shown);
+  }
+
   Entry _entryOf(Message m, Conversation c) {
     if (m.event != null) return News(m.event!)..id = m.id;
     final colour = m.mine ? '' : (agentByName(m.speaker)?.color ?? c.color);

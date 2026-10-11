@@ -322,8 +322,14 @@ async function drawHistory(c, ticket) {
     `${c.kind === 'group' ? `/api/groups/${c.id}/messages` : `/api/dm/${c.id}`}?session=${encodeURIComponent(curSession)}`))).json()
   if (ticket !== shown) return false                  // two quick clicks: the earlier one arrived late, drop it
   const log = $('#log'); log.innerHTML = ''
+  let box = null                                       // the call being folded into its card
   for (const e of hist) {
     let el
+    if (e.role === 'event' && e.event?.kind === 'call') {
+      if (e.event.phase === 'start') { box?.done(); box = callCard(e) }
+      else if (box?.id === e.event.call) { box.done(e); box = null }
+      continue
+    }
     if (e.role === 'event') el = eventCard(e.event ?? {})
     // a file the agent sent is drawn as the file, not as the command that sent it
     else if (e.role === 'tool' && e.name === 'send_file' && e.file) el = fileMsg(BOTS.find(b => b.name === e.speaker)?.id ?? c.id, e.file)
@@ -337,11 +343,47 @@ async function drawHistory(c, ticket) {
     } else { (el = bubble(c.id, e.role === 'user')).innerHTML = fmt(e.content); addAtts(el, e.files) }
     // A search hit jumps to its message by this id
     ;(el.closest('.msg') ?? el).dataset.mid = e.id
+    if (box) box.add(el.closest('.msg') ?? el, e)
   }
+  box?.done()
   if (!log.children.length) empty(c)
   log.scrollTop = log.scrollHeight
   return true
 }
+
+/**
+ * A voice call as one card: what it was about, how long, how much was said — and the exchange itself,
+ * folded away. Title: the agent's (end_call), else the first thing the person said.
+ */
+function callCard(start) {
+  const log = $('#log')
+  if (log.querySelector('.empty')) log.innerHTML = ''
+  const el = document.createElement('div')
+  el.className = 'callcard'
+  el.innerHTML = `<button class="cch" aria-expanded="false"><span class="cci">${PHONE_ICON}</span><span class="cct"></span>
+    <small class="ccm"></small><i class="ccx">▾</i></button><div class="ccb" hidden></div>`
+  log.appendChild(el)
+  const body = el.querySelector('.ccb'), head = el.querySelector('.cch')
+  head.onclick = () => { const open = body.hidden; body.hidden = !open; head.setAttribute('aria-expanded', String(open)) }
+  let first = '', said = 0, last = start.at, startId = start.id
+  el.dataset.mid = startId
+  return {
+    id: start.event.call,
+    add(node, row) {
+      body.appendChild(node)
+      if (row.role === 'user' || row.speaker === 'User') { said++; first ||= row.content ?? row.text ?? '' }
+      if (row.at) last = row.at
+    },
+    done(end = null) {
+      const ms = new Date(end?.at ?? last) - new Date(start.at)
+      const min = Math.round(ms / 60000)
+      el.querySelector('.cct').textContent = t('call.card', { title: end?.event?.title || clipped(first, 60) || t('call.untitled') })
+      el.querySelector('.ccm').textContent = [min < 1 ? t('call.short') : t('call.min', { n: min }), t('call.said', { n: said })].join(' · ')
+    },
+  }
+}
+const clipped = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? x.slice(0, n - 1) + '…' : x }
+const PHONE_ICON = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M5.6 2.2 3.4 2.6c-.6.1-1 .7-.9 1.3.8 4.9 4.7 8.8 9.6 9.6.6.1 1.2-.3 1.3-.9l.4-2.2-2.9-1.3-1.3 1.4a8 8 0 0 1-3.9-3.9l1.4-1.3z"/></svg>'
 
 function empty(c) {
   // A fresh session in a conversation that already has others: say plainly that it starts over
@@ -382,6 +424,9 @@ async function switchSession(id, jumpTo = null) {
   if (jumpTo == null) { $('#in').focus(); return }
   const el = $('#log').querySelector(`[data-mid="${jumpTo}"]`)
   if (!el) { note(t('ses.tooOld', { n: 300 })); return }
+  // Said in a call: open its card first
+  const folded = el.closest('.ccb')
+  if (folded?.hidden) folded.closest('.callcard').querySelector('.cch').click()
   el.scrollIntoView({ block: 'center' })
   el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash')
 }
@@ -845,7 +890,7 @@ async function send(spoken = null) {
   try {
     const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
       body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text,
-        session: curSession ?? 'new', files: files.map(f => f.id) }) })
+        session: curSession ?? 'new', files: files.map(f => f.id), ...callTag(spoken) }) })
     if (!res.ok) throw new Error((await errText(res)).slice(0, 300))
     const rd = res.body.getReader(), dec = new TextDecoder()
     let buf = ''
@@ -863,6 +908,8 @@ async function send(spoken = null) {
           if (ticket === shown) { curSession = d.id; loadSessions(target).then(paintSession) }
           continue
         }
+        // The agent hung up (end_call): the call ends once its farewell has been read.
+        if (ev === 'call_end') { if (call.on) call.ending = true; continue }
         // user switched away: keep reading (the server finishes the turn) but don't draw
         if (ticket !== shown) continue
         // Create the bubble on the first delta: tool calls often arrive right after start, and
@@ -947,7 +994,7 @@ async function interject(spoken = null) {
   try {
     const res = await fetch(api('/api/chat'), { method:'POST', headers:{'content-type':'application/json'},
       body: JSON.stringify({ target: cur.kind === 'group' ? { type:'group', id:cur.id } : { type:'agent', id:cur.id }, text,
-        session: curSession, files: files.map(f => f.id), interject: true }) })
+        session: curSession, files: files.map(f => f.id), interject: true, ...callTag(spoken) }) })
     if (!res.ok) throw new Error((await errText(res)).slice(0, 300))
     for (const part of (await res.text()).split('\n\n')) {
       const ev = part.match(/^event: (.+)$/m)?.[1]
@@ -976,7 +1023,25 @@ async function loadVoice() {
   VOICE = await fetch(api('/api/settings/voice')).then(r => r.ok ? r.json() : VOICE).catch(() => VOICE)
 }
 
-const call = { on: false, state: '', mic: null, listener: null, muteTurn: false, paused: false, target: null, watch: null }
+const call = { on: false, state: '', mic: null, listener: null, muteTurn: false, paused: false, target: null, watch: null,
+  id: '', sent: false, ending: false, wait: null }
+/** A spoken message says which call it came from: the agent then speaks briefly, and may hang up. */
+const callTag = spoken => spoken != null && call.on ? { call: { id: call.id } } : {}
+// Tones, made here rather than shipped: connecting, a soft pulse while it works, hanging up.
+let tones = null
+function callSound(kind) {
+  try {
+    tones ??= new AudioContext()
+    const notes = { connect: [[523, 0], [784, 0.14]], hangup: [[659, 0], [440, 0.17]], wait: [[392, 0]] }[kind]
+    const vol = kind === 'wait' ? 0.035 : 0.11, len = kind === 'wait' ? 0.35 : 0.22
+    for (const [f, at] of notes) {
+      const o = tones.createOscillator(), g = tones.createGain(), t0 = tones.currentTime + at
+      o.type = 'sine'; o.frequency.value = f
+      g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(vol, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + len)
+      o.connect(g).connect(tones.destination); o.start(t0); o.stop(t0 + len + 0.05)
+    }
+  } catch {}
+}
 // What was said aloud lately: the agent's voice coming back through the mic is not the person.
 const spoken = new SpokenMemory()
 // Cutting in by voice: with the browser's recognizer, by what is heard (the words are there while it
@@ -1094,6 +1159,9 @@ input.addEventListener('keydown', e => { if (e.key === 'Escape' && dictating) { 
 
 // ── A call: listen → send → read the answer → listen again, hands-free ──
 function callState(state) {
+  // A soft pulse while it works, so a silent line doesn't sound dead
+  if (state === 'thinking' && !call.wait) call.wait = setInterval(() => callSound('wait'), 1800)
+  if (state !== 'thinking') { clearInterval(call.wait); call.wait = null }
   call.state = state
   $('#call').dataset.state = state
   $('#cstate').textContent = t(`vo.state.${state}`)
@@ -1105,7 +1173,9 @@ async function startCall() {
   await loadVoice()
   if (!canListen()) { openVoice(); return }
   if (VOICE.tts.mode === 'device' && !canSpeak()) { note(t('vo.noVoices')); openVoice(); return }
-  Object.assign(call, { on: true, target: { ...cur }, muteTurn: false, paused: false })
+  Object.assign(call, { on: true, target: { ...cur }, muteTurn: false, paused: false, sent: false, ending: false,
+    id: crypto.randomUUID?.() ?? `call-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}` })
+  callSound('connect')
   const c = CONVS.find(x => x.kind === cur.kind && x.id === cur.id) ?? { ...cur, name: $('#htitle').textContent }
   $('#cav').innerHTML = avatar(c)
   $('#cname').textContent = c.name
@@ -1122,15 +1192,24 @@ async function startCall() {
   // A reply already streaming here is read from now on; listening starts when it's done.
   if (busy) callState('thinking'); else callListen()
 }
-function endCall() {
+async function endCall() {
   if (!call.on) return
   call.on = false
+  callSound('hangup')
+  callState('ended')
   call.listener?.abort(); call.listener = null
   stopWatch()
   call.mic?.close(); call.mic = null
   speaker.stop()
   $('#call').hidden = true
   $('#hcall').focus()
+  // Mark the end (the agent hanging up has marked it already), then show the call as its card.
+  const target = call.target
+  if (call.sent && curSession && cur?.kind === target.kind && cur?.id === target.id) {
+    await fetch(api('/api/calls/end'), { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session: curSession, call: call.id }) }).catch(() => {})
+    if (!busy && cur?.kind === target.kind && cur?.id === target.id) drawHistory(cur, shown)
+  }
 }
 /** What the call is doing, when nothing more specific applies. */
 function callSettle() {
@@ -1185,11 +1264,13 @@ async function callListen() {
   $('#cheard').textContent = text; $('#csaid').textContent = ''
   if (!cur || cur.kind !== call.target.kind || cur.id !== call.target.id) { endCall(); return }
   callState('thinking')
+  call.sent = true
   send(text)
 }
 /** The turn ended (or a message was handed to one still working): listen once the voice is quiet. */
 function callAfterTurn() {
   if (!call.on || busy || speaker.busy) return
+  if (call.ending) { endCall(); return }       // its farewell has been read
   if (call.listener) callSettle(); else callListen()
 }
 // Cutting in by loudness (an upstream recognizer with an upstream voice, see above), or a tap / Space.

@@ -46,6 +46,9 @@ export function taskOpening(t, byName) {
 
 /** How a task event reads to the front thread's model. These are the only way it learns what happened. */
 export function eventForModel(e) {
+  if (e.kind === 'call') return e.phase === 'start'
+    ? '[Platform] A voice call started: what follows was said aloud, and your replies were read aloud.'
+    : `[Platform] The voice call ended${e.title ? ` ("${e.title}")` : ''}.`
   const who = `Background task #${e.task}${e.agent ? ` (${e.agent})` : ''} "${e.title ?? ''}"`
   switch (e.kind) {
     case 'asked': return `[Platform] ${who} is waiting for the user: ${e.text}\n` +

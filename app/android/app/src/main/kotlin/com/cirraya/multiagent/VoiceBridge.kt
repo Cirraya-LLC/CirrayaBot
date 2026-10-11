@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaRecorder
@@ -53,6 +55,9 @@ class VoiceBridge(private val activity: MainActivity, messenger: BinaryMessenger
     private var player: MediaPlayer? = null
     private var playId = 0
 
+    private val loud by lazy { ToneGenerator(AudioManager.STREAM_MUSIC, 55) }
+    private val soft by lazy { ToneGenerator(AudioManager.STREAM_MUSIC, 22) }
+
     /** Waiting for the microphone permission: what to do with the answer. */
     private var micWaiting: ((Boolean) -> Unit)? = null
 
@@ -84,6 +89,17 @@ class VoiceBridge(private val activity: MainActivity, messenger: BinaryMessenger
             }
             "play" -> { result.success(null); play(id, call.argument<String>("path") ?: "") }
             "silence" -> { silence(); result.success(null) }
+            // Call tones: the system's own beeps, nothing shipped. The pulse while it works is quieter.
+            "tone" -> {
+                try {
+                    when (call.argument<String>("kind")) {
+                        "connect" -> loud.startTone(ToneGenerator.TONE_PROP_ACK, 250)
+                        "hangup" -> loud.startTone(ToneGenerator.TONE_PROP_NACK, 300)
+                        else -> soft.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+                    }
+                } catch (e: RuntimeException) { }
+                result.success(null)
+            }
             "voices" -> withTts(0) {
                 val list = tts?.voices?.sortedWith(compareBy({ it.locale.toLanguageTag() }, { it.name }))
                     ?.map { mapOf("name" to it.name, "lang" to it.locale.toLanguageTag()) } ?: emptyList()

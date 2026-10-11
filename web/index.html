@@ -183,6 +183,17 @@
   .cbtn.end{background:var(--bad);color:var(--onacc)}
   .chint{color:var(--dim2);font-size:12px;text-align:center;max-width:420px}
   .vsec{font-size:12.5px;font-weight:600;color:var(--dim);margin:2px 0 6px}
+  .callcard{max-width:min(78%,860px);margin:6px 0 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+  .callcard .cch{display:flex;align-items:center;gap:9px;width:100%;padding:9px 12px;text-align:left;color:var(--ink);border-radius:12px}
+  .callcard .cch:hover{background:var(--raise)}
+  .callcard .cci{display:grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--chip);color:var(--accent);flex:none}
+  .callcard .cct{flex:1;min-width:0;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .callcard .ccm{color:var(--dim);font-size:11.5px;flex:none}
+  .callcard .ccx{color:var(--dim2);font-style:normal;transition:transform var(--dur) var(--ease)}
+  .callcard .cch[aria-expanded="true"] .ccx{transform:rotate(180deg)}
+  .callcard .ccb{padding:4px 12px 10px;border-top:1px solid var(--line);display:flex;flex-direction:column}
+  .callcard .ccb[hidden]{display:none}
+  .callcard .ccb .msg{max-width:100%}
   #vdlg [hidden]{display:none}
   .ficon b.half::before{content:'';display:block;width:13px;height:13px;border-radius:50%;
     border:1.5px solid currentColor;background:linear-gradient(90deg,currentColor 50%,transparent 50%)}

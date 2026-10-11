@@ -451,6 +451,14 @@ export async function addEvent(scope, scopeId, session, speaker, event) {
   if (session) await q('update sessions set updated_at = now() where id = $1', [session])
 }
 
+/** Whether a voice call's start / end is already marked in this session. */
+export async function callMarked(session, call, phase) {
+  const { rows } = await q(`select exists (select 1 from messages where session_id = $1 and role = 'event'
+      and content::jsonb ->> 'kind' = 'call' and content::jsonb ->> 'call' = $2 and content::jsonb ->> 'phase' = $3) as yes`,
+  [session, call, phase])
+  return rows[0].yes
+}
+
 /** A finished tool call, kept so the transcript still shows the work after a reload. */
 export async function addTool(scope, scopeId, session, speaker, { name, args, output, file }) {
   // `file`: what send_file sent — the transcript draws the file where the card would be
