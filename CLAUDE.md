@@ -885,7 +885,7 @@ connected to the server and sent messages.
 **1. `enterText(prefix)` isn't typing; it's a whole replacement.**
 
 On the real machine, typing the server address one character at a time with xdotool produced
-`http://127.0.0.1:8080A3LxeQ9xwKlTJCE` — the token stuck onto the end of the address. The root cause was
+`http://127.0.0.1:8080Q7mVx2RkT9pLw4N` — the token stuck onto the end of the address. The root cause was
 rewriting its own controller in `onChanged`: the moment `?k=` was typed the box was replaced with just
 the host, and each later character was appended to **the rewritten** value. **Pasting is a single
 onChanged, so pasting looks completely normal**, which is exactly how it survived.
