@@ -16,6 +16,14 @@ This project's conventions are **defined by this file alone**.
 project sends context to a third-party model upstream, the working directory must be pinned inside
 this tree, and you must make sure the parent file is not carried along.
 
+### 0.0.1 The repo is public (since 2026-10-22)
+
+`github.com/Cirraya-LLC/CirrayaBot`, both `main` and `feat/studio`, with every commit. **Anything committed is
+world-readable**: never a real `ACCESS_TOKEN`, an upstream key, the test box's address+token or password, or the
+phone's PIN — tests and notes use made-up values. Before it went public the whole history was scanned; the one real
+value found was the old `.61` deployment's `ACCESS_TOKEN` (in `settings_test.dart` and 2.19.2), replaced in the
+current tree, still in history — that deployment is gone, and that value must never be reused. No LICENSE yet.
+
 ### 0.1 English by default
 
 Everything in this repo defaults to English: code comments, README, commit messages, and UI
