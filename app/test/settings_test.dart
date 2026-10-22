@@ -21,9 +21,9 @@ void main() {
   });
 
   test('a whole ?k= link is split', () {
-    final s = Settings.fromPastedLink('http://216.195.192.61:8080/?k=A3LxeQ9xwKlTJCE')!;
+    final s = Settings.fromPastedLink('http://216.195.192.61:8080/?k=Q7mVx2RkT9pLw4N')!;
     expect(s.baseUrl, 'http://216.195.192.61:8080');
-    expect(s.token, 'A3LxeQ9xwKlTJCE');
+    expect(s.token, 'Q7mVx2RkT9pLw4N');
   });
 
   test('not a link returns null, no guessing', () {
@@ -48,7 +48,7 @@ void main() {
     );
 
     final field = find.byType(TextField).first;
-    const link = 'http://127.0.0.1:8080/?k=A3LxeQ9xwKlTJCE';
+    const link = 'http://127.0.0.1:8080/?k=Q7mVx2RkT9pLw4N';
     // ⚠️ Must APPEND to the field's current value. enterText(prefix) replaces
     // the whole text from the original prefix each time — then the test stays
     // green even if onChanged rewrites the field. The first version did that
@@ -64,7 +64,7 @@ void main() {
 
     expect(saved, isNotNull);
     expect(saved!.baseUrl, 'http://127.0.0.1:8080');
-    expect(saved!.token, 'A3LxeQ9xwKlTJCE');
+    expect(saved!.token, 'Q7mVx2RkT9pLw4N');
   });
 
   testWidgets('a separately typed token is not overridden by k= in the address', (tester) async {
