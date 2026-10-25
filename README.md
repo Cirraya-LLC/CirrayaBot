@@ -389,3 +389,7 @@ work in the client, on the same data as the web UI. Details in `app/README.md`.
 - `run.sh` / `bots.patch.yml` / `headless.patch.yml` are an earlier experiment running DeepSeek
   Harness, **not part of the product**, kept only for the record (the story is in `CLAUDE.md`
   2.6–2.11).
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
