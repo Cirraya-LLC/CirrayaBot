@@ -22,7 +22,7 @@ this tree, and you must make sure the parent file is not carried along.
 world-readable**: never a real `ACCESS_TOKEN`, an upstream key, the test box's address+token or password, or the
 phone's PIN — tests and notes use made-up values. Before it went public the whole history was scanned; the one real
 value found was the old `.61` deployment's `ACCESS_TOKEN` (in `settings_test.dart` and 2.19.2), replaced in the
-current tree, still in history — that deployment is gone, and that value must never be reused. No LICENSE yet.
+current tree, still in history — that deployment is gone, and that value must never be reused. Licensed **Apache-2.0** (`LICENSE`, 2026-10-25).
 
 ### 0.1 English by default
 

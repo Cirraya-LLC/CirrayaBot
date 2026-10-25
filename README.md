@@ -250,8 +250,13 @@ be behind HTTPS.
 
 ## Known limits
 
-- **Containers have no egress restrictions** — Agents can reach anything on the internet.
+- **Agents reach the whole internet** — only the host, the LAN and cloud metadata addresses are blocked
+  (`AGENT_EGRESS`, see `CLAUDE.md` 2.36.8).
 - **No multi-user**: one token, one data set, no account system.
 - `run.sh` / `bots.patch.yml` / `headless.patch.yml` are an earlier experiment running DeepSeek
   Harness, **not part of the product**, kept only for the record (the story is in `CLAUDE.md`
   2.6–2.11).
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

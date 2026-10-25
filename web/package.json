@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "description": "What the server needs at runtime. The root package.json also carries the old dsh experiment (run.sh); installing it is not needed to run the product.",
+  "license": "Apache-2.0",
   "dependencies": {
     "pg": "8.23.0"
   }
