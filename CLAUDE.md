@@ -24,6 +24,17 @@ phone's PIN — tests and notes use made-up values. Before it went public the wh
 value found was the old `.61` deployment's `ACCESS_TOKEN` (in `settings_test.dart` and 2.19.2), replaced in the
 current tree, still in history — that deployment is gone, and that value must never be reused. Licensed **Apache-2.0** (`LICENSE`, 2026-10-25).
 
+**History was rewritten on 2026-10-25** (the boss: 「那就强制推吧 用tech的」): every commit by `admin@cirraya.com`
+now has `tech@cirraya.com` as author and committer (`git filter-repo --mailmap`, both branches, trees unchanged),
+force-pushed. Commit ids from before that day no longer exist; an old clone needs `git fetch && git reset --hard
+origin/main`, and `./start.sh upgrade` (`git pull --ff-only`) fails in one until then. The local
+`backup/*-history` branches still carry the old ids — never push them. Commits by Claude and by Yangstud were left
+as they were. Commit here as `tech@cirraya.com` (set by `~/.gitconfig-cirraya` on the boss's Mac).
+
+⚠️ A CI run that fails in seconds with no step run and no log is GitHub not starting the runner, not the code: the
+job annotation said "recent account payments have failed or your spending limit needs to be increased" — that was
+while the repo was private (Actions minutes are billed then, free once public).
+
 ### 0.1 English by default
 
 Everything in this repo defaults to English: code comments, README, commit messages, and UI
