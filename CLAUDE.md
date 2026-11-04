@@ -114,6 +114,7 @@ worth zero in security terms.
 - At launch: no Linux desktop / Android / iPad
 - Pricing: only on SuperGrok Heavy (~$300/month) or Cursor Ultra $200/month;
   the $30 SuperGrok **doesn't** have it
+- **All of this is as at launch** — by November it had Windows/Linux/Android/iPad and a $20–30 floor (2.6.2)
 
 ### 2.5 Three one-line conclusions
 
@@ -200,6 +201,54 @@ source, not the README:
   browser per agent, no repeated side effects after a restart + Idempotency-Key. **Still ahead of us, in scope**:
   subscription sign-in for models, Ollama / LM Studio presets (we take any OpenAI-style URL, but ship no presets —
   3.1), a reconciler with run leases (we have one process), iOS.
+
+### 2.6.2 Grok Bot, Devin, OpenAI dots and others (checked 2026-11-04)
+
+The boss: 「以及查询一下现在的grokbot有了哪些我们没有的东西 还有devinbot 还有dot之类的」. Researched from docs,
+release notes and press; dates marked (2nd) were not confirmed against a primary source. **Research, not decisions.**
+
+- **Grok Bot** (docs.x.ai/grok-bot): runs in Cursor's cloud, a Firecracker microVM per *user* — **all of a person's
+  Bots still share one computer** (each now gets its own screen; the docs call them "separate work surfaces, not
+  separate security boundaries"). Since launch: Windows / Linux / Android / iPad, Bots reachable in X Chat and @bot,
+  voice chat + voice memos, Team Bots (one Bot a whole team talks to, team-wide memory and skills), a template
+  marketplace and first-party Bots (Haggle, IncidentWatch, Data Bot), **"Teach a task" (a ≤10-minute browser
+  demonstration becomes a draft skill)**, event triggers (Slack, GitHub, Linear, Sentry, PagerDuty, email, webhook),
+  a Bot email address, Vault (logins, cards; filled without the model seeing them) + 1Password, shopping/payments,
+  Auto Review (a model check, on by default, ≤20 plain-language allow / ask rules), approvals from background work
+  expire after 30 min, Bots acting on your own Mac/PC (ask every time by default), phone calendar/contacts/alarms,
+  memory import from another assistant (but **no memory screen**), enterprise audit/recording/OTel. **No model
+  picker, no Bot-specific spend cap, no public API.** Price: The X Subscription $30/$100/$200 (2026-10-12), usage from
+  a weekly pool shared with Grok and Cursor; quotas cut after 2026-11-01 (2nd).
+- **Devin** (Cognition; no product called "DevinBot" — only its GitHub app `devin-ai-integration[bot]`): **a VM per
+  session**, shell + IDE + browser + full desktop (Linux; Windows and macOS/Xcode VMs; Android emulators), **sleeps
+  after 30 min idle, resumable for 14 days**, declarative environment "blueprints", **"Devin manages Devins"** (a
+  coordinator runs children in parallel, each on its own VM, with ACU caps), Local Hands (a cloud session runs tool
+  calls on your own computer, approved per call), nightly memory "dreaming", Skills (SKILL.md) + plugin marketplace,
+  Automations (Slack/GitHub/Linear/Jira/PagerDuty/webhook/schedule), security profiles (network / MCP allowlists,
+  git read-only), secrets scoped org/personal/repo/session incl. TOTP and browser profiles (bound as env vars — no
+  "the model never sees it" claim), voice calls with interruption, mobile as a PWA, Outposts (sessions on your
+  machines, the "brain" stays in their cloud), budgets and per-session caps. $20 / $200 / Teams, Enterprise in ACUs.
+- **OpenAI "dots"** (DevDay 2026-09-29; Dot by New Computer shut down 2025-10-05): an always-on agent in ChatGPT with
+  its own cloud computer, browser and memory (private memory apart from the shared workspace), **proactive research
+  in the background, read-only without approval, with an Activity View**, Custom Rules allow / ask / **forbid**, an
+  automatic review of account-touching actions, saved passwords kept out of the model, ChatGPT web/mobile + Slack +
+  Teams + texting (iMessage/RCS, the dot texts first; US Pro beta 2026-11-03), 4000+ apps, delegates to Codex,
+  **picks a model per task and can switch mid-task** (2026-11-03). One dot on Pro / Business Premium; specialist dots
+  for enterprise pilots.
+- **Others**: Meta Muse (2026-09-08; a persistent isolated VM per Muse, a "Sentinel" agent controls internet access,
+  hidden credentials, an audit trail of every action, one-time cards; free), Manus 2.0 (2026-09-28; a persistent
+  Ubuntu cloud computer with a public IP at $30–50/month, event automations, Telegram/WhatsApp/Slack/mail entry,
+  desktop app), Claude (Cowork merged into Claude 2026-09-16; cloud tasks keep running with the laptop closed, but a
+  sandbox per session, not a persistent machine; private/metadata addresses blocked, connector tokens outside the
+  sandbox; scheduled tasks, skills, plugins, Chrome side panel).
+- **Where we still lead**: one machine per agent (only Grok still shares one), your own upstreams and models, a
+  per-agent daily spend cap (Grok has none), memory you can see and edit, notifications without Google push,
+  self-hosted, Apache-2.0. **Per-agent machines are no longer rare** (Devin, dots, Muse all have them).
+- **In-scope gaps** (outside channels, connectors, triggers, payments, iOS stay out — 3.1): proactive work + a global
+  activity view; idle machines asleep; a per-agent setup script; "forbid" rules; a model per task / a cheaper model
+  for background work; templates (agents + skills) inside the product; teach-by-demonstration; memory consolidation
+  and import; parallel helpers on their own machines; multiple users / a team agent; acting on the person's own
+  computer from the desktop client.
 
 ## 2.7 So what's left — after checking one by one, only one and a half items
 
