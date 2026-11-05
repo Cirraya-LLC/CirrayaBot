@@ -22,7 +22,8 @@ test('an unused machine is stopped, and comes back on the next turn', async () =
   await s.until(async () => (await calls()).includes(`stop -t 5 ${box}`), { what: 'the machine to go to sleep', timeout: 10_000 })
   a.ok(!(await calls()).includes(`rm -f ${box}`) || (await calls()).filter(l => l === `rm -f ${box}`).length <= 1,
     'stopped, not removed')
-  a.match(s.log(), /went to sleep/)
+  // The fake docker logs the stop before the server, which prints its line once the stop returns: wait for it.
+  await s.until(async () => /went to sleep/.test(s.log()), { what: 'the server to say so', timeout: 5_000 })
 
   const before = (await calls()).filter(l => l.startsWith('run ')).length
   await s.chat({ agent: kim }, 'say hi again')
