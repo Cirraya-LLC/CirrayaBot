@@ -260,6 +260,12 @@ class _ActivityPageState extends State<ActivityPage> {
                   ], tr('act.noComing')),
                   if (machines.isNotEmpty)
                     _section(tr('act.machines'), [
+                      // Plain containers share the server's kernel: said here, where the machines are, too.
+                      if ((a['isolation'] as Map?)?['weaker'] == true)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(tr('iso.weakNote'), style: TextStyle(fontSize: 12, color: C.bad)),
+                        ),
                       Wrap(
                         spacing: 6,
                         runSpacing: 6,
@@ -271,10 +277,12 @@ class _ActivityPageState extends State<ActivityPage> {
                                 [
                                   widget.bench.agents.where((b) => b.id == m['agent_id']).firstOrNull?.name ?? '${m['agent_id']}',
                                   tr('act.m.${m['state']}'),
+                                  if (m['isolation'] is String && m['state'] != 'none') tr('iso.k.${m['isolation']}'),
                                   if (((m['helpers'] as num?) ?? 0) > 0) tr('act.helpers', {'n': '${m['helpers']}'}),
                                 ].join(' · '),
                                 style: TextStyle(fontSize: 11.5, color: m['state'] == 'awake' ? C.accent : C.dim),
                               ),
+                              side: m['isolation'] == 'runc' && m['state'] != 'none' ? BorderSide(color: C.bad) : null,
                             ),
                         ],
                       ),

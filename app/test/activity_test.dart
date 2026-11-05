@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:multi_agent/data/api.dart';
 import 'package:multi_agent/data/settings.dart';
 import 'package:multi_agent/features/workbench/activity_page.dart';
 import 'package:multi_agent/l10n.dart';
@@ -26,9 +27,10 @@ Map<String, Object?> sample() => {
     {'id': 'r1', 'name': 'Morning digest', 'kind': 'agent', 'conv': 'kim', 'conv_name': 'Kim',
       'next_run_at': DateTime.now().add(const Duration(hours: 3)).toIso8601String(), 'running': false},
   ],
+  'isolation': {'tools': true, 'mode': 'auto', 'using': 'runc', 'weaker': true, 'problems': <String>[]},
   'machines': [
-    {'agent_id': 'kim', 'state': 'awake', 'last_use': _now},
-    {'agent_id': 'lee', 'state': 'asleep', 'last_use': _now - 3600000},
+    {'agent_id': 'kim', 'state': 'awake', 'last_use': _now, 'isolation': 'kata'},
+    {'agent_id': 'lee', 'state': 'asleep', 'last_use': _now - 3600000, 'isolation': 'runc'},
     {'agent_id': 'max', 'state': 'none', 'helpers': 2},
   ],
   'actions': [
@@ -39,6 +41,12 @@ Map<String, Object?> sample() => {
 };
 
 void main() {
+  test('isolation comes through JSON; an older server says nothing and shows nothing', () {
+    final i = Isolation.fromJson({'tools': true, 'mode': 'auto', 'using': 'gvisor', 'weaker': false, 'problems': ['x']});
+    expect([i.tools, i.using, i.weaker, i.problems], [true, 'gvisor', false, ['x']]);
+    expect(Isolation.fromJson({}).tools, false);
+  });
+
   for (final (size, scale) in const [(Size(1280, 800), 1.0), (Size(360, 640), 1.3)]) {
     testWidgets('activity at ${size.width.toInt()} ×$scale: every section, no overflow', (tester) async {
       tester.view.physicalSize = size;
@@ -61,6 +69,8 @@ void main() {
       await tester.dragUntilVisible(find.textContaining('Morning digest'), find.byType(ListView), const Offset(0, -150));
       await tester.dragUntilVisible(find.text(tr('act.recent')), find.byType(ListView), const Offset(0, -200));
       expect(find.textContaining('awake'), findsOneWidget);
+      expect(find.textContaining(tr('iso.k.kata')), findsOneWidget, reason: 'each machine says what it runs under');
+      expect(find.text(tr('iso.weakNote')), findsOneWidget, reason: 'and plain containers are called weaker');
       expect(find.textContaining(tr('act.helpers', {'n': '2'})), findsOneWidget,
           reason: 'an agent with helpers running is listed even without a machine of its own');
       expect(tester.takeException(), isNull);

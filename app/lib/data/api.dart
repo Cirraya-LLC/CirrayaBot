@@ -599,6 +599,28 @@ class Allowance {
 }
 
 /// A skill: how to do one kind of job. Same shape as a SKILL.md file.
+/// How agents' machines are kept from the server (`GET /api/isolation`).
+class Isolation {
+  const Isolation({this.tools = false, this.mode = 'auto', this.using, this.weaker = false, this.error = '', this.problems = const []});
+  final bool tools;
+  final String mode;
+
+  /// kata / gvisor / runc; null when none is allowed ([error] says why).
+  final String? using;
+  final bool weaker;
+  final String error;
+  final List<String> problems;
+
+  static Isolation fromJson(Map<String, Object?> j) => Isolation(
+    tools: j['tools'] == true,
+    mode: (j['mode'] as String?) ?? 'auto',
+    using: j['using'] as String?,
+    weaker: j['weaker'] == true,
+    error: (j['error'] as String?) ?? '',
+    problems: ((j['problems'] as List?) ?? const []).map((e) => '$e').toList(),
+  );
+}
+
 /// What a person did in an agent's browser while recording: the raw steps (sent back to draft a skill) and the
 /// same steps as sentences in the reader's language. Passwords are never in either.
 class Recording {
@@ -1467,6 +1489,9 @@ class Api {
   /// Everything every agent is doing, what waits for a person, what is coming up, what was run.
   /// Kept as maps: the page only shows it.
   Future<Map<String, Object?>> activity() => _map('GET', '/api/activity');
+
+  /// What agents' machines run under (set on the server): `using` kata / gvisor / runc, `weaker`, and why not stronger.
+  Future<Isolation> isolation() async => Isolation.fromJson(await _map('GET', '/api/isolation'));
 
   /// Stop one run by its session (the activity page knows the session, not always the conversation).
   Future<void> stopSession(String session) async {

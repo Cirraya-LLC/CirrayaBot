@@ -12,6 +12,8 @@
 //   network           ← a bridge of our own with inter-container traffic off, so agents can't reach
 //                       each other; EGRESS_SCRIPT keeps them off the host and the LAN too — the
 //                       internet stays open, which is the point of an agent with a browser
+//   kernel            ← isolation (runtimeOrder below): a light VM with its own kernel (Kata), gVisor's
+//                       user-space kernel, or — the weakest — the host's own (a plain container)
 //   privileges        ← an ordinary user (uid 1000) with no capabilities and no-new-privileges.
 //                       The container keeps a short capability list only for what the platform
 //                       runs in it as root (docker exec -u 0): installing packages, fixing ownership
@@ -38,8 +40,53 @@ export const groupsLabel = ids => [...new Set(ids)].sort().join(',')
 /** The host directory a helper works in. Outside every desk: no container can plant a link on the way to it. */
 export const helperWork = (hostWork, botId, taskId) => join(hostWork, 'helpers', botId, String(taskId))
 
-/** `docker run` arguments for one agent's container — or, with `helper` (a task id), for a helper of it. */
-export function runArgs({ name, image, hostWork, botId, groups, network, memory = '2g', cpus = '2', helper = null }) {
+// ── Isolation: what an agent's machine runs on ──
+//   kata    a light virtual machine per agent machine (Kata Containers): its own kernel. Needs KVM.
+//   gvisor  gVisor's user-space kernel between the machine and the host's. Works on almost any host.
+//   runc    a plain container on the host's kernel — a kernel bug is a way out.
+// Both of the first two need two things a plain container doesn't (found on real machines, 2026-11-06):
+// Docker's own DNS for the agents' network (127.0.0.11) is wired with rules inside the container's network
+// namespace, which a VM or gVisor's own network stack never sees — so they get a resolver file of ours; and
+// gVisor must run with --overlay2=none, or what an agent installs lives in memory and is gone after every
+// stop (idle sleep stops machines).
+export const RUNTIME_KINDS = ['kata', 'gvisor', 'runc']
+const STRENGTH = { runc: 0, gvisor: 1, kata: 2 }
+
+/**
+ * Docker's runtimes (`docker info` .Runtimes) as kinds we can use, strongest first, one of each, plain
+ * containers always last — and the ones found but not usable, with why.
+ */
+export function availableRuntimes(runtimes) {
+  const usable = [], problems = []
+  for (const [name, r] of Object.entries(runtimes ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+    const type = String(r?.runtimeType ?? ''), path = String(r?.path ?? '')
+    if (/kata/i.test(name) || /kata/i.test(type)) usable.push({ kind: 'kata', name })
+    else if (/runsc/.test(path) || /runsc|gvisor/i.test(name)) {
+      if ((r?.runtimeArgs ?? []).includes('--overlay2=none')) usable.push({ kind: 'gvisor', name })
+      else problems.push({ kind: 'gvisor', name, why: 'overlay' })
+    }
+  }
+  const one = usable.filter((r, i) => usable.findIndex(x => x.kind === r.kind) === i)
+  one.sort((a, b) => STRENGTH[b.kind] - STRENGTH[a.kind])
+  return { usable: [...one, { kind: 'runc', name: null }], problems }
+}
+
+/** What to try for a new machine, in order: `auto` = strongest first, never below `floor`; else exactly that kind. */
+export function runtimeOrder(usable, mode = 'auto', floor = 'runc') {
+  if (mode === 'auto') return usable.filter(r => STRENGTH[r.kind] >= STRENGTH[floor])
+  return usable.filter(r => r.kind === mode)
+}
+
+/** A resolver file for machines that can't use Docker's own DNS. */
+export const resolvConf = servers => servers.map(s => `nameserver ${s}`).join('\n') + '\n'
+
+/**
+ * `docker run` arguments for one agent's container — or, with `helper` (a task id), for a helper of it.
+ * `runtime`: {kind, name} from runtimeOrder (plain container when null); `resolv`: the host path of the
+ * resolver file, mounted only into machines that aren't plain containers.
+ */
+export function runArgs({ name, image, hostWork, botId, groups, network, memory = '2g', cpus = '2', helper = null,
+  runtime = null, resolv = null }) {
   const mounts = [...new Set(groups)].sort().flatMap(g => ['-v', `${join(hostWork, 'groups', g)}:/groups/${g}`])
   const desk = join(hostWork, 'agents', botId)
   const work = helper == null ? ['-v', `${desk}:/work`]
@@ -48,6 +95,8 @@ export function runArgs({ name, image, hostWork, botId, groups, network, memory 
     '--label', `ma.sandbox=${SANDBOX_VERSION}`,
     '--label', `ma.groups=${groupsLabel(groups)}`,
     ...helper == null ? [] : ['--label', `ma.helper=${helper}`],
+    '--label', `ma.runtime=${runtime?.kind ?? 'runc'}`,
+    ...runtime?.name ? ['--runtime', runtime.name] : [],
     '--network', network,
     '--user', `${AGENT_UID}:${AGENT_UID}`,
     '--cap-drop', 'ALL', ...CAPS.flatMap(c => ['--cap-add', c]),
@@ -55,23 +104,27 @@ export function runArgs({ name, image, hostWork, botId, groups, network, memory 
     '--memory', memory, '--cpus', cpus, '--pids-limit', '512',
     ...work,
     ...mounts,
+    ...runtime?.name && resolv ? ['-v', `${resolv}:/etc/resolv.conf:ro`] : [],
     '-w', '/work', image, 'sleep', 'infinity']
 }
 
 // One line from `docker inspect -f INSPECT_FORMAT`. Fields separated by '|'; a missing label
 // comes back as '' or '<no value>' depending on the engine.
 export const INSPECT_FORMAT = '{{.State.Running}}|{{.Config.Image}}|{{index .Config.Labels "ma.sandbox"}}|' +
-  '{{index .Config.Labels "ma.groups"}}|{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}'
+  '{{index .Config.Labels "ma.groups"}}|{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}|' +
+  '{{.HostConfig.Runtime}}'
 
 /** Read an inspect line and decide: reuse the container, start it, or throw it away and make a new one. */
 export function decide(line, want) {
   const clean = v => (v === '<no value>' ? '' : v ?? '')
-  const [running, image, version, groups, work] = String(line ?? '').trim().split('|').map(clean)
+  const [running, image, version, groups, work, runtime] = String(line ?? '').trim().split('|').map(clean)
   if (!running) return { action: 'create' }                      // no container at all
+  // `want.runtime`: the docker runtime name it should run under ('runc' = a plain container); left out, not compared.
   const why = work !== want.work ? `mounted on ${work || '(nothing)'}, wanted ${want.work}`
     : image !== want.image ? `on image ${image}, wanted ${want.image}`
     : version !== SANDBOX_VERSION ? `made under sandbox rules v${version || 1}, now v${SANDBOX_VERSION}`
     : groups !== want.groups ? `sees groups [${groups}], should see [${want.groups}]`
+    : want.runtime && (runtime || 'runc') !== want.runtime ? `running under ${runtime || 'runc'}, wanted ${want.runtime}`
     : ''
   if (why) return { action: 'recreate', why }
   return { action: running === 'true' ? 'reuse' : 'start' }
@@ -169,6 +222,27 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.equal(decide('true|img:2|<no value>|<no value>|/h/ws/agents/x', want).action, 'recreate', 'an old container')
   a.equal(decide(`true|img:1|${SANDBOX_VERSION}|g1,g2|/h/ws/agents/x`, want).action, 'recreate')
   a.equal(decide(`true|img:2|${SANDBOX_VERSION}|g1,g2|/old/agents/x`, want).action, 'recreate')
+  // Isolation: a machine under another runtime than wanted is made again; without a wanted one, not compared.
+  a.equal(decide(`${ok}|runc`, { ...want, runtime: 'kata' }).action, 'recreate')
+  a.equal(decide(`${ok}|kata`, { ...want, runtime: 'kata' }).action, 'reuse')
+  a.equal(decide(`${ok}|`, { ...want, runtime: 'runc' }).action, 'reuse', 'an engine that says nothing is runc')
+  a.equal(decide(`${ok}|runsc`, want).action, 'reuse')
+  const info = availableRuntimes({ runc: { path: 'runc' }, 'io.containerd.runc.v2': { path: 'runc' },
+    runsc: { path: '/usr/local/bin/runsc', runtimeArgs: ['--overlay2=none'] }, kata: { runtimeType: 'io.containerd.kata.v2' } })
+  a.deepEqual(info.usable.map(r => r.kind), ['kata', 'gvisor', 'runc'])
+  a.deepEqual(info.problems, [])
+  const memOnly = availableRuntimes({ runsc: { path: '/usr/local/bin/runsc' } })
+  a.deepEqual([memOnly.usable.map(r => r.kind), memOnly.problems[0].why], [['runc'], 'overlay'], 'gVisor keeping changes in memory is not used')
+  a.deepEqual(runtimeOrder(info.usable).map(r => r.kind), ['kata', 'gvisor', 'runc'])
+  a.deepEqual(runtimeOrder(info.usable, 'auto', 'gvisor').map(r => r.kind), ['kata', 'gvisor'], 'a floor rules out plain containers')
+  a.deepEqual(runtimeOrder(memOnly.usable, 'gvisor'), [], 'asked for exactly gVisor, and it is not usable')
+  const vm = runArgs({ name: 'n', image: 'i', hostWork: '/h', botId: 'x', groups: [], network: 'n',
+    runtime: { kind: 'kata', name: 'kata' }, resolv: '/h/.agent-resolv.conf' })
+  a.ok(vm.includes('--runtime') && vm.includes('ma.runtime=kata') && vm.includes('/h/.agent-resolv.conf:/etc/resolv.conf:ro'))
+  const plain = runArgs({ name: 'n', image: 'i', hostWork: '/h', botId: 'x', groups: [], network: 'n', resolv: '/h/r' })
+  a.ok(!plain.includes('--runtime') && !plain.some(v => v.endsWith(':/etc/resolv.conf:ro')) && plain.includes('ma.runtime=runc'),
+    'a plain container keeps Docker\'s own DNS')
+  a.equal(resolvConf(['8.8.8.8', '1.1.1.1']), 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n')
 
   // The path guard, run for real against a fake container layout: /work and /groups become
   // directories under a temp root, and the paths the scripts see are rewritten onto it.

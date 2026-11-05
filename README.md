@@ -139,15 +139,17 @@ they then get `bash` / read file / write file, executed **inside their own conta
 What each container can reach:
 
 - **Files**: its own desk (`/work`) and the shared drive of **each group it is in**
-  (`/groups/<id>`, and `group/` while it speaks in that group). A group it isn't in doesn't exist
-  in there; leaving a group takes the container down at once, and the next turn starts it without
-  that drive. The platform's code and `.env` are never mounted.
+  (`/groups/<id>`). A group it isn't in doesn't exist in there; leaving a group takes the container
+  down at once, and the next turn starts it without that drive. The platform's code and `.env` are
+  never mounted.
 - **Network**: the Agents share a bridge of their own with container-to-container traffic off, so
-  they can't reach one another. They **can** reach the internet, and any service on the host that
-  listens on all interfaces (the host's SSH, this app's own port if `BIND_ADDR=0.0.0.0`) — put a
-  firewall in front of those if that matters to you.
-- **Privileges**: root inside the container, but with a short capability list and
-  `no-new-privileges`, so `apt install` works and raw sockets don't.
+  they can't reach one another. They reach the internet, but **not this host, the LAN or cloud
+  metadata addresses** (`AGENT_EGRESS=internet`, the default; `open` lifts that).
+- **Privileges**: an ordinary user (uid 1000) with no capabilities and `no-new-privileges`. System
+  packages are installed for the Agent by the platform (`install_packages`).
+- **Kernel**: see *Stronger isolation* below — by default each machine is a small virtual machine
+  when Kata Containers is installed, else runs under gVisor, else is a plain container sharing this
+  host's kernel (the settings and the activity page say which).
 - The file tools refuse a name in a group drive that is a symlink out of it (a group-mate can't
   plant `report.md -> /work/...` to make you read or overwrite your own files). Plain `bash` in the
   container isn't policed that way.
@@ -170,6 +172,32 @@ that would ask is refused there** — a task will never sit waiting for a person
 
 The point of doing it here rather than in the persona: a sentence in a persona is something one
 prompt injection can rewrite. A tool that doesn't run isn't.
+
+### Stronger isolation (Kata Containers / gVisor)
+
+A plain container shares the host's kernel, so a kernel bug is a way out of it. `AGENT_RUNTIME=auto`
+(the default) uses the strongest runtime Docker has: **Kata Containers** (a light VM per machine, its
+own kernel; needs `/dev/kvm`), else **gVisor** (a user-space kernel; works on almost any host), else a
+plain container — and then the settings and the activity page say the isolation is weaker. A runtime
+that fails to start a machine is skipped (with the reason shown) until the server restarts.
+`AGENT_RUNTIME=kata|gvisor|runc` uses exactly that one, with no stepping down;
+`AGENT_RUNTIME_FLOOR=gvisor` keeps `auto` from ever using plain containers. Changing runtime rebuilds
+each machine on its next use: files in `/work` stay, the setup script reinstalls the rest.
+
+Installing either only needs Docker reloaded (`systemctl reload docker`), not restarted:
+
+- **gVisor**: download `gvisor.tar.bz2` (+ `.sha512`) from
+  `https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/`, check it, put `runsc`,
+  `containerd-shim-runsc-v1` and the `gvisor-bin/` folder together in `/usr/local/bin`, then
+  `runsc install -- --overlay2=none`. **The `--overlay2=none` matters**: without it what an Agent
+  installs lives in memory and is lost every time its machine sleeps, so CirrayaBot won't use it.
+- **Kata Containers**: unpack `kata-static-<version>-amd64.tar.zst` from the Kata releases into `/`
+  (the default QEMU setup needs about 0.5 GB of it), link
+  `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2` into `/usr/local/bin`, and add
+  `"kata": {"runtimeType": "io.containerd.kata.v2"}` under `runtimes` in `/etc/docker/daemon.json`.
+
+Both get their own DNS resolvers (`AGENT_DNS`, default `8.8.8.8 1.1.1.1`): Docker's built-in DNS
+doesn't reach inside a VM or gVisor.
 
 ## Exposing it to the internet
 

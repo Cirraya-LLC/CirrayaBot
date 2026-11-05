@@ -17,7 +17,7 @@ import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, pl
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
   taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText,
   CHECKIN_EVERY, GOALS_MAX, isNothingNew, checkinBrief } from './tasks.mjs'
-import { runArgs, decide, groupsLabel, helperWork, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD, EGRESS_SCRIPT, AGENT_UID } from './sandbox.mjs'
+import { runArgs, decide, groupsLabel, helperWork, availableRuntimes, runtimeOrder, resolvConf, RUNTIME_KINDS, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD, EGRESS_SCRIPT, AGENT_UID } from './sandbox.mjs'
 import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, attachmentNote, sendablePath,
   VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
@@ -505,6 +505,82 @@ async function guardEgress() {
     'agents on this engine can reach the host and the LAN')
 }
 
+// ---------- Isolation (sandbox.mjs, runtimeOrder) ----------
+// AGENT_RUNTIME: auto (default) = the strongest this host has — a Kata VM, else gVisor, else a plain container,
+// which the activity page and the settings say is weaker; or exactly kata / gvisor / runc, with no stepping down.
+// AGENT_RUNTIME_FLOOR: in auto, never below this (gvisor = a host without Kata or gVisor runs no agent machines).
+// A runtime that fails to start a machine while the next one succeeds is skipped for the rest of this process.
+const RUNTIME_MODE = String(env.AGENT_RUNTIME || 'auto').toLowerCase()
+const RUNTIME_FLOOR = String(env.AGENT_RUNTIME_FLOOR || 'runc').toLowerCase()
+if (![...RUNTIME_KINDS, 'auto'].includes(RUNTIME_MODE) || !RUNTIME_KINDS.includes(RUNTIME_FLOOR)) {
+  console.error('AGENT_RUNTIME must be auto, kata, gvisor or runc, and AGENT_RUNTIME_FLOOR kata, gvisor or runc')
+  process.exit(1)
+}
+// Machines that can't use Docker's own DNS get these (sandbox.mjs says why). Docker's own fallback is the same pair.
+const AGENT_DNS = String(env.AGENT_DNS || '8.8.8.8 1.1.1.1').split(/[\s,]+/).filter(Boolean)
+const RESOLV = '.agent-resolv.conf'     // in the workspace root, mounted read-only into those machines only
+let runtimeInfo = null
+const brokenRuntimes = new Map()        // docker runtime name -> why it would not start a machine (this process)
+
+function runtimes() {
+  runtimeInfo ??= (async () => {
+    let found = {}
+    try { found = JSON.parse((await cliRun(['info', '--format', '{{json .Runtimes}}'], null, 30_000)).out || '{}') } catch {}
+    const info = availableRuntimes(found)
+    for (const p of info.problems) console.warn(`[isolation] ${tr('en', `isolation.${p.why}`, { name: p.name })}`)
+    await writeFile(join(LOCALWORK, RESOLV), resolvConf(AGENT_DNS))
+    console.log(`[isolation] ${RUNTIME_MODE === 'auto' ? `auto: ${info.usable.map(r => r.kind).join(' → ')}` : RUNTIME_MODE}`)
+    return info
+  })().catch(e => { runtimeInfo = null; throw e })
+  return runtimeInfo
+}
+
+/** What a new machine is tried under, in order, leaving out what failed to start one in this process. */
+async function runtimeChoices() {
+  const order = runtimeOrder((await runtimes()).usable, RUNTIME_MODE, RUNTIME_FLOOR)
+  const left = order.filter(r => !brokenRuntimes.has(r.name ?? 'runc'))
+  if (!left.length) throw new Say('isolation.none', { mode: RUNTIME_MODE === 'auto' ? `auto, ≥ ${RUNTIME_FLOOR}` : RUNTIME_MODE }, 500)
+  return left
+}
+
+/**
+ * `docker run` a machine under the first runtime that starts it. One that fails is skipped from then on —
+ * but only when a later one then works: when every one fails, the problem is the machine, not the runtime.
+ */
+async function startMachine(name, argsFor, what) {
+  const choices = await runtimeChoices()
+  const failed = []
+  for (const [i, c] of choices.entries()) {
+    const r = await cliRun(argsFor(c), null, 180_000)
+    if (r.code === 0) {
+      for (const f of failed) {
+        brokenRuntimes.set(f.name, f.why)
+        console.warn(`[isolation] ${f.kind} would not start ${what} (${f.why}); not used again until a restart`)
+      }
+      return c
+    }
+    failed.push({ name: c.name ?? 'runc', kind: c.kind, why: (r.err || r.out).trim().slice(0, 300) })
+    await cliRun(['rm', '-f', name], null, 60_000)
+    if (i < choices.length - 1) console.warn(`[isolation] ${what} would not start under ${c.kind}; trying ${choices[i + 1].kind}`)
+  }
+  throw new Say('container.startFailed', { id: what, detail: failed[0].why }, 500)
+}
+
+/** For the settings and the activity page: what machines run under, and why not something stronger. */
+async function isolationView(lang) {
+  let info = { usable: [{ kind: 'runc', name: null }], problems: [] }, using = null, error = ''
+  if (CFG.tools) {
+    try { info = await runtimes(); using = (await runtimeChoices())[0].kind } catch (e) { error = errorText(e, lang) }
+  }
+  return {
+    tools: CFG.tools, mode: RUNTIME_MODE, floor: RUNTIME_FLOOR, using, error,
+    available: info.usable.map(r => r.kind),
+    weaker: using === 'runc',
+    problems: [...info.problems.map(p => tr(lang, `isolation.${p.why}`, { name: p.name })),
+      ...[...brokenRuntimes].map(([name, why]) => tr(lang, 'isolation.broken', { name, detail: why }))],
+  }
+}
+
 // name -> the sandbox it was checked against (work|image|groups). A change in any of them — above all
 // the agent's group memberships — makes the next turn inspect it again, and recreate it if needed.
 const containerReady = new Map()
@@ -624,8 +700,9 @@ async function ensureContainerNow(botId, groupId, { setup = true } = {}) {
   const groups = (await db.listGroups()).filter(g => g.members.includes(botId)).map(g => g.id)
   if (groupId && !groups.includes(groupId)) throw new Say('err.noGroup', {}, 404)
   const work = join(HOSTWORK, 'agents', botId)
-  const want = { work, image: IMAGE, groups: groupsLabel(groups) }
-  const sig = `${want.work}|${want.image}|${want.groups}|${setupHash(script)}`
+  const choices = await runtimeChoices()
+  const want = { work, image: IMAGE, groups: groupsLabel(groups), runtime: choices[0].name ?? 'runc' }
+  const sig = `${want.work}|${want.image}|${want.groups}|${want.runtime}|${setupHash(script)}`
   if (containerReady.get(name) !== sig) {
     await ensureNetwork()                  // once per process: the network, and the egress rules on it
     // The host directories have to exist first, or docker makes them itself, owned by root.
@@ -646,9 +723,10 @@ async function ensureContainerNow(botId, groupId, { setup = true } = {}) {
       await cliRun(['exec', '-u', '0', name, 'rm', '-f', '/tmp/browserd.pid'], null, 15_000)
     }
     if (d.action === 'create' || d.action === 'recreate') {
-      const r = await cliRun(runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups, network: NETWORK,
-        memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2' }), null, 120_000)
-      if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
+      const used = await startMachine(name, runtime => runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups,
+        network: NETWORK, memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2', runtime, resolv: join(HOSTWORK, RESOLV) }), botId)
+      // It fell back: the signature must say what it actually runs under, or the next turn recreates it again.
+      if (used.name !== choices[0].name) want.runtime = used.name ?? 'runc'
     }
     // The agent works as uid 1000: its desk and its group drives must be its own — they may have been
     // made by this server (as root) or by an agent from before it stopped running as root. And containers
@@ -662,7 +740,7 @@ async function ensureContainerNow(botId, groupId, { setup = true } = {}) {
     if (fresh || ran)
       await cliRun(['exec', '-u', '0', name, 'sh', '-c', 'rm -f /work/group; chown -R "$0:$0" /work "$@"', AGENT_UID,
         ...groups.map(g => `/groups/${g}`)], null, 300_000)
-    containerReady.set(name, sig)
+    containerReady.set(name, `${want.work}|${want.image}|${want.groups}|${want.runtime}|${setupHash(script)}`)
   }
   touch(name)
   return name
@@ -722,9 +800,9 @@ async function startHelper(botId, t, groupId) {
   await mkdir(join(LOCALWORK, 'agents', botId), { recursive: true })
   if (groupId) await mkdir(join(LOCALWORK, 'groups', groupId), { recursive: true })
   await cliRun(['rm', '-f', name], null, 60_000)             // one left from a run that waited, or from before a restart
-  const r = await cliRun(runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups: groupId ? [groupId] : [], network: NETWORK,
-    memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2', helper: t.id }), null, 120_000)
-  if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
+  await startMachine(name, runtime => runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups: groupId ? [groupId] : [],
+    network: NETWORK, memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2', helper: t.id, runtime,
+    resolv: join(HOSTWORK, RESOLV) }), `${botId}'s helper for task #${t.id}`)
   const script = (await db.getAgent(botId))?.setup?.trim()
   if (script) {
     const s = await cliRun(['exec', '-u', '0', '-e', 'HOME=/root', name, 'bash', '-lc', script], null, SETUP_TIMEOUT)
@@ -2504,13 +2582,18 @@ let psCache = { at: 0, state: new Map() }
 async function machinesNow(bots) {
   if (!CFG.tools) return []
   if (Date.now() - psCache.at > 5000) {
-    const { out } = await cliRun(['ps', '-a', '--filter', `name=^${PREFIX}-agent-`, '--format', '{{.Names}}|{{.State}}'], null, 15_000)
-    psCache = { at: Date.now(), state: new Map(out.split('\n').filter(Boolean).map(l => { const [n, st = 'running'] = l.trim().split('|'); return [n, st] })) }
+    const { out } = await cliRun(['ps', '-a', '--filter', `name=^${PREFIX}-agent-`, '--format', '{{.Names}}|{{.State}}|{{.Label "ma.runtime"}}'], null, 15_000)
+    psCache = { at: Date.now(), state: new Map(), runtime: new Map() }
+    for (const l of out.split('\n').filter(Boolean)) {
+      const [n, st = 'running', rt = ''] = l.trim().split('|')
+      psCache.state.set(n, st)
+      psCache.runtime.set(n, RUNTIME_KINDS.includes(rt) ? rt : 'runc')      // made before isolation existed: plain
+    }
   }
   return bots.map(b => {
     const c = cname(b.id), st = psCache.state.get(c)
     return { agent_id: b.id, state: !st ? 'none' : st === 'running' ? 'awake' : 'asleep', last_use: lastUse.get(c) ?? null,
-      busy: holding.has(c) || inUse(b.id), helpers: helperRunning.get(b.id) ?? 0 }
+      busy: holding.has(c) || inUse(b.id), helpers: helperRunning.get(b.id) ?? 0, isolation: psCache.runtime?.get(c) ?? null }
   })
 }
 
@@ -2545,6 +2628,7 @@ async function activityView(lang) {
       conv_name: convName(r.target_kind, r.target_id), next_run_at: r.next_run_at, running: routineRunning.has(r.id),
       last_status: r.last_status ?? '' })).sort((a, b) => new Date(a.next_run_at) - new Date(b.next_run_at)),
     machines: await machinesNow(bots),
+    isolation: await isolationView(lang),
     checkins: bots.filter(b => b.checkin_every && b.goals && b.checkin_next_at)
       .map(b => ({ agent_id: b.id, who: b.name, next_at: b.checkin_next_at, every: b.checkin_every, last: b.checkin_last }))
       .sort((x, y) => new Date(x.next_at) - new Date(y.next_at)),
@@ -3586,6 +3670,7 @@ const server = createServer(async (req, res) => {
 
     // ---- Runs: what is still being worked on, and stopping it ----
     if (url.pathname === '/api/runs' && req.method === 'GET') return send(200, [...runs.values()].map(runView))
+    if (url.pathname === '/api/isolation' && req.method === 'GET') return send(200, await isolationView(lang))
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(200, await activityView(lang))
 
     if (url.pathname === '/api/runs/stop' && req.method === 'POST') {

@@ -54,6 +54,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   /// Every Agent's own notes tidied each night.
   bool _tidyNightly = false;
+  Isolation? _isolation;
   bool _auto = true;
   bool _busy = false;
   String _protocol = 'chat';
@@ -86,11 +87,34 @@ class _ProvidersPageState extends State<ProvidersPage> {
       _effort = await widget.api.defaultEffort();
       _autonomy = await widget.api.defaultAutonomy();
       _tidyNightly = await widget.api.tidyNightly();
+      _isolation = await widget.api.isolation().catchError((_) => const Isolation());
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
     } on ApiException catch (e) {
       _say(e.message, bad: true);
     }
     if (mounted) setState(() => _loading = false);
+  }
+
+  /// Read-only: set with AGENT_RUNTIME on the server. The weaker case is said in red.
+  List<Widget> _isolationSection(Isolation iso) {
+    final weak = iso.using == null || iso.weaker;
+    return [
+      const SizedBox(height: 14),
+      Text(tr('iso.title'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 6),
+      Text(
+        key: const ValueKey('iso-now'),
+        iso.using == null ? iso.error : [tr('iso.k.${iso.using}'), if (iso.weaker) tr('iso.weaker')].join(' · '),
+        style: TextStyle(fontSize: 13, color: weak ? C.bad : C.ink),
+      ),
+      const SizedBox(height: 4),
+      Text(tr('iso.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+      for (final p in [if (iso.using != null && iso.mode != 'auto') tr('iso.fixed', {'mode': iso.mode}), ...iso.problems])
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text('• $p', style: TextStyle(fontSize: 11.5, color: C.dim)),
+        ),
+    ];
   }
 
   void _fill(Provider? p) {
@@ -518,6 +542,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
                               _say(tr('memset.saved'), good: true);
                             }),
                     ),
+                    if (_isolation?.tools == true) ..._isolationSection(_isolation!),
                     const SizedBox(height: 10),
                     Text(_hint, style: TextStyle(fontSize: 11.5, color: _hintColor)),
                     const SizedBox(height: 16),

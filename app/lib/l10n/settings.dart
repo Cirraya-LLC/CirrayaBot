@@ -179,6 +179,22 @@ const Map<String, List<String>> settingsStrings = {
     '不管上面選的是哪種模式，命中就直接拒絕，不會來問你；定時任務和主動回報也一樣。'
         '和上面的清單一樣，比對的是命令、網頁位址或請求本身，不看檔案內容。',
   ],
+  'iso.title': ['Isolation of agents\u2019 machines', 'Agent 电脑的隔离方式', 'Agent 電腦的隔離方式'],
+  'iso.hint': [
+    'How far each agent\u2019s machine is kept from this server. Set with AGENT_RUNTIME on the server (auto = the strongest available).',
+    '每个 Agent 的电脑和这台服务器隔得有多开。在服务器上用 AGENT_RUNTIME 设置（auto = 自动用能用的最强那种）。',
+    '每個 Agent 的電腦和這台伺服器隔得有多開。在伺服器上用 AGENT_RUNTIME 設定（auto = 自動用能用的最強那種）。',
+  ],
+  'iso.k.kata': ['virtual machine (Kata)', '虚拟机（Kata）', '虛擬機（Kata）'],
+  'iso.k.gvisor': ['gVisor', 'gVisor', 'gVisor'],
+  'iso.k.runc': ['plain container', '普通容器', '普通容器'],
+  'iso.weaker': ['weaker isolation', '隔离较弱', '隔離較弱'],
+  'iso.weakNote': [
+    'Agents\u2019 machines here are plain containers sharing this server\u2019s kernel: weaker isolation. Installing Kata Containers or gVisor makes them stronger.',
+    '这里 Agent 的电脑是普通容器，和服务器共用内核，隔离较弱。装上 Kata Containers 或 gVisor 就能加强。',
+    '這裡 Agent 的電腦是普通容器，和伺服器共用核心，隔離較弱。裝上 Kata Containers 或 gVisor 就能加強。',
+  ],
+  'iso.fixed': ['Fixed to {mode}: no stepping down if it fails.', '固定使用 {mode}：失败时不会降级。', '固定使用 {mode}：失敗時不會降級。'],
   'memset.nightly': ['Tidy every Agent\u2019s own notes each night (03:00 server time)', '每晚自动整理每个 Agent 自己的笔记（服务器时间 03:00）', '每晚自動整理每個 Agent 自己的筆記（伺服器時間 03:00）'],
   'memset.hint': [
     'Done by each Agent\u2019s background model if it has one, otherwise its own, and counted against its daily cap. '

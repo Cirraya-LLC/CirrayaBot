@@ -45,6 +45,12 @@ services:
       AGENT_MEMORY: ${AGENT_MEMORY:-2g}
       AGENT_CPUS: ${AGENT_CPUS:-2}
       AGENT_EXEC_TIMEOUT: ${AGENT_EXEC_TIMEOUT:-120}
+      # what an agent's machine runs on: auto = the strongest available (Kata VM → gVisor → plain container),
+      # or exactly kata / gvisor / runc; in auto never below AGENT_RUNTIME_FLOOR (e.g. gvisor = no plain containers)
+      AGENT_RUNTIME: ${AGENT_RUNTIME:-auto}
+      AGENT_RUNTIME_FLOOR: ${AGENT_RUNTIME_FLOOR:-runc}
+      # resolvers for Kata / gVisor machines, which can't use Docker's own DNS
+      AGENT_DNS: ${AGENT_DNS:-8.8.8.8 1.1.1.1}
       # an agent's machine nobody used for this many minutes is stopped (files kept), 0 = never
       AGENT_IDLE_STOP_MIN: ${AGENT_IDLE_STOP_MIN:-30}
       # how long an agent's setup script may run, in minutes

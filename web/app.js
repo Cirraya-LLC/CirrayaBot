@@ -1804,7 +1804,18 @@ async function loadProvs() {
 }
 
 $('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
-  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); await loadAutonomy(); await loadMemorySettings(); $('#pdlg').showModal() }
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); await loadAutonomy(); await loadMemorySettings(); await loadIsolation(); $('#pdlg').showModal() }
+// Isolation (server: isolationView): read-only here — it is set by AGENT_RUNTIME on the server.
+async function loadIsolation() {
+  const r = await fetch(api('/api/isolation')).then(x => x.ok ? x.json() : null).catch(() => null)
+  $('#isosec').hidden = !r?.tools
+  if (!r?.tools) return
+  const now = $('#isonow')
+  now.textContent = r.using ? t(`iso.k.${r.using}`) + (r.weaker ? ` · ${t('iso.weaker')}` : '') : r.error
+  now.classList.toggle('weak', !r.using || r.weaker)
+  $('#isoprob').innerHTML = (r.using && r.mode !== 'auto' ? [t('iso.fixed', { mode: r.mode })] : []).concat(r.problems)
+    .map(p => `<li>${esc(p)}</li>`).join('')
+}
 async function loadMemorySettings() {
   const r = await fetch(api('/api/settings/memory')).then(x => x.json()).catch(() => null)
   $('#memnightly').checked = r?.tidy_nightly === true
@@ -3051,9 +3062,12 @@ async function paintActivity() {
   actEmpty(coming, 'act.noComing')
   // Machines: awake or asleep (only where Agents have machines).
   const machines = a.machines.filter(m => m.state !== 'none' || m.helpers)
+  // Plain containers share the host's kernel: say so where the machines are listed, not only in the settings.
+  $('#actweak').hidden = !a.isolation?.weaker
+  $('#actweak').textContent = a.isolation?.weaker ? t('iso.weakNote') : ''
   $('#actmachsec').hidden = !machines.length
-  $('#actmach').innerHTML = machines.map(m => `<span class="${m.state}" title="${esc(m.last_use ? t('act.lastUse', { ago: ago(m.last_use) }) : '')}">${
-    esc(bot(m.agent_id)?.name ?? m.agent_id)} · ${esc(t(`act.m.${m.state}`))}${m.helpers ? ` · ${esc(t('act.helpers', { n: m.helpers }))}` : ''}</span>`).join('')
+  $('#actmach').innerHTML = machines.map(m => `<span class="${m.state}${m.isolation === 'runc' && m.state !== 'none' ? ' weak' : ''}" title="${esc(m.last_use ? t('act.lastUse', { ago: ago(m.last_use) }) : '')}">${
+    esc(bot(m.agent_id)?.name ?? m.agent_id)} · ${esc(t(`act.m.${m.state}`))}${m.isolation && m.state !== 'none' ? ` · ${esc(t(`iso.k.${m.isolation}`))}` : ''}${m.helpers ? ` · ${esc(t('act.helpers', { n: m.helpers }))}` : ''}</span>`).join('')
   // What was run lately, newest first; a click opens where it happened.
   const rec = $('#actrecent'); rec.innerHTML = ''
   for (const x of a.actions.slice(0, 60)) {

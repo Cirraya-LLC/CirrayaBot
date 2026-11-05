@@ -9,7 +9,17 @@ forget() { [ -f "$STATE" ] && grep -vxF -- "$1" "$STATE" > "$STATE.tmp"; mv -f "
 case "$1" in
   inspect) exit 1 ;;
   run)
+    # A test that wrote <log>.fail-runtime makes runs under that runtime fail, like a broken Kata.
+    prev=''; for a in "$@"; do
+      if [ "$prev" = --runtime ] && [ -f "$STATE.fail-runtime" ] && [ "$a" = "$(cat "$STATE.fail-runtime")" ]; then
+        echo "failed to create shim task: $a cannot start here" >&2; exit 125
+      fi
+      prev="$a"; done
     prev=''; for a in "$@"; do [ "$prev" = --name ] && echo "$a" >> "$STATE"; prev="$a"; done
+    exit 0 ;;
+  info)
+    # The runtimes the engine knows: what the test wrote to <log>.runtimes, else plain runc.
+    if [ -f "$STATE.runtimes" ]; then cat "$STATE.runtimes"; else echo '{"runc":{"path":"runc"}}'; fi
     exit 0 ;;
   ps) [ -f "$STATE" ] && sort -u "$STATE"; exit 0 ;;
   stop) forget "${@: -1}"; exit 0 ;;

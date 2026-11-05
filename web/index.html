@@ -606,6 +606,12 @@
   .actmach{display:flex;flex-wrap:wrap;gap:6px}
   .actmach span{font-size:11.5px;padding:3px 9px;border-radius:999px;background:var(--chip);color:var(--dim)}
   .actmach span.awake{color:var(--good,#3ecf8e)}
+  .actmach span.weak{box-shadow:inset 0 0 0 1px var(--bad)}
+  .isoweak{display:block;color:var(--bad);font-size:12px;margin:-2px 0 8px}
+  .isonow{font-size:13.5px;margin-bottom:4px}
+  .isonow.weak{color:var(--bad)}
+  .isoprob{margin:6px 0 0;padding-left:18px;font-size:12px;color:var(--dim);line-height:1.5}
+  .isoprob li{overflow-wrap:anywhere}
   .actrec{font-size:12px;padding:4px 2px;border-bottom:1px solid var(--line);display:flex;gap:8px;cursor:pointer}
   .actrec:hover{background:var(--hover)}
   .actrec .t{color:var(--dim2);flex:none;white-space:nowrap;min-width:44px}
@@ -941,7 +947,7 @@
   <section><h5 data-i18n="act.asks"></h5><div id="actasks"></div></section>
   <section><h5 data-i18n="act.working"></h5><div id="actwork"></div></section>
   <section><h5 data-i18n="act.coming"></h5><div id="actcoming"></div></section>
-  <section id="actmachsec"><h5 data-i18n="act.machines"></h5><div id="actmach" class="actmach"></div></section>
+  <section id="actmachsec"><h5 data-i18n="act.machines"></h5><small class="isoweak" id="actweak" hidden></small><div id="actmach" class="actmach"></div></section>
   <section><h5 data-i18n="act.recent"></h5><div id="actrecent"></div></section>
 </dialog>
 
@@ -1073,6 +1079,13 @@
   <h4 style="margin-bottom:10px" data-i18n="memset.title"></h4>
   <label class="pick"><input type="checkbox" id="memnightly"> <span data-i18n="memset.nightly"></span></label>
   <small class="rhint" data-i18n="memset.hint"></small>
+  <div id="isosec" hidden>
+    <div class="psplit"></div>
+    <h4 style="margin-bottom:6px" data-i18n="iso.title"></h4>
+    <div id="isonow" class="isonow"></div>
+    <small class="rhint" data-i18n="iso.hint"></small>
+    <ul id="isoprob" class="isoprob"></ul>
+  </div>
   <small class="phint" id="phint" data-i18n="p.hint"></small>
   <div class="acts">
     <button class="btn" style="margin-right:auto;color:var(--bad);display:none" id="pdel" data-i18n="common.delete"></button>

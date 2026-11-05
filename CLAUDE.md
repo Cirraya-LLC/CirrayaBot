@@ -2704,6 +2704,56 @@ Same image and sandbox rules, the agent's setup script runs in it, name `<prefix
   the front thread is woken with a task's news — it started tasks in a loop until the 8-open-tasks limit stopped it.
   A fake must only act on the newest user message.
 
+## 2.41 Isolation: a VM, gVisor, or a plain container (2026-11-06)
+
+From the November comparison (2.6.2: Grok, Devin, Muse, Manus give each machine its own kernel), the boss:
+「1.做」, default 「auto」. Rules in `web/sandbox.mjs` (`availableRuntimes`, `runtimeOrder`, `runArgs({runtime, resolv})`,
+`decide` compares `{{.HostConfig.Runtime}}`), choice and fallback in server.mjs (`runtimes`, `runtimeChoices`,
+`startMachine`, `isolationView`).
+
+- `AGENT_RUNTIME=auto` (default): `docker info` .Runtimes, **once per process** — Kata (a runtime named or typed
+  `kata`) → gVisor (path `runsc`) → plain container. `kata` / `gvisor` / `runc` = exactly that one, never stepping
+  down. `AGENT_RUNTIME_FLOOR` (default `runc`): auto never goes below it. A runtime that fails to start a machine is
+  skipped for the rest of the process **only when a later one then starts it** (when all fail, it's the machine, not
+  the runtime). Agents' and helpers' machines both go through `startMachine`; the egress-rule container doesn't.
+- A machine under another runtime than wanted is recreated on its next use (`decide`: "running under runc, wanted
+  kata") — so switching rebuilds every agent's machine once; `/work` stays, the setup script (2.40.2) reinstalls.
+- **Visible**: `GET /api/isolation` (`using`, `weaker`, `problems`), also in `/api/activity` (`isolation`), and each
+  machine there carries `isolation` (label `ma.runtime`; no label = made before = plain). Web: a read-only section in
+  the upstreams/settings dialog and a red note + red-ringed chips on the activity page; client the same
+  (`providers_page.dart`, `activity_page.dart`).
+- ⚠️ **Docker's own DNS doesn't reach a VM or gVisor**: on a user-defined network `/etc/resolv.conf` says
+  `127.0.0.11`, which Docker wires with rules inside the container's network namespace; Kata's guest and gVisor's own
+  network stack never see them, so **every name lookup failed** (IPs worked). Those machines get
+  `workspace/.agent-resolv.conf` mounted read-only (`AGENT_DNS`, default `8.8.8.8 1.1.1.1` — Docker's own fallback is
+  Google's). Plain containers keep Docker's DNS.
+- ⚠️ **gVisor by default keeps a machine's changes in memory** (`--overlay2=root:self`): after a stop/start
+  everything outside `/work` was gone — idle sleep (2.40.3) would wipe every install. With `--overlay2=none` they
+  stay (`/tmp` is still emptied, like a reboot; the server re-pushes its daemons). **A gVisor runtime without that
+  argument is not used** — `isolation.overlay` says how to fix it. Kata keeps everything, `/tmp` included.
+- ⚠️ `docker cp` into a gVisor machine doesn't reach it (the server never uses it; it pushes through `docker exec`).
+- **gVisor's release changed shape** (2026-11): `.../latest/x86_64/runsc` is 404; there is one `gvisor.tar.bz2`
+  (+ `.sha512`) with `runsc`, `containerd-shim-runsc-v1` and a **`gvisor-bin/` folder (the Sentry) that must sit
+  next to `runsc`**. **Kata 4.3.1's static tarball is 1 GB** (all hypervisors, kernels, confidential and NVIDIA
+  images); streaming it through `zstd -dc | tar -x` with excludes (`openvmm`, `*debug*`, `*nvidia*`, `*confidential*`,
+  `*coco*`, `*devkit*`, `*mariner*`, `*tdx*`, `*snp*`, `*dragonball*`, `nydusd`) leaves 480 MB for the default QEMU
+  setup. Kata registers as `"kata": {"runtimeType": "io.containerd.kata.v2"}` with the runtime-rs shim on PATH.
+  **Both need only `systemctl reload docker`** — no restart; the other projects' containers stayed up (checked).
+- Test box (2026-11-06): it is itself a KVM guest with nested virtualisation (`/dev/kvm`), gVisor 20261102 and Kata
+  4.3.1 installed, Docker's `daemon.json` has `runsc` (with `--overlay2=none`) and `kata`; a backup of the file before
+  Kata is next to it. Our old images were removed (their layers stay in the shared build cache — not pruned, it holds
+  other projects' too).
+- Verified there, Kata and gVisor both, by hand and through the real server: uid 1000, CapEff 0, NoNewPrivs; DNS and
+  HTTPS with the resolver file; host / bridge gateway / LAN / metadata blocked; root `apt-get` (after `update`);
+  browser open/read/screenshot; Xvfb desktop + terminal; listening ports in `/proc/net/tcp`; installs kept across
+  stop/start; `docker stats`. Through the server under Kata: Probe's plain container recreated as a VM (kernel 6.18),
+  demonstration recording (2.40.9), two helpers in two VMs with copy-back and cleanup. A Kata VM starts in ~5 s.
+  Tests: `test/e2e/isolation.test.mjs` (fake engine: auto picks Kata + resolver file; Kata failing → gVisor, said,
+  not retried; in-memory gVisor refused → plain, weaker; floor gvisor with nothing → the turn says why; exact kata
+  doesn't step down), sandbox self-test (Linux), `app/test/activity_test.dart`.
+- **Not verified**: podman with these runtimes; Kata with Firecracker / Cloud Hypervisor (only QEMU); idle sleep's
+  timing under Kata end to end (stop/start and stats were checked separately).
+
 ## 3. What runs now
 
 ```bash
