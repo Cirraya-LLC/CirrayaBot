@@ -20,6 +20,7 @@ import 'package:flutter/services.dart';
 import '../../data/api.dart';
 import '../../l10n.dart';
 import '../../theme/app_theme.dart';
+import 'teach.dart';
 
 /// The page is 1280×800 in the Agent's browser (browserd.py's viewport).
 const _viewW = 1280.0, _viewH = 800.0;
@@ -308,6 +309,11 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
   Offset _lastDownAt = Offset.zero;
   int _clickCount = 1;
 
+  /// A demonstration being recorded (teach.dart): since when, and a tick for the time shown.
+  DateTime? _recSince;
+  Timer? _recTick;
+  String _note = '';
+
   @override
   void initState() {
     super.initState();
@@ -325,7 +331,71 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
     } else {
       startPolling();
       if (widget.debugInput == null) _connectInput();
+      _loadRecording();
     }
+  }
+
+  // ── Recording a demonstration ──
+  Future<void> _loadRecording() async {
+    try {
+      final since = await widget.api.recordingSince(widget.agentId);
+      if (mounted) _setRec(since);
+    } on ApiException {
+      // An older server has no recorder: the button just starts one, which then says why it can't.
+    }
+  }
+
+  void _setRec(DateTime? since) {
+    _recTick?.cancel();
+    setState(() {
+      _recSince = since;
+      _note = '';
+    });
+    if (since != null) {
+      _recTick = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  String get _elapsed {
+    final s = DateTime.now().difference(_recSince ?? DateTime.now()).inSeconds.clamp(0, 99 * 60);
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _toggleRecording() async {
+    if (_recSince != null) return _stopRecording();
+    setState(() {
+      _busy = true;
+      error = '';
+    });
+    try {
+      _setRec(await widget.api.startRecording(widget.agentId));
+      if (_ws == null && widget.debugInput == null) _connectInput();
+    } on ApiException catch (e) {
+      if (mounted) setState(() => error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Stop, show the steps, and on "Draft a skill" open the draft in the skill library.
+  Future<void> _stopRecording() async {
+    _setRec(null);
+    final Recording rec;
+    try {
+      rec = await widget.api.stopRecording(widget.agentId);
+    } on ApiException catch (e) {
+      if (mounted) setState(() => error = e.message);
+      return;
+    }
+    if (!mounted) return;
+    if (rec.steps.isEmpty) {
+      setState(() => _note = tr('teach.empty'));
+      return;
+    }
+    final draft = await showTeachDialog(context, api: widget.api, agentId: widget.agentId, name: widget.name, recording: rec);
+    if (draft != null && mounted) await openDraft(context, widget.api, draft);
   }
 
   Future<void> _connectInput() async {
@@ -354,6 +424,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
   @override
   void dispose() {
     _ws?.close();
+    _recTick?.cancel();
     _moveTimer?.cancel();
     _wheelTimer?.cancel();
     _imeIdle?.cancel();
@@ -586,181 +657,215 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
     final narrow = MediaQuery.sizeOf(context).width < 640;
     final side = narrow ? 4.0 : 14.0;
     final touch = _lastWasTouch ?? narrow;
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: C.side,
-        titleSpacing: 0,
-        title: Row(
+    // Leaving while recording stops it and shows the steps first: a recording nobody can see is not left running.
+    return PopScope(
+      canPop: _recSince == null,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final nav = Navigator.of(context);
+        await _stopRecording();
+        if (mounted) nav.pop();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          backgroundColor: C.side,
+          titleSpacing: 0,
+          title: Row(
+            children: [
+              Flexible(
+                child: Text(
+                  tr(_desk ? 'dk.title' : 'br.title', {'name': widget.name}),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 14.5),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  s?.title ?? '',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, color: C.dim),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            if (_desk)
+              IconButton(
+                tooltip: tr('dk.terminal'),
+                onPressed: _busy ? null : () => _act({'action': 'terminal'}),
+                icon: const Icon(Icons.terminal, size: 18),
+              )
+            else ...[
+              if (_recSince == null)
+                IconButton(
+                  key: const ValueKey('teach-record'),
+                  tooltip: tr('teach.record'),
+                  onPressed: _busy ? null : _toggleRecording,
+                  icon: Icon(Icons.fiber_manual_record, size: 18, color: C.bad),
+                )
+              else
+                Tooltip(
+                  message: tr('teach.stop'),
+                  child: TextButton.icon(
+                    key: const ValueKey('teach-stop'),
+                    onPressed: _toggleRecording,
+                    icon: Icon(Icons.stop_rounded, size: 18, color: C.bad),
+                    label: Text(
+                      _elapsed,
+                      style: TextStyle(color: C.bad, fontSize: 13, fontFeatures: const [FontFeature.tabularFigures()]),
+                    ),
+                  ),
+                ),
+              IconButton(
+                tooltip: tr('br.back'),
+                onPressed: _busy || s == null ? null : () => _act({'action': 'back'}),
+                icon: const Icon(Icons.arrow_back_ios_new, size: 16),
+              ),
+              IconButton(
+                tooltip: tr('common.refresh'),
+                onPressed: _busy || s == null ? null : () => _act({'action': 'reload'}),
+                icon: const Icon(Icons.refresh, size: 18),
+              ),
+            ],
+            const SizedBox(width: 8),
+          ],
+        ),
+        body: Column(
           children: [
-            Flexible(
-              child: Text(
-                tr(_desk ? 'dk.title' : 'br.title', {'name': widget.name}),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 14.5),
+            if (_desk) const SizedBox(height: 8) else Padding(
+              padding: EdgeInsets.fromLTRB(side, 10, side, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _address,
+                      focusNode: _addressFocus,
+                      onSubmitted: (_) => _openAddress(),
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(isDense: true, hintText: tr('br.addressHint')),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(onPressed: _busy ? null : _openAddress, child: Text(tr('br.open'))),
+                ],
               ),
             ),
-            const SizedBox(width: 10),
             Expanded(
-              child: Text(
-                s?.title ?? '',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: C.dim),
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: side),
+                child: Center(
+                  child: s == null
+                      ? Text(tr(loaded ? 'br.notOpenLong' : 'br.connecting'), style: TextStyle(color: C.dim))
+                      // Not focusable itself: key events from the hidden text field (which
+                      // holds the focus) bubble up here first, before the app's own shortcuts.
+                      : Focus(
+                          canRequestFocus: false,
+                          skipTraversal: true,
+                          onKeyEvent: _onKey,
+                          child: AspectRatio(
+                            aspectRatio: _viewW / _viewH,
+                            child: LayoutBuilder(
+                              builder: (context, box) => Stack(
+                                children: [
+                                  // The IME sink. It has to be on screen and focused for the
+                                  // input method to attach; invisible and a pixel wide.
+                                  Positioned(
+                                    left: 0,
+                                    top: 0,
+                                    width: 1,
+                                    height: 1,
+                                    child: Opacity(
+                                      opacity: 0,
+                                      child: TextField(
+                                        controller: _ime,
+                                        focusNode: _keys,
+                                        autocorrect: false,
+                                        enableSuggestions: false,
+                                      ),
+                                    ),
+                                  ),
+                                  Positioned.fill(
+                                    child: MouseRegion(
+                                      cursor: SystemMouseCursors.basic,
+                                      onHover: (e) => _move(e.localPosition, box.biggest),
+                                      child: Listener(
+                                        onPointerDown: (e) => _pointerDown(e, box.biggest),
+                                        onPointerMove: (e) => _pointerMove(e, box.biggest),
+                                        onPointerUp: (e) => _pointerUp(e, box.biggest),
+                                        onPointerCancel: _pointerCancel,
+                                        onPointerSignal: (e) {
+                                          if (e is PointerScrollEvent) {
+                                            _send({
+                                              't': 'wheel',
+                                              ..._at(e.localPosition, box.biggest),
+                                              'dx': e.scrollDelta.dx,
+                                              'dy': e.scrollDelta.dy,
+                                            });
+                                          }
+                                        },
+                                        child: DecoratedBox(
+                                          position: DecorationPosition.foreground,
+                                          decoration: BoxDecoration(
+                                            border: Border.all(color: typing ? C.accent : C.line, width: typing ? 2 : 1),
+                                          ),
+                                          child: Image.memory(s.image, fit: BoxFit.fill, gaplessPlayback: true),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: EdgeInsets.fromLTRB(side == 4 ? 8 : 14, 8, side == 4 ? 8 : 14, 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      error.isNotEmpty
+                          ? error
+                          : _recSince != null
+                          ? tr('teach.recNote')
+                          : _note.isNotEmpty
+                          ? _note
+                          : [
+                              tr(
+                                _wsFailed
+                                    ? 'br.noDirect'
+                                    : typing
+                                    ? 'br.typing'
+                                    : touch
+                                    ? 'br.tapToType'
+                                    : 'br.clickToType',
+                              ),
+                              tr(streaming ? 'br.live' : 'br.polling'),
+                              tr('br.shared', {'name': widget.name}),
+                            ].join(' · '),
+                      // A short screen with the keyboard up has little room below the picture.
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11.5, color: error.isNotEmpty ? C.code : C.dim2),
+                    ),
+                  ),
+                  if (_busy)
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 1.6, color: C.dim),
+                    ),
+                ],
               ),
             ),
           ],
         ),
-        actions: [
-          if (_desk)
-            IconButton(
-              tooltip: tr('dk.terminal'),
-              onPressed: _busy ? null : () => _act({'action': 'terminal'}),
-              icon: const Icon(Icons.terminal, size: 18),
-            )
-          else ...[
-            IconButton(
-              tooltip: tr('br.back'),
-              onPressed: _busy || s == null ? null : () => _act({'action': 'back'}),
-              icon: const Icon(Icons.arrow_back_ios_new, size: 16),
-            ),
-            IconButton(
-              tooltip: tr('common.refresh'),
-              onPressed: _busy || s == null ? null : () => _act({'action': 'reload'}),
-              icon: const Icon(Icons.refresh, size: 18),
-            ),
-          ],
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: Column(
-        children: [
-          if (_desk) const SizedBox(height: 8) else Padding(
-            padding: EdgeInsets.fromLTRB(side, 10, side, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _address,
-                    focusNode: _addressFocus,
-                    onSubmitted: (_) => _openAddress(),
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(isDense: true, hintText: tr('br.addressHint')),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(onPressed: _busy ? null : _openAddress, child: Text(tr('br.open'))),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: side),
-              child: Center(
-                child: s == null
-                    ? Text(tr(loaded ? 'br.notOpenLong' : 'br.connecting'), style: TextStyle(color: C.dim))
-                    // Not focusable itself: key events from the hidden text field (which
-                    // holds the focus) bubble up here first, before the app's own shortcuts.
-                    : Focus(
-                        canRequestFocus: false,
-                        skipTraversal: true,
-                        onKeyEvent: _onKey,
-                        child: AspectRatio(
-                          aspectRatio: _viewW / _viewH,
-                          child: LayoutBuilder(
-                            builder: (context, box) => Stack(
-                              children: [
-                                // The IME sink. It has to be on screen and focused for the
-                                // input method to attach; invisible and a pixel wide.
-                                Positioned(
-                                  left: 0,
-                                  top: 0,
-                                  width: 1,
-                                  height: 1,
-                                  child: Opacity(
-                                    opacity: 0,
-                                    child: TextField(
-                                      controller: _ime,
-                                      focusNode: _keys,
-                                      autocorrect: false,
-                                      enableSuggestions: false,
-                                    ),
-                                  ),
-                                ),
-                                Positioned.fill(
-                                  child: MouseRegion(
-                                    cursor: SystemMouseCursors.basic,
-                                    onHover: (e) => _move(e.localPosition, box.biggest),
-                                    child: Listener(
-                                      onPointerDown: (e) => _pointerDown(e, box.biggest),
-                                      onPointerMove: (e) => _pointerMove(e, box.biggest),
-                                      onPointerUp: (e) => _pointerUp(e, box.biggest),
-                                      onPointerCancel: _pointerCancel,
-                                      onPointerSignal: (e) {
-                                        if (e is PointerScrollEvent) {
-                                          _send({
-                                            't': 'wheel',
-                                            ..._at(e.localPosition, box.biggest),
-                                            'dx': e.scrollDelta.dx,
-                                            'dy': e.scrollDelta.dy,
-                                          });
-                                        }
-                                      },
-                                      child: DecoratedBox(
-                                        position: DecorationPosition.foreground,
-                                        decoration: BoxDecoration(
-                                          border: Border.all(color: typing ? C.accent : C.line, width: typing ? 2 : 1),
-                                        ),
-                                        child: Image.memory(s.image, fit: BoxFit.fill, gaplessPlayback: true),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-              ),
-            ),
-          ),
-          Padding(
-            padding: EdgeInsets.fromLTRB(side == 4 ? 8 : 14, 8, side == 4 ? 8 : 14, 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    error.isNotEmpty
-                        ? error
-                        : [
-                            tr(
-                              _wsFailed
-                                  ? 'br.noDirect'
-                                  : typing
-                                  ? 'br.typing'
-                                  : touch
-                                  ? 'br.tapToType'
-                                  : 'br.clickToType',
-                            ),
-                            tr(streaming ? 'br.live' : 'br.polling'),
-                            tr('br.shared', {'name': widget.name}),
-                          ].join(' · '),
-                    // A short screen with the keyboard up has little room below the picture.
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11.5, color: error.isNotEmpty ? C.code : C.dim2),
-                  ),
-                ),
-                if (_busy)
-                  SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 1.6, color: C.dim),
-                  ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }

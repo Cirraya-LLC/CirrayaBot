@@ -114,9 +114,9 @@ export async function startStack({ tools = false, env = {} } = {}) {
     url, token, work, db: dbUrl(name),
     log: () => log,
 
-    /** JSON in, JSON out. Resolves to { status, body }. */
-    async api(method, path, body) {
-      const r = await fetch(url + path, { method, headers: { ...headers, 'content-type': 'application/json' },
+    /** JSON in, JSON out (extra: more headers, e.g. x-lang). Resolves to { status, body }. */
+    async api(method, path, body, extra = {}) {
+      const r = await fetch(url + path, { method, headers: { ...headers, 'content-type': 'application/json', ...extra },
         body: body === undefined ? undefined : JSON.stringify(body) })
       const text = await r.text()
       let parsed = text

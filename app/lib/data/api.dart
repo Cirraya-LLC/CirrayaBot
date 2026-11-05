@@ -594,6 +594,36 @@ class Allowance {
 }
 
 /// A skill: how to do one kind of job. Same shape as a SKILL.md file.
+/// What a person did in an agent's browser while recording: the raw steps (sent back to draft a skill) and the
+/// same steps as sentences in the reader's language. Passwords are never in either.
+class Recording {
+  const Recording({required this.steps, required this.lines, required this.seconds});
+  final List<Map<String, Object?>> steps;
+  final List<String> lines;
+  final int seconds;
+
+  static Recording fromJson(Map<String, Object?> j) => Recording(
+    steps: ((j['steps'] as List?) ?? const []).whereType<Map<String, Object?>>().toList(),
+    // The server numbers them; a list draws its own numbers.
+    lines: ((j['lines'] as List?) ?? const []).map((e) => '$e'.replaceFirst(RegExp(r'^\d+\.\s*'), '')).toList(),
+    seconds: (j['seconds'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// A skill the agent's model drafted from a demonstration. Not saved: the person reviews it first.
+class SkillDraft {
+  const SkillDraft({required this.name, required this.description, required this.body, required this.agents});
+  final String name, description, body;
+  final List<String> agents;
+
+  static SkillDraft fromJson(Map<String, Object?> j) => SkillDraft(
+    name: (j['name'] as String?) ?? '',
+    description: (j['description'] as String?) ?? '',
+    body: (j['body'] as String?) ?? '',
+    agents: ((j['agents'] as List?) ?? const []).map((e) => '$e').toList(),
+  );
+}
+
 class Skill {
   const Skill({
     required this.id,
@@ -1270,6 +1300,28 @@ class Api {
     final j = await _map('POST', '/api/$kind/${Uri.encodeComponent(agentId)}/act', action);
     if (j['ok'] != true) throw ApiException(ApiFailure.server, (j['error'] as String?) ?? tr('api.browserRefused'));
   }
+
+  // ── Teaching by demonstration ──
+
+  /// When the recording of this agent's browser started, or null when nothing is being recorded.
+  Future<DateTime?> recordingSince(String agentId) async {
+    final j = await _map('GET', '/api/browser/${Uri.encodeComponent(agentId)}/record');
+    final since = j['recording'] == true ? (j['since'] as num?)?.toInt() : null;
+    return since == null ? null : DateTime.fromMillisecondsSinceEpoch(since);
+  }
+
+  /// Start noting what a person does in the agent's browser (starts the browser if needed).
+  Future<DateTime> startRecording(String agentId) async {
+    final j = await _map('POST', '/api/browser/${Uri.encodeComponent(agentId)}/record', {'on': true});
+    return DateTime.fromMillisecondsSinceEpoch((j['since'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch);
+  }
+
+  Future<Recording> stopRecording(String agentId) async =>
+      Recording.fromJson(await _map('POST', '/api/browser/${Uri.encodeComponent(agentId)}/record', {'on': false}));
+
+  /// The agent's own model drafts a skill from the steps; nothing is saved.
+  Future<SkillDraft> draftSkill(String agentId, {required String goal, required List<Map<String, Object?>> steps}) async =>
+      SkillDraft.fromJson(await _map('POST', '/api/teach/${Uri.encodeComponent(agentId)}', {'goal': goal, 'steps': steps}));
 
   // ── An agent's files: its desk (/work) and its group drives ──
 

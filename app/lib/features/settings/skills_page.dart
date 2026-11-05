@@ -16,7 +16,7 @@ import '../../platform.dart';
 import '../../theme/app_theme.dart';
 
 class SkillsPage extends StatefulWidget {
-  const SkillsPage({super.key, required this.api, required this.agents, this.open, this.preselect = const []});
+  const SkillsPage({super.key, required this.api, required this.agents, this.open, this.preselect = const [], this.draft});
   final Api api;
   final List<Agent> agents;
 
@@ -25,6 +25,9 @@ class SkillsPage extends StatefulWidget {
 
   /// Agents ticked when starting a new skill (the one whose panel we came from).
   final List<String> preselect;
+
+  /// A skill drafted from a demonstration, to read through and save (not saved yet).
+  final SkillDraft? draft;
 
   @override
   State<SkillsPage> createState() => _SkillsPageState();
@@ -54,6 +57,7 @@ class _SkillsPageState extends State<SkillsPage> {
     for (final c in [_name, _desc, _body]) {
       c.dispose();
     }
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -61,6 +65,9 @@ class _SkillsPageState extends State<SkillsPage> {
 
   /// The shipped skill templates, for "from a template".
   List<SkillTemplate> _templates = const [];
+  bool _draftShown = false;
+  final _scroll = ScrollController();
+  final _editorKey = GlobalKey();
 
   Future<void> _load({String? select}) async {
     widget.api.templates().then((t) {
@@ -72,6 +79,21 @@ class _SkillsPageState extends State<SkillsPage> {
       if (select != null || _editing == null) _fill(hit);
     } on ApiException catch (e) {
       _say(e.message, bad: true);
+    }
+    // A drafted skill goes in once, as a new one; saving it reloads with its id and leaves this alone.
+    final d = widget.draft;
+    if (d != null && select == null && !_draftShown) {
+      _draftShown = true;
+      _name.text = d.name;
+      _desc.text = d.description;
+      _body.text = d.body;
+      _hint = tr('teach.drafted');
+      _hintColor = C.dim;
+      // The editor sits below the list: bring it into view, or a phone shows only the list.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final c = _editorKey.currentContext;
+        if (c != null && c.mounted) Scrollable.ensureVisible(c);
+      });
     }
     if (mounted) setState(() => _loading = false);
   }
@@ -201,80 +223,86 @@ class _SkillsPageState extends State<SkillsPage> {
           : Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 680),
-                child: ListView(
+                // Not a lazy list: a draft from a demonstration scrolls to the editor below, which has to exist to be found.
+                child: SingleChildScrollView(
+                  controller: _scroll,
                   padding: const EdgeInsets.all(22),
-                  children: [
-                    Text(
-                      tr('skills.intro'),
-                      style: TextStyle(fontSize: 12, color: C.dim, height: 1.6),
-                    ),
-                    const SizedBox(height: 12),
-                    if (_rows.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Text(tr('skills.none'), style: TextStyle(fontSize: 12.5, color: C.dim2)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        tr('skills.intro'),
+                        style: TextStyle(fontSize: 12, color: C.dim, height: 1.6),
                       ),
-                    for (final k in _rows) _row(k),
-                    const SizedBox(height: 16),
-                    const Divider(height: 1),
-                    const SizedBox(height: 16),
-                    Text(
-                      _editing == null ? tr('skills.newTitle') : tr('skills.editTitle', {'name': _editing!.name}),
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(controller: _name, decoration: InputDecoration(hintText: tr('skills.nameHint'))),
-                    const SizedBox(height: 9),
-                    TextField(
-                      controller: _desc,
-                      decoration: InputDecoration(hintText: tr('skills.descHint')),
-                    ),
-                    const SizedBox(height: 9),
-                    TextField(
-                      controller: _body,
-                      minLines: 8,
-                      maxLines: 20,
-                      style: TextStyle(fontFamily: AppTheme.mono, fontFamilyFallback: AppTheme.monoFallback, fontSize: 12.5),
-                      decoration: InputDecoration(hintText: tr('skills.bodyHint')),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(tr('skills.installOn'), style: TextStyle(fontSize: 12, color: C.dim)),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        for (final a in widget.agents)
-                          FilterChip(
-                            label: Text(a.name, style: const TextStyle(fontSize: 12)),
-                            selected: _agents.contains(a.id),
-                            showCheckmark: false,
-                            onSelected: (on) => setState(() => on ? _agents.add(a.id) : _agents.remove(a.id)),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Text(_hint, style: TextStyle(fontSize: 11.5, color: _hintColor)),
-                    const SizedBox(height: 14),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      alignment: WrapAlignment.end,
-                      children: [
-                        if (_editing != null) ...[
-                          TextButton(
-                            onPressed: _busy ? null : _delete,
-                            style: TextButton.styleFrom(foregroundColor: C.code),
-                            child: Text(tr('common.delete')),
-                          ),
-                          TextButton(onPressed: _busy ? null : _export, child: Text(tr('common.export'))),
+                      const SizedBox(height: 12),
+                      if (_rows.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          child: Text(tr('skills.none'), style: TextStyle(fontSize: 12.5, color: C.dim2)),
+                        ),
+                      for (final k in _rows) _row(k),
+                      const SizedBox(height: 16),
+                      const Divider(height: 1),
+                      const SizedBox(height: 16),
+                      Text(
+                        key: _editorKey,
+                        _editing == null ? tr('skills.newTitle') : tr('skills.editTitle', {'name': _editing!.name}),
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(controller: _name, decoration: InputDecoration(hintText: tr('skills.nameHint'))),
+                      const SizedBox(height: 9),
+                      TextField(
+                        controller: _desc,
+                        decoration: InputDecoration(hintText: tr('skills.descHint')),
+                      ),
+                      const SizedBox(height: 9),
+                      TextField(
+                        controller: _body,
+                        minLines: 8,
+                        maxLines: 20,
+                        style: TextStyle(fontFamily: AppTheme.mono, fontFamilyFallback: AppTheme.monoFallback, fontSize: 12.5),
+                        decoration: InputDecoration(hintText: tr('skills.bodyHint')),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(tr('skills.installOn'), style: TextStyle(fontSize: 12, color: C.dim)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final a in widget.agents)
+                            FilterChip(
+                              label: Text(a.name, style: const TextStyle(fontSize: 12)),
+                              selected: _agents.contains(a.id),
+                              showCheckmark: false,
+                              onSelected: (on) => setState(() => on ? _agents.add(a.id) : _agents.remove(a.id)),
+                            ),
                         ],
-                        TextButton(onPressed: _busy ? null : _import, child: Text(tr('skills.importMd'))),
-                        TextButton(onPressed: () => _fill(null), child: Text(tr('skills.new'))),
-                        FilledButton(onPressed: _busy ? null : _save, child: Text(tr('common.save'))),
-                      ],
-                    ),
-                  ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(_hint, style: TextStyle(fontSize: 11.5, color: _hintColor)),
+                      const SizedBox(height: 14),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        alignment: WrapAlignment.end,
+                        children: [
+                          if (_editing != null) ...[
+                            TextButton(
+                              onPressed: _busy ? null : _delete,
+                              style: TextButton.styleFrom(foregroundColor: C.code),
+                              child: Text(tr('common.delete')),
+                            ),
+                            TextButton(onPressed: _busy ? null : _export, child: Text(tr('common.export'))),
+                          ],
+                          TextButton(onPressed: _busy ? null : _import, child: Text(tr('skills.importMd'))),
+                          TextButton(onPressed: () => _fill(null), child: Text(tr('skills.new'))),
+                          FilledButton(onPressed: _busy ? null : _save, child: Text(tr('common.save'))),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

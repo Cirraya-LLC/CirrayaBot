@@ -16,9 +16,14 @@ case "$1" in
   rm) forget "${@: -1}"; exit 0 ;;
   stats) echo "0.00%"; exit 0 ;;
   exec)
-    cat >/dev/null 2>&1    # the server always closes stdin; reading it avoids a broken pipe on big inputs
+    body=$(cat 2>/dev/null)    # the server always closes stdin; reading it avoids a broken pipe on big inputs
     # What listens inside: nothing, in here.
     case "${@: -1}" in *"/proc/net/tcp"*) exit 0 ;; esac
+    # The browser daemon: a test that wrote <log>.browser gets that as every answer, and the requests are kept.
+    if [ "${@: -1}" = "http://127.0.0.1:9230/" ] && [ -f "$STATE.browser" ]; then
+      [ -n "$body" ] && printf '%s\n' "$body" >> "$STATE.browser-calls"
+      cat "$STATE.browser"; exit 0
+    fi
     # The last argument is the command (bash -c / -lc <cmd> ...); show it back like a shell would.
     echo "ran: ${@: -1}"
     exit 0 ;;

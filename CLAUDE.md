@@ -2612,6 +2612,42 @@ editor opens with everything else filled in and the person picks the model. Rule
   `anchor.closest('dialog[open]')`.
 Tests: `test/e2e/templates.test.mjs`, `app/test/templates_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/tpl.mjs`).
 
+### 2.40.9 Teaching by demonstration
+
+A person takes over an agent's browser, presses **Record**, does the thing, presses Stop; the steps come up (remove the
+mistakes, say what it was for) and the agent's **main** model drafts a SKILL.md, which opens in the skill library —
+**nothing is saved until the person saves it**. Browser only: on the desktop there is no way to tell a password field,
+so it isn't recorded.
+
+- **browserd** keeps the steps (`record_start` / `record_stop`; ≤ 300 steps, ≤ 10 min, then a `limit` step): a click
+  is described *before* it happens (afterwards the page may be gone) — tag, type, role, visible text, label, name,
+  placeholder, href, **never an input's value** (submit/button values excepted); typing into one field is one step;
+  scrolls coalesce; a page change is noticed on the next event; a person's HTTP actions arrive marked `human: true`
+  (the server adds it in `humanBrowserAct`), the agent's own browser calls are never recorded.
+- ⚠️ **Passwords**: a password field's text is never stored as a step — but it is kept in memory while recording,
+  because a login form sent by GET put it **in the next page's URL** (found on the first real run:
+  `done.html?…&pw=hunter2secret`). `scrub()` at stop cuts it (raw / %-encoded / +-encoded) out of every URL, title
+  and text, and blanks query values whose names look sensitive (`pass|pwd|token|secret|key|auth|code|sig|session|…`).
+  `web/teach.mjs` never writes a password step's text into the prompt even if a client sends one.
+- Server: `POST /api/browser/:id/record {on}` (stop returns `steps`, `seconds` and `lines` — the steps as sentences
+  in the request's language, `teach.*` in strings/server.mjs; the model always gets them in English), `GET …/record`
+  (`{recording, since}` — kept in the server, so a reload / another device shows it running). A recording keeps the
+  machine awake (`inUse`). `POST /api/teach/:id {goal, steps}` → `{name, description, body, agents:[id]}`; a bare call,
+  counted and capped like any other; an answer without frontmatter / description is 400 `teach.bad`.
+- UI: web — Record beside Reload (a timer while recording, the note under the picture says what isn't recorded),
+  leaving the view stops it; client — a record icon in the app bar (browser only), a `PopScope` that stops and shows
+  the steps before the page goes, `teach.dart` (dialog + `openDraft` → `SkillsPage(draft:)`).
+- ⚠️ Flutter: `AlertDialog(scrollable: true)` measures intrinsic sizes, which a `ListView` can't give (assertion) —
+  the steps are a plain Column. And the skill library was a lazy `ListView` with the editor at the bottom: a draft on
+  a phone landed on the list with the editor never built. It is a `SingleChildScrollView` now and scrolls the editor
+  into view.
+- Tests: `test/e2e/teach.test.mjs` (fake docker answers the daemon from `<log>.browser`, keeps requests in
+  `.browser-calls`), `node web/teach.mjs`, `app/test/teach_test.dart` (desktop + 360 ×1.3), web in Chromium
+  (`$CLAUDE_JOB_DIR/tmp/vui/teach.mjs`). browserd's recording was run against a real Chromium on the Mac (Python
+  Playwright in a scratch venv, `/work/.browser` swapped for a temp dir): clicks, typing coalesced, Chinese, scroll,
+  Enter submitting a GET login form, back, `click_xy` / `type_raw` from HTTP. **Not verified**: in a real agent
+  container, and a real model's draft.
+
 ## 3. What runs now
 
 ```bash
@@ -2629,6 +2665,7 @@ node web/files.mjs         # self-test for attachments: types, what they're serv
 node web/secrets.mjs       # self-test for secrets: sealing, origins, masking, internal addresses
 node web/voice.mjs         # self-test for what is read aloud, sentences, and echo vs. cutting in on a call
 node web/effects.mjs       # self-test for which tool calls are side effects and what the log answers after a restart
+node web/teach.mjs         # self-test for describing a recorded demonstration and reading the drafted skill back
 node web/templates.mjs     # self-test: every shipped template loads; import / export round trip, never a model
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9

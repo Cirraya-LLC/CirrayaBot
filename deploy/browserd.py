@@ -14,8 +14,8 @@
 #
 # /stream: Chromium's own screencast (CDP Page.startScreencast), a frame only when the page
 # changes, pushed as multipart/x-mixed-replace (MJPEG). A browser <img> plays it natively.
-import asyncio, base64, json, os, sys, traceback
-from urllib.parse import quote as urlquote, urlsplit
+import asyncio, base64, json, os, re, sys, time, traceback
+from urllib.parse import quote as urlquote, quote_plus, urlsplit
 from playwright.async_api import async_playwright
 
 PORT = int(os.environ.get('BROWSERD_PORT', '9230'))
@@ -49,8 +49,60 @@ MARK_JS = r"""
 """
 
 
+# What a person clicked or typed into, described the way a person would say it. Never an input's value:
+# clicking into a filled-in password box must not record the password.
+DESCRIBE_JS = r"""
+([x, y, focused]) => {
+  let el = focused ? document.activeElement : document.elementFromPoint(x, y)
+  if (!el || el === document.body || el === document.documentElement) return null
+  const t = el.closest('a,button,input,select,textarea,summary,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],label') || el
+  const tag = t.tagName.toLowerCase(), type = (t.getAttribute('type') || '').toLowerCase()
+  const clean = s => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+  const field = tag === 'input' || tag === 'textarea' || tag === 'select'
+  const text = field ? (['submit', 'button', 'reset'].includes(type) ? clean(t.value) : '') : clean(t.innerText)
+  const label = clean(t.getAttribute('aria-label') || (t.labels && t.labels[0] && t.labels[0].innerText) || t.getAttribute('title'))
+  return { tag, type, role: t.getAttribute('role') || '', text, label, name: clean(t.getAttribute('name')),
+           placeholder: clean(t.getAttribute('placeholder')), href: tag === 'a' ? String(t.href || '').slice(0, 200) : '',
+           password: type === 'password' }
+}
+"""
+REC_MAX_STEPS = 300
+REC_MAX_SECONDS = 600
+# Query parameters whose values are hidden in a recording whatever was typed: a login form sent by GET, a token in a link.
+SENSITIVE_PARAM = re.compile(r'(pass|pwd|^pw$|token|secret|key|auth|code|sig|session|otp|cred)', re.I)
+
+
+def scrub(steps, typed):
+    """A recording made safe to hand on: what was typed into password fields (kept in memory while recording, never
+    returned) is cut out wherever it shows up — a URL, a title, other text — and sensitive-looking query values go too."""
+    variants = sorted({v for t in typed if len(t) >= 3 for v in (t, urlquote(t, safe=''), quote_plus(t))}, key=len, reverse=True)
+
+    def clean(s):
+        for v in variants:
+            s = s.replace(v, '[password]')
+        return s
+
+    def clean_url(u):
+        parts = urlsplit(u)
+        if parts.query:
+            q = '&'.join(k + ('=[hidden]' if eq and SENSITIVE_PARAM.search(k) else eq + v)
+                         for k, eq, v in (p.partition('=') for p in parts.query.split('&')))
+            u = parts._replace(query=q).geturl()
+        return clean(u)
+
+    for s in steps:
+        for k, v in list(s.items()):
+            if isinstance(v, str):
+                s[k] = clean_url(v) if k in ('url', 'href') else clean(v)
+            elif isinstance(v, dict):
+                s[k] = {a: (clean_url(b) if a == 'href' else clean(b)) if isinstance(b, str) else b for a, b in v.items()}
+        s.pop('into', None)
+    return steps
+
+
 class Browser:
     def __init__(self):
+        self.rec = None              # a person's demonstration being recorded: {at, steps, url}
         self.ctx = None
         self.lock = asyncio.Lock()
         self.watchers = set()        # one asyncio.Queue per stream viewer (holds only the latest frame)
@@ -158,8 +210,98 @@ class Browser:
             pass
 
     async def act(self, a):
+        kind = a.get('action')
+        if kind == 'record_start':
+            p = await self.page()
+            self.rec = {'at': time.time(), 'url': p.url, 'typed': [], 'started': time.time(), 'steps': [{'kind': 'start', 'url': p.url, 'title': await p.title()}]}
+            return {'recording': True}
+        if kind == 'record_stop':
+            if self.recording():
+                await self.note_page(await self.page())
+            rec, self.rec = self.rec, None
+            if not rec:
+                return {'steps': [], 'seconds': 0}
+            return {'steps': scrub(rec['steps'], rec['typed']), 'seconds': round(time.time() - rec['started'])}
+        human = a.get('human') and self.recording()
+        if human and kind == 'click_xy':        # described before the click: afterwards the page may have changed
+            self.note({'kind': 'click', 'what': await self.describe(await self.page(), float(a.get('x', 0)), float(a.get('y', 0)))})
         async with self.lock:
-            return await self._act(a)
+            out = await self._act(a)
+        if human:
+            await self.note_act(a)
+        return out
+
+    # ── recording a person's demonstration ──
+    def recording(self):
+        if self.rec and time.time() - self.rec['at'] > REC_MAX_SECONDS:
+            self.rec['steps'].append({'kind': 'limit'})
+            self.rec['at'] = -1           # stays readable, records nothing more
+        return bool(self.rec) and self.rec['at'] >= 0 and len(self.rec['steps']) < REC_MAX_STEPS
+
+    def note(self, step):
+        steps = self.rec['steps']
+        last = steps[-1] if steps else None
+        # Typing into one field is one step, however many keystrokes; the same for scrolling.
+        if last and step['kind'] == 'type' and last['kind'] == 'type' and last['into'] == step['into']:
+            if not last.get('secret'):
+                last['text'] = (last['text'] + step['text'])[:400]
+            return
+        if last and step['kind'] == 'scroll' and last['kind'] == 'scroll':
+            return
+        steps.append(step)
+
+    async def note_page(self, p):
+        if p.url != self.rec['url']:
+            self.rec['url'] = p.url
+            self.note({'kind': 'page', 'url': p.url[:300], 'title': (await p.title())[:120]})
+
+    async def describe(self, p, x=0, y=0, focused=False):
+        try:
+            return await p.evaluate(DESCRIBE_JS, [x, y, focused])
+        except Exception:
+            return None
+
+    async def note_typed(self, p, text):
+        what = await self.describe(p, focused=True)
+        secret = bool(what and what.get('password'))
+        # Which field, without what is in it (a contenteditable's text changes with every key).
+        into = json.dumps({k: v for k, v in (what or {}).items() if k != 'text'}, sort_keys=True)
+        if secret:      # kept whole, typed key by key or not, so scrub() can find it wherever it shows up later
+            last = self.rec['steps'][-1]
+            if last['kind'] == 'type' and last.get('into') == into and self.rec['typed']:
+                self.rec['typed'][-1] += str(text)
+            else:
+                self.rec['typed'].append(str(text))
+        self.note({'kind': 'type', 'into': into, 'what': what, 'secret': secret, 'text': '' if secret else str(text)[:400]})
+
+    async def note_input(self, p, ev):
+        t = ev.get('t')
+        if t == 'down' and (ev.get('button') or 'left') == 'left':
+            self.note({'kind': 'click', 'what': await self.describe(p, float(ev.get('x', 0)), float(ev.get('y', 0)))})
+        elif t == 'text':
+            await self.note_typed(p, ev.get('text', ''))
+        elif t in ('keydown', 'press') and str(ev.get('key')) in ('Enter', 'Tab', 'Escape'):
+            self.note({'kind': 'key', 'key': str(ev.get('key'))})
+        elif t == 'wheel':
+            self.note({'kind': 'scroll'})
+        # Every event is a chance to see that the page moved on (a click or Enter navigates a moment later).
+        await self.note_page(await self.page())
+
+    async def note_act(self, a):
+        if not self.recording():
+            return
+        p = await self.page()
+        kind = a.get('action')
+        if kind == 'open':
+            self.rec['url'] = p.url
+            self.note({'kind': 'open', 'url': p.url[:300], 'title': (await p.title())[:120]})
+        elif kind in ('back', 'reload'):
+            self.note({'kind': kind})
+        elif kind == 'type_raw':
+            await self.note_typed(p, a.get('text', ''))
+        elif kind == 'press':
+            self.note({'kind': 'key', 'key': str(a.get('key') or 'Enter')})
+        await self.note_page(p)
 
     @staticmethod
     def origin_of(url):
@@ -251,6 +393,11 @@ class Browser:
     async def input(self, ev):
         p = await self.page()
         t = ev.get('t')
+        rec = self.recording()
+        # A click is described before it happens: afterwards the page may have changed under it.
+        if rec and t == 'down':
+            await self.note_input(p, ev)
+            rec = False
         x, y = float(ev.get('x', 0)), float(ev.get('y', 0))
         button = ev.get('button') or 'left'
         if t == 'move':
@@ -273,6 +420,8 @@ class Browser:
         elif t == 'text':
             # typed text (including IME-composed text) is inserted into the page, same as a person typing
             await p.keyboard.insert_text(str(ev.get('text', '')))
+        if rec:
+            await self.note_input(p, ev)
 
 
 B = Browser()

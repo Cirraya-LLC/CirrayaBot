@@ -2221,6 +2221,10 @@ async function openScreen(b, kind = 'browser') {
   const desk = kind === 'desktop'
   $('#bwurl').hidden = $('#bwnav').hidden = $('#bwreload').hidden = desk
   $('#bwterm').hidden = !desk
+  $('#bwrec').hidden = desk
+  paintRec(null)
+  if (!desk) fetch(api(`/api/browser/${b.id}/record`)).then(r => r.ok ? r.json() : null)
+    .then(j => { if (bwBot === b) paintRec(j?.recording ? j.since : null) }).catch(() => {})
   $('#bwname').textContent = t(desk ? 'dk.altNamed' : 'bw.altNamed', { name: b.name })
   $('#bwnote').textContent = desk ? t('dk.starting') : bwNoteDefault()
   $('#bwimg').removeAttribute('src')
@@ -2244,6 +2248,7 @@ function bwConnect() {
   ws.onclose = () => { if (bwWs === ws) bwWs = null }
 }
 function closeBrowser() {
+  if (recSince && bwBot) stopRecording(bwBot)     // a recording nobody can see is not left running
   $('#bwfull').hidden = true; $('#bwimg').removeAttribute('src')   // stop the stream so frames don't keep arriving in the background
   bwWs?.close(); bwWs = null
   bwBot = null; loadBrowsers(); loadDesktop()
@@ -2341,6 +2346,72 @@ function fillSkill(k, preselect = []) {
   $('#kdel').style.display = $('#kexp').style.display = k ? '' : 'none'
   renderSkills()
 }
+// ── Teaching by demonstration: record what the person does in the agent's browser, then its model drafts a skill ──
+let recSince = null, recTimer = null, teach = null
+function paintRec(since) {
+  recSince = since; clearInterval(recTimer)
+  const b = $('#bwrec')
+  const tick = () => {
+    const s = Math.max(0, Math.round((Date.now() - recSince) / 1000))
+    b.textContent = t('teach.stop', { time: `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` })
+  }
+  b.classList.toggle('rec', !!since); b.setAttribute('aria-pressed', String(!!since))
+  if (since) { tick(); recTimer = setInterval(tick, 1000); $('#bwnote').textContent = t('teach.recNote') }
+  else { b.textContent = t('teach.record'); if (bwBot) $('#bwnote').textContent = bwNoteDefault() }
+}
+$('#bwrec').onclick = async () => {
+  if (!bwBot) return
+  if (recSince) return stopRecording(bwBot)
+  $('#bwrec').disabled = true
+  const r = await fetch(api(`/api/browser/${bwBot.id}/record`), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ on: true }) }).catch(() => null)
+  $('#bwrec').disabled = false
+  if (!r?.ok) { $('#bwnote').textContent = r ? await errText(r) : t('df.failed'); return }
+  paintRec((await r.json()).since)
+}
+async function stopRecording(b) {
+  paintRec(null)
+  const r = await fetch(api(`/api/browser/${b.id}/record`), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ on: false }) }).catch(() => null)
+  if (!r?.ok) { if (bwBot) $('#bwnote').textContent = r ? await errText(r) : t('df.failed'); return }
+  const j = await r.json()
+  if (!j.steps.length) { if (bwBot) $('#bwnote').textContent = t('teach.empty'); return }
+  teach = { bot: b, steps: j.steps, lines: j.lines.map(l => l.replace(/^\d+\.\s*/, '')) }
+  $('#teachtitle').textContent = t('teach.title', { name: b.name })
+  $('#teachhint').textContent = t('teach.hint', { name: b.name })
+  $('#teachgoal').value = ''; $('#teachmsg').textContent = ''
+  paintTeach()
+  $('#teachdlg').showModal()
+  $('#teachgoal').focus()
+}
+function paintTeach() {
+  $('#teachsteps').innerHTML = teach.lines.map((l, i) =>
+    `<li><span>${esc(l)}</span><button class="x" data-i="${i}" aria-label="${esc(t('teach.remove'))}" title="${esc(t('teach.remove'))}">×</button></li>`).join('')
+  $('#teachgo').disabled = !teach.lines.length
+}
+$('#teachsteps').onclick = e => {
+  const i = e.target.closest('button[data-i]')?.dataset.i
+  if (i == null) return
+  teach.steps.splice(+i, 1); teach.lines.splice(+i, 1); paintTeach()
+}
+$('#teachdrop').onclick = () => { teach = null; $('#teachdlg').close() }
+$('#teachgo').onclick = async () => {
+  const tc = teach
+  if (!tc) return
+  $('#teachgo').disabled = true; $('#teachmsg').textContent = t('teach.drafting', { name: tc.bot.name })
+  const r = await fetch(api(`/api/teach/${tc.bot.id}`), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ goal: $('#teachgoal').value.trim(), steps: tc.steps }) }).catch(() => null)
+  $('#teachgo').disabled = false
+  if (teach !== tc) return
+  if (!r?.ok) { $('#teachmsg').textContent = r ? await errText(r) : t('df.failed'); return }
+  const d = await r.json()
+  teach = null; $('#teachdlg').close()
+  await openSkills(null, d.agents)
+  $('#kname').value = d.name; $('#kdesc').value = d.description; $('#kbody').value = d.body
+  $('#ksrc').textContent = t('teach.drafted')
+  $('#kname').focus()
+}
+
 async function openSkills(k = null, preselect = []) {
   await loadSkills()
   fillSkill(k ? SKILLS.find(x => x.id === k.id) ?? null : null, preselect)

@@ -10,6 +10,7 @@ import { fitContext, listModels, modelInfo, guessContext } from './model.mjs'
 import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
+import { MAX_STEPS, TEACH_SYSTEM, cleanDraft, describeSteps, teachPrompt } from './teach.mjs'
 import { addNote, NOTE_MAX_CHARS, TIDY_SYSTEM, cleanTidy, noteLines } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, gate, forbidden, toolSubject } from './approve.mjs'
 import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
@@ -563,7 +564,7 @@ function holdWhile(c, child) {
 const OWN_PORTS = ['240E', '240F', '2418', '2419']
 const SERVING = `awk 'NR>1 && $4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u |
   grep -vxE '${OWN_PORTS.join('|')}' | head -1`
-const inUse = id => [`agent:${id}`, `task:${id}`, `box:${id}`].some(k => locks.has(k)) || setupRunning.has(id)
+const inUse = id => [`agent:${id}`, `task:${id}`, `box:${id}`].some(k => locks.has(k)) || setupRunning.has(id) || recording.has(id)
 
 async function sleepIdle() {
   if (!CFG.tools || !IDLE_MS) return
@@ -1168,6 +1169,10 @@ async function browserPost(c, args, lang = 'en') {
 async function humanBrowserAct(botId, args, lang) {
   if (!CFG.tools) throw new Say('browser.toolsOff')
   if (!HUMAN_ACTIONS.includes(args.action)) throw new Say('browser.badAction', { action: args.action })
+  return humanBrowserPost(botId, { ...args, human: true }, lang)   // human: a demonstration being recorded counts it
+}
+
+async function humanBrowserPost(botId, args, lang) {
   const c = cname(botId)
   if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
     await ensureContainer(botId, null)
@@ -1175,6 +1180,42 @@ async function humanBrowserAct(botId, args, lang) {
   const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
   if (up.code !== 0) return { ok: false, error: tr(lang, 'browser.cantStart', { detail: (up.out + up.err).trim().slice(-300) }) }
   return browserPost(c, args, lang)
+}
+
+// ── Teaching by demonstration (web/teach.mjs) ──
+// A person records what they do in the agent's browser; browserd keeps the steps (never a password) until they stop.
+// Here only who is recording since when, for the clients' Record button; the daemon has the steps.
+const recording = new Map()          // agent id → ms the recording started
+async function recordBrowser(botId, on, lang) {
+  if (!CFG.tools) throw new Say('browser.toolsOff')
+  if (on) {
+    const j = await humanBrowserPost(botId, { action: 'record_start' }, lang)
+    if (!j.ok) return j
+    recording.set(botId, Date.now())
+    return { ok: true, recording: true, since: recording.get(botId) }
+  }
+  const was = recording.delete(botId)
+  const c = cname(botId)
+  // The daemon restarted (new code, the machine slept) or nothing was recording: there are no steps to hand back.
+  const j = await browserAlive(c) ? await browserPost(c, { action: 'record_stop' }, lang) : { ok: true, steps: [] }
+  if (!j.ok) return j
+  const steps = (j.steps ?? []).slice(0, MAX_STEPS)
+  if (!was && !steps.length) throw new Say('teach.notRecording')
+  return { ok: true, recording: false, steps, seconds: j.seconds ?? 0,
+    lines: describeSteps(steps, (k, v) => tr(lang, `teach.${k}`, v)) }
+}
+
+/** The agent's own model drafts a skill from a recording; nothing is saved — the person reviews it first. */
+async function draftSkill(bot, goal, steps) {
+  if (!Array.isArray(steps) || !describeSteps(steps).length) throw new Say('teach.noSteps')
+  const p = await providerFor(bot)
+  await checkCap(bot, p)
+  const r = await callModel(p, [{ role: 'system', content: TEACH_SYSTEM }, { role: 'user', content: teachPrompt(goal, steps) }],
+    () => {}, { bare: true })
+  noteUsage({ bot }, p, r.usage)
+  const draft = cleanDraft(r.content)
+  if (!draft) throw new Say('teach.bad')
+  return { ...draft, agents: [bot.id] }
 }
 
 /** Run one browser action. Screenshots return {text, image}; everything else returns text. */
@@ -3206,6 +3247,22 @@ const server = createServer(async (req, res) => {
         return res.end(Buffer.from(j.image, 'base64'))
       }
       if (bw[2] === 'act' && req.method === 'POST') return send(200, await humanBrowserAct(bw[1], await readBody(req), lang))
+    }
+    const rec = url.pathname.match(/^\/api\/browser\/([a-z0-9-]+)\/record$/)
+    if (rec) {
+      if (!await db.getAgent(rec[1])) return send(404, { error: t('err.noAgent') })
+      if (req.method === 'GET') return send(200, { recording: recording.has(rec[1]), since: recording.get(rec[1]) ?? null })
+      if (req.method === 'POST') {
+        const j = await recordBrowser(rec[1], (await readBody(req)).on === true, lang)
+        return send(j.ok ? 200 : 502, j.ok ? j : { error: j.error })
+      }
+    }
+    const teach = url.pathname.match(/^\/api\/teach\/([a-z0-9-]+)$/)
+    if (teach && req.method === 'POST') {
+      const bot = (await loadBots(lang)).find(b => b.id === teach[1])
+      if (!bot) return send(404, { error: t('err.noAgent') })
+      const b = await readBody(req)
+      return send(200, await draftSkill(bot, str(b.goal), b.steps))
     }
 
     // ---- An agent's desktop: watching it, using it (start, a new terminal); input goes over the socket ----
