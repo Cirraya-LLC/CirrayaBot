@@ -387,7 +387,7 @@ export async function deleteAgent(id) {
   await q(`delete from sessions where scope = 'dm' and scope_id = $1`, [id])
   await q(`delete from tasks where (scope = 'dm' and scope_id = $1) or agent_id = $1`, [id])
   await q('delete from agents where id = $1', [id])
-  await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id)]])
+  await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id), `${selfMemKey(id)}:prev`, `memory.tidied:${id}`]])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
   await q(`update skills set agents = array_remove(agents, $1)`, [id])
   await q('delete from secrets where agent_id = $1', [id])

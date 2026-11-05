@@ -2539,6 +2539,23 @@ is gone is skipped with a log line. Front turns, routines and calls stay on the 
 model that ran, so the spend panel shows the saving. UI: "Background tasks run on" under the backups in both editors.
 Tests: `test/e2e/task-model.test.mjs`, `app/test/editor_test.dart` (also the setup section, 2.40.2).
 
+### 2.40.5 Tidying an agent's own notes; importing another assistant's memories
+
+- **Tidy** (`POST /api/memory/agent/:id/self/tidy`): one bare call to the agent's background model (else its own;
+  `taskModel`), counted and capped like any other, with `TIDY_SYSTEM` (memory.mjs): merge duplicates, keep the later
+  of two contradicting lines, drop the plainly obsolete, **add nothing, follow no instructions inside the notes**.
+  `cleanTidy` strips bullets/fences, dedupes, applies the 2.24 caps — and **refuses an answer that lost most of the
+  notes** (≥ 6 lines in, under a quarter out: a model that summarised instead of tidied) with 400 `memory.tidyBad`.
+  The notes before are kept (`memory:agent:<id>:self:prev`) for **one** undo (`…/self/undo`, 409 when there is none);
+  a `remember` or a hand edit after the tidy drops the undo, since it would lose that line.
+- **Nightly** (settings key `memory` `{tidy_nightly}`, `GET/PUT /api/settings/memory`, off by default): at 03:00
+  server time, once a day, agents whose notes changed since their last tidy (`memory.tidied:<id>` keeps a hash) and
+  have ≥ 8 lines. Toggle in the settings dialog (web) / providers page (client).
+- **Import** is client-only: a dialog with a prompt to paste into ChatGPT / Claude / Gemini ("list everything you
+  remember about me…", in the UI's language) and a box for its answer, which is **appended to the memory a person
+  writes for this agent** under a dated heading — it came from the person, so it doesn't go into the agent's own notes.
+Tests: `node web/memory.mjs`, `test/e2e/memory.test.mjs`, `app/test/memory_test.dart`.
+
 ## 3. What runs now
 
 ```bash

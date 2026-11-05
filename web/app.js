@@ -1712,7 +1712,17 @@ async function loadProvs() {
 }
 
 $('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
-  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); await loadAutonomy(); $('#pdlg').showModal() }
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); await loadAutonomy(); await loadMemorySettings(); $('#pdlg').showModal() }
+async function loadMemorySettings() {
+  const r = await fetch(api('/api/settings/memory')).then(x => x.json()).catch(() => null)
+  $('#memnightly').checked = r?.tidy_nightly === true
+}
+$('#memnightly').onchange = async () => {
+  const r = await fetch(api('/api/settings/memory'), { method: 'PUT', headers: {'content-type':'application/json'},
+    body: JSON.stringify({ tidy_nightly: $('#memnightly').checked }) })
+  if (!r.ok) { hint(await errText(r), 'bad'); return }
+  hint(t('memset.saved'), 'good')
+}
 
 async function loadAutonomy() {
   const r = await (await fetch(api('/api/settings/autonomy'))).json().catch(() => null)
@@ -1875,8 +1885,9 @@ async function loadMemory(c) {
     ? t('mem.groupTitle', { name: c.name }) : t('mem.agentTitle', { name: c.name })
   $('#mem').placeholder = t(c.kind === 'group' ? 'mem.groupPh' : 'mem.agentPh')
   $('#mem').value = ''; $('#mstat').textContent = ''
-  $('#smemta').value = ''; $('#smstat').textContent = ''
+  $('#smemta').value = ''; $('#smstat').textContent = ''; $('#smundo').hidden = true
   $('#smem').style.display = c.kind === 'group' ? 'none' : ''
+  $('#mimp').hidden = c.kind === 'group'
   $('#smemtitle').textContent = t('smem.title', { name: c.name })
   const r = await fetch(api(memPath(c))).catch(() => null)
   if (r?.ok && stillOpen(c)) $('#mem').value = (await r.json()).text
@@ -1895,6 +1906,51 @@ const saveMem = async (path, box, stat) => {
 }
 $('#msave').onclick = () => cur && saveMem(memPath(cur), '#mem', '#mstat')
 $('#smsave').onclick = () => cur && cur.kind !== 'group' && saveMem(selfPath(cur), '#smemta', '#smstat')
+  .then(() => { $('#smundo').hidden = true })
+// Tidy: the Agent's model merges duplicates and drops what is out of date. Undoable once.
+$('#smtidy').onclick = async () => {
+  if (!cur || cur.kind === 'group') return
+  const c = cur, before = $('#smemta').value
+  $('#smtidy').disabled = true; $('#smstat').textContent = t('smem.tidying')
+  const r = await fetch(api(`${selfPath(c)}/tidy`), { method: 'POST' }).catch(() => null)
+  $('#smtidy').disabled = false
+  if (!stillOpen(c)) return
+  if (!r?.ok) { $('#smstat').textContent = r ? await errText(r) : t('mem.offline'); return }
+  const j = await r.json()
+  if (!j.changed) { $('#smstat').textContent = t('smem.unchanged'); return }
+  $('#smemta').value = j.text; $('#smundo').hidden = false
+  const n = s => s.split('\n').filter(x => x.trim()).length
+  $('#smstat').textContent = t('smem.tidied', { from: n(before), to: n(j.text) })
+}
+$('#smundo').onclick = async () => {
+  if (!cur || cur.kind === 'group') return
+  const c = cur
+  const r = await fetch(api(`${selfPath(c)}/undo`), { method: 'POST' }).catch(() => null)
+  if (!stillOpen(c)) return
+  if (!r?.ok) { $('#smstat').textContent = r ? await errText(r) : t('mem.offline'); return }
+  $('#smemta').value = (await r.json()).text; $('#smundo').hidden = true; $('#smstat').textContent = t('smem.undone')
+}
+// Import what another assistant remembers: it is asked with a prompt to copy, and its answer is added
+// to the memory a person writes for this Agent (not its own notes — this came from the person).
+$('#mimp').onclick = () => {
+  if (!cur || cur.kind === 'group') return
+  $('#impprompt').value = t('mi.prompt'); $('#imptext').value = ''
+  $('#impstep2').textContent = t('mi.step2', { name: cur.name })
+  $('#impdlg').showModal(); $('#imptext').focus()
+}
+$('#impcopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('#impprompt').value) } catch { $('#impprompt').select(); document.execCommand('copy') }
+  $('#impcopy').textContent = t('mi.copied'); setTimeout(() => $('#impcopy').textContent = t('mi.copy'), 2000)
+}
+$('#impcancel').onclick = () => $('#impdlg').close()
+$('#impadd').onclick = async () => {
+  const text = $('#imptext').value.trim()
+  if (!cur || !text) { $('#impdlg').close(); return }
+  const date = new Date().toLocaleDateString(lang)
+  $('#mem').value = [$('#mem').value.trim(), `${t('mi.heading', { date })}\n${text}`].filter(Boolean).join('\n\n')
+  $('#impdlg').close()
+  await saveMem(memPath(cur), '#mem', '#mstat')
+}
 
 // ═══ Chat history import / export (current conversation) ═══
 const xPath = (op, c) => `/api/${op}/${c.kind === 'group' ? 'group' : 'dm'}/${c.id}`

@@ -51,6 +51,9 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   /// The platform-wide autonomy: auto (the default) or manual.
   String _autonomy = 'auto';
+
+  /// Every Agent's own notes tidied each night.
+  bool _tidyNightly = false;
   bool _auto = true;
   bool _busy = false;
   String _protocol = 'chat';
@@ -82,6 +85,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       _allow = policy.allow;
       _effort = await widget.api.defaultEffort();
       _autonomy = await widget.api.defaultAutonomy();
+      _tidyNightly = await widget.api.tidyNightly();
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
     } on ApiException catch (e) {
       _say(e.message, bad: true);
@@ -499,6 +503,21 @@ class _ProvidersPageState extends State<ProvidersPage> {
                           ),
                         ),
                     ],
+                    const SizedBox(height: 12),
+                    SwitchListTile(
+                      key: const ValueKey('mem-nightly'),
+                      contentPadding: EdgeInsets.zero,
+                      value: _tidyNightly,
+                      title: Text(tr('memset.nightly'), style: const TextStyle(fontSize: 13)),
+                      subtitle: Text(tr('memset.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+                      onChanged: _busy
+                          ? null
+                          : (v) => _act(tr('prov.saving'), () async {
+                              await widget.api.setTidyNightly(v);
+                              setState(() => _tidyNightly = v);
+                              _say(tr('memset.saved'), good: true);
+                            }),
+                    ),
                     const SizedBox(height: 10),
                     Text(_hint, style: TextStyle(fontSize: 11.5, color: _hintColor)),
                     const SizedBox(height: 16),

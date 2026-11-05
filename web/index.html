@@ -740,12 +740,12 @@
   <div class="s2mem">
     <small id="memtitle" data-i18n="mem.title"></small>
     <textarea id="mem" data-i18n-placeholder="mem.agentPh"></textarea>
-    <div class="row"><button class="btn" id="msave" data-i18n="common.save"></button><small id="mstat"></small></div>
+    <div class="row"><button class="btn" id="msave" data-i18n="common.save"></button><button class="btn" id="mimp" data-i18n="mi.open"></button><small id="mstat"></small></div>
     <div id="smem">
       <small id="smemtitle" data-i18n="smem.head"></small>
       <small data-i18n="smem.note"></small>
       <textarea id="smemta" data-i18n-placeholder="smem.ph"></textarea>
-      <div class="row"><button class="btn" id="smsave" data-i18n="common.save"></button><small id="smstat"></small></div>
+      <div class="row"><button class="btn" id="smsave" data-i18n="common.save"></button><button class="btn" id="smtidy" data-i18n="smem.tidy" data-i18n-title="smem.tidyTitle"></button><button class="btn" id="smundo" data-i18n="smem.undo" hidden></button><small id="smstat"></small></div>
     </div>
     <div class="row"><button class="btn" id="xexp" data-i18n="s2.exportChat"></button><button class="btn" id="ximp" data-i18n="common.import"></button>
       <input type="file" id="xfile" accept="application/json,.json" hidden></div>
@@ -860,6 +860,19 @@
   </div>
 </dialog>
 
+<dialog id="impdlg">
+  <h4 data-i18n="mi.title"></h4>
+  <small class="rhint" data-i18n="mi.step1"></small>
+  <textarea id="impprompt" rows="4" readonly></textarea>
+  <div class="prow"><button class="btn" id="impcopy" type="button" data-i18n="mi.copy"></button></div>
+  <small class="rhint" id="impstep2"></small>
+  <textarea id="imptext" rows="8" data-i18n-placeholder="mi.pastePh"></textarea>
+  <div class="acts">
+    <button class="btn" id="impcancel" data-i18n="common.cancel"></button>
+    <button class="btn pri" id="impadd" data-i18n="mi.add"></button>
+  </div>
+</dialog>
+
 <dialog id="secdlg">
   <h4 data-i18n="sec.addTitle"></h4>
   <input type="text" id="secname" data-i18n-placeholder="sec.namePh" autocomplete="off" spellcheck="false">
@@ -971,6 +984,10 @@
   <small class="rhint" data-i18n="ap.neverHint"></small>
   <div class="fbhead" id="aplisthead" hidden><span data-i18n="ap.allowed"></span></div>
   <div id="aplist"></div>
+  <div class="psplit"></div>
+  <h4 style="margin-bottom:10px" data-i18n="memset.title"></h4>
+  <label class="pick"><input type="checkbox" id="memnightly"> <span data-i18n="memset.nightly"></span></label>
+  <small class="rhint" data-i18n="memset.hint"></small>
   <small class="phint" id="phint" data-i18n="p.hint"></small>
   <div class="acts">
     <button class="btn" style="margin-right:auto;color:var(--bad);display:none" id="pdel" data-i18n="common.delete"></button>

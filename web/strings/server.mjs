@@ -41,6 +41,8 @@ export const serverStrings = {
   'chat.needTarget':  ['Pick an agent or a group, and do not send an empty message', '要选一个 Agent 或一个群，并且不能发空消息', '請選一個 Agent 或一個群組，而且不能傳送空白訊息'],
   'voice.need.sttModel': ['Speech recognition on an upstream needs a model: the name your upstream gives its speech-to-text model', '用上游识别语音，要填模型：上游给它的语音转文字模型起的名字', '用上游辨識語音，要填模型：上游為語音轉文字模型取的名稱'],
   'voice.need.ttsModel': ['Reading aloud on an upstream needs a model: the name your upstream gives its text-to-speech model', '用上游朗读，要填模型：上游给它的文字转语音模型起的名字', '用上游朗讀，要填模型：上游為文字轉語音模型取的名稱'],
+  'memory.tidyBad': ['The tidied notes did not look right (most of them were missing), so they were left as they were', '整理结果不对劲（大部分笔记不见了），所以没有改动原来的笔记', '整理結果不對勁（大部分筆記不見了），所以沒有改動原本的筆記'],
+  'memory.noUndo':  ['There is no tidy to undo', '没有可以撤销的整理', '沒有可以復原的整理'],
   'setup.long':    ['The setup script is too long (at most {max} characters)', '初始化脚本太长了（最多 {max} 个字符）', '初始化腳本太長了（最多 {max} 個字元）'],
   'setup.empty':   ['This Agent has no setup script', '这个 Agent 没有初始化脚本', '這個 Agent 沒有初始化腳本'],
   'setup.noTools': ['Tools are off on this server, so Agents have no machine to set up', '这台服务器没开工具，Agent 没有机器可以初始化', '這台伺服器沒開工具，Agent 沒有機器可以初始化'],

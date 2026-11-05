@@ -179,6 +179,14 @@ const Map<String, List<String>> settingsStrings = {
     '不管上面選的是哪種模式，命中就直接拒絕，不會來問你；定時任務和主動回報也一樣。'
         '和上面的清單一樣，比對的是命令、網頁位址或請求本身，不看檔案內容。',
   ],
+  'memset.nightly': ['Tidy every Agent\u2019s own notes each night (03:00 server time)', '每晚自动整理每个 Agent 自己的笔记（服务器时间 03:00）', '每晚自動整理每個 Agent 自己的筆記（伺服器時間 03:00）'],
+  'memset.hint': [
+    'Done by each Agent\u2019s background model if it has one, otherwise its own, and counted against its daily cap. '
+        'Only notes that changed since and have 8 lines or more.',
+    '用每个 Agent 的后台模型整理（没有就用它自己的模型），费用计入它的每日上限。只整理有改动、且不少于 8 条的笔记。',
+    '用每個 Agent 的背景模型整理（沒有就用它自己的模型），費用計入它的每日上限。只整理有改動、且不少於 8 條的筆記。',
+  ],
+  'memset.saved': ['Saved', '已保存', '已儲存'],
   'ap.saved': ['Approval settings saved', '审批设置已保存', '審批設定已儲存'],
   'ap.allowed': ['Always allowed', '已设为总是允许', '已設為總是允許'],
   'ap.allowPattern': ['{tool}, commands matching', '{tool}，匹配', '{tool}，符合'],

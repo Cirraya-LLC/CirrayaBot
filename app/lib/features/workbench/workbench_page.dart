@@ -130,6 +130,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   String _memoryStatus = '';
   String? _memoryShownFor;
   String _selfMemoryStatus = '';
+
+  /// A tidy just happened here and can be taken back.
+  bool _canUndoTidy = false;
+  bool _tidying = false;
   String? _selfMemoryShownFor;
 
   // @ autocomplete: the group members matching what's typed after the @.
@@ -221,7 +225,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     if (bench.selfMemoryFor != _selfMemoryShownFor) {
       _selfMemoryShownFor = bench.selfMemoryFor;
       _selfMemory.text = bench.selfMemory;
-      _selfMemoryStatus = '';
+      if (!_tidying) {
+        _selfMemoryStatus = '';
+        _canUndoTidy = false;
+      }
     }
     setState(() {});
   }
@@ -404,6 +411,110 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 
   void _say(String s) {
     if (mounted) setState(() => _memoryStatus = s);
+  }
+
+  /// Paste what another assistant remembers about the person; it joins the memory they write for this Agent.
+  Future<void> _importMemory(Conversation c) async {
+    final pasted = TextEditingController();
+    final add = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        scrollable: true,
+        title: Text(tr('wb.memImportTitle'), style: const TextStyle(fontSize: 16)),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(tr('wb.memImportStep1'), style: TextStyle(fontSize: 12.5, color: C.dim)),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: C.field, borderRadius: BorderRadius.circular(8)),
+                child: SelectableText(tr('wb.memImportPrompt'), style: const TextStyle(fontSize: 12.5, height: 1.5)),
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: tr('wb.memImportPrompt')));
+                    ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(SnackBar(content: Text(tr('wb.memImportCopied'))));
+                  },
+                  icon: const Icon(Icons.copy, size: 15),
+                  label: Text(tr('wb.memImportCopy')),
+                ),
+              ),
+              Text(tr('wb.memImportStep2', {'name': c.name}), style: TextStyle(fontSize: 12.5, color: C.dim)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: pasted,
+                minLines: 5,
+                maxLines: 10,
+                decoration: InputDecoration(hintText: tr('wb.memImportPaste')),
+                style: const TextStyle(fontSize: 12.5),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text(tr('common.cancel'))),
+          FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text(tr('wb.memImportAdd'))),
+        ],
+      ),
+    );
+    final text = pasted.text;
+    pasted.dispose();
+    if (add != true || text.trim().isEmpty || !mounted) return;
+    final date = MaterialLocalizations.of(context).formatShortDate(DateTime.now());
+    String status;
+    try {
+      await widget.bench.importMemory(text, tr('wb.memImportHeading', {'date': date}));
+      status = tr('wb.saved');
+    } on ApiException catch (e) {
+      status = tr('wb.notSaved', {'msg': e.message});
+    }
+    if (mounted) setState(() => _memoryStatus = status);
+  }
+
+  Future<void> _tidyNotes() async {
+    final before = _selfMemory.text.split('\n').where((l) => l.trim().isNotEmpty).length;
+    setState(() {
+      _tidying = true;
+      _selfMemoryStatus = tr('wb.tidying');
+    });
+    String status;
+    var undo = false;
+    try {
+      final changed = await widget.bench.tidySelfMemory();
+      final after = widget.bench.selfMemory.split('\n').where((l) => l.trim().isNotEmpty).length;
+      status = changed ? tr('wb.tidied', {'from': before, 'to': after}) : tr('wb.tidyNothing');
+      undo = changed;
+    } on ApiException catch (e) {
+      status = e.message;
+    }
+    if (!mounted) return;
+    setState(() {
+      _tidying = false;
+      _selfMemoryStatus = status;
+      _canUndoTidy = undo;
+    });
+  }
+
+  Future<void> _undoTidy() async {
+    String status;
+    try {
+      await widget.bench.undoTidy();
+      status = tr('wb.tidyUndone');
+    } on ApiException catch (e) {
+      status = e.message;
+    }
+    if (mounted) {
+      setState(() {
+        _selfMemoryStatus = status;
+        _canUndoTidy = false;
+      });
+    }
   }
 
   Future<void> _exportChat(Conversation c) async {
@@ -1730,6 +1841,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                       icon: const Icon(Icons.upload_outlined, size: 15),
                       label: Text(tr('common.import'), style: const TextStyle(fontSize: 12)),
                     ),
+                    if (c != null && !c.isGroup)
+                      TextButton.icon(
+                        key: const ValueKey('mem-import'),
+                        onPressed: () => _importMemory(c),
+                        icon: const Icon(Icons.psychology_alt_outlined, size: 15),
+                        label: Text(tr('wb.memImport'), style: const TextStyle(fontSize: 12)),
+                      ),
                   ],
                 ),
                 if (_memoryStatus.isNotEmpty) ...[
@@ -1769,22 +1887,36 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                     style: const TextStyle(fontSize: 12, height: 1.5),
                   ),
                   const SizedBox(height: 4),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton(
-                      onPressed: () async {
-                        String status;
-                        try {
-                          await bench.saveSelfMemory(_selfMemory.text);
-                          status = tr('wb.saved');
-                        } on ApiException catch (e) {
-                          status = tr('wb.notSaved', {'msg': e.message});
-                        }
-                        if (!mounted) return;
-                        setState(() => _selfMemoryStatus = status);
-                      },
-                      child: Text(tr('common.save')),
-                    ),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                        onPressed: () async {
+                          String status;
+                          try {
+                            await bench.saveSelfMemory(_selfMemory.text);
+                            status = tr('wb.saved');
+                          } on ApiException catch (e) {
+                            status = tr('wb.notSaved', {'msg': e.message});
+                          }
+                          if (!mounted) return;
+                          setState(() {
+                            _selfMemoryStatus = status;
+                            _canUndoTidy = false;
+                          });
+                        },
+                        child: Text(tr('common.save')),
+                      ),
+                      Tooltip(
+                        message: tr('wb.tidyTip'),
+                        child: TextButton(
+                          key: const ValueKey('mem-tidy'),
+                          onPressed: _tidying ? null : _tidyNotes,
+                          child: Text(tr('wb.tidy')),
+                        ),
+                      ),
+                      if (_canUndoTidy) TextButton(onPressed: _undoTidy, child: Text(tr('wb.tidyUndo'))),
+                    ],
                   ),
                   if (_selfMemoryStatus.isNotEmpty)
                     Text(

@@ -992,6 +992,20 @@ class Api {
   Future<void> saveSelfMemory(String agentId, String text) =>
       _json('PUT', _selfMemoryPath(agentId), {'text': text});
 
+  /// Have the agent's model tidy its notes. [changed] false = nothing to tidy.
+  Future<({String text, bool changed})> tidySelfMemory(String agentId) async {
+    final j = await _map('POST', '${_selfMemoryPath(agentId)}/tidy');
+    return (text: (j['text'] as String?) ?? '', changed: j['changed'] == true);
+  }
+
+  /// Take the last tidy back; returns the notes as they were.
+  Future<String> undoTidy(String agentId) async =>
+      ((await _map('POST', '${_selfMemoryPath(agentId)}/undo'))['text'] as String?) ?? '';
+
+  /// Whether every Agent's own notes are tidied each night.
+  Future<bool> tidyNightly() async => (await _map('GET', '/api/settings/memory'))['tidy_nightly'] == true;
+  Future<void> setTidyNightly(bool on) => _json('PUT', '/api/settings/memory', {'tidy_nightly': on});
+
   // ---- Agents & groups ----
   // Same endpoints the web page uses; the server generates the id for a
   // Chinese name that has no ASCII slug, so the client never asks for one.

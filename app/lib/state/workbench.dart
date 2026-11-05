@@ -625,6 +625,39 @@ class Workbench extends ChangeNotifier {
     selfMemory = text;
   }
 
+  /// The Agent's model merges duplicates and drops what is out of date. Returns whether anything changed.
+  Future<bool> tidySelfMemory() async {
+    final c = current;
+    if (c == null || c.isGroup) return false;
+    final r = await api.tidySelfMemory(c.id);
+    if (current?.id != c.id) return false;
+    selfMemory = r.text;
+    selfMemoryFor = '${c.id}#${DateTime.now().microsecondsSinceEpoch}';   // the page shows the new text
+    notifyListeners();
+    return r.changed;
+  }
+
+  Future<void> undoTidy() async {
+    final c = current;
+    if (c == null || c.isGroup) return;
+    final text = await api.undoTidy(c.id);
+    if (current?.id != c.id) return;
+    selfMemory = text;
+    selfMemoryFor = '${c.id}#${DateTime.now().microsecondsSinceEpoch}';
+    notifyListeners();
+  }
+
+  /// Another assistant's memories, pasted by the person: added to the memory they write for this Agent.
+  Future<void> importMemory(String pasted, String heading) async {
+    final c = current;
+    if (c == null || c.isGroup || pasted.trim().isEmpty) return;
+    final text = [memory.trim(), '$heading\n${pasted.trim()}'].where((s) => s.isNotEmpty).join('\n\n');
+    await api.saveMemory(c, text);
+    memory = text;
+    memoryFor = '${c.id}#${DateTime.now().microsecondsSinceEpoch}';
+    notifyListeners();
+  }
+
   // ---- Attachments for the next message ----
   final List<Pending> pending = [];
   String? _pendingFor;

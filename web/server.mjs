@@ -10,7 +10,7 @@ import { fitContext, listModels, modelInfo, guessContext } from './model.mjs'
 import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './protocols.mjs'
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
-import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
+import { addNote, NOTE_MAX_CHARS, TIDY_SYSTEM, cleanTidy, noteLines } from './memory.mjs'
 import { APPROVAL_MODES, RISKY, gate, forbidden, toolSubject } from './approve.mjs'
 import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
@@ -1722,6 +1722,7 @@ async function rememberFromAgent(bot, fact) {
   if (r.tooLong) return `Too long (at most ${NOTE_MAX_CHARS} characters). One short fact per call — if it is a procedure, save_skill is the place for it.`
   if (r.duplicate) return 'You already have that in your notes; nothing was added.'
   await db.setSelfMemory(bot.id, r.text)
+  await db.setSetting(prevSelfKey(bot.id), null)      // an undo now would lose this note
   const forgot = r.dropped.length
     ? ` Your notes were full, so the oldest ${r.dropped.length} ${r.dropped.length === 1 ? 'is' : 'are'} gone: ${r.dropped.map(d => `"${d}"`).join('; ')}.`
     : ''
@@ -2535,6 +2536,46 @@ async function taskModel(bot, t) {
   }
 }
 
+// ---------- Tidying an agent's own notes ----------
+// One call to the agent's model (its background model when it has one — this is background work),
+// counted and capped like any other. The notes before are kept so one tidy can be undone.
+const prevSelfKey = id => `${db.selfMemKey(id)}:prev`
+async function tidyNotes(bot) {
+  const before = await db.getSelfMemory(bot.id)
+  if (noteLines(before).length < 2) return { text: before, changed: false }
+  const { p } = await taskModel(bot, {})
+  await checkCap(bot, p)
+  const r = await callModel(p, [{ role: 'system', content: TIDY_SYSTEM }, { role: 'user', content: before }], () => {}, { bare: true })
+  noteUsage({ bot }, p, r.usage)
+  const after = cleanTidy(r.content, before)
+  if (after == null) throw new Say('memory.tidyBad')
+  await db.setSetting(`memory.tidied:${bot.id}`, { at: Date.now(), hash: setupHash(after) })
+  if (after === noteLines(before).join('\n')) return { text: before, changed: false }
+  await db.setSetting(prevSelfKey(bot.id), before)
+  await db.setSelfMemory(bot.id, after)
+  return { text: after, before, changed: true }
+}
+
+/**
+ * Nightly, when the platform setting says so: at 03:00 server time, every agent whose notes changed
+ * since their last tidy and have grown past a handful of lines. One at a time, once a day.
+ */
+const memorySettings = async () => ({ tidy_nightly: (await db.getSetting('memory', null))?.tidy_nightly === true })
+async function tidyNightly() {
+  if (!(await memorySettings()).tidy_nightly || new Date().getHours() !== 3) return
+  const day = new Date().toDateString()
+  if ((await db.getSetting('memory.tidyDay', '')) === day) return
+  await db.setSetting('memory.tidyDay', day)
+  for (const bot of await loadBots()) {
+    const notes = await db.getSelfMemory(bot.id)
+    const last = await db.getSetting(`memory.tidied:${bot.id}`, null)
+    if (noteLines(notes).length < 8 || last?.hash === setupHash(notes)) continue
+    await tidyNotes(bot).then(r => r.changed && console.log(`[memory] tidied ${bot.name}'s notes`))
+      .catch(e => console.warn(`[memory] could not tidy ${bot.name}'s notes: ${errorText(e, 'en')}`))
+  }
+}
+setInterval(() => tidyNightly().catch(e => console.warn(`[memory] ${e.message}`)), 10 * 60_000).unref()
+
 const MAX_FALLBACKS = 3
 // How long to wait before each try of one model call. MODEL_RETRY_WAITS exists for the tests, which
 // can't sit through eight seconds of backoff per failing call.
@@ -2894,6 +2935,27 @@ const server = createServer(async (req, res) => {
       return send(202, { ok: true })
     }
 
+    // Tidy an agent's own notes now, or take the last tidy back.
+    const mt = url.pathname.match(/^\/api\/memory\/agent\/([\w-]+)\/self\/(tidy|undo)$/)
+    if (mt && req.method === 'POST') {
+      const bot = (await loadBots(lang)).find(b => b.id === mt[1])
+      if (!bot) return send(404, { error: t('err.noAgent') })
+      if (mt[2] === 'tidy') return send(200, await withLock(`notes:${bot.id}`, () => tidyNotes(bot)))
+      const prev = await db.getSetting(prevSelfKey(bot.id), null)
+      if (prev == null) return send(409, { error: t('memory.noUndo') })
+      await db.setSelfMemory(bot.id, prev)
+      await db.setSetting(prevSelfKey(bot.id), null)
+      return send(200, { text: prev })
+    }
+    if (url.pathname === '/api/settings/memory') {
+      if (req.method === 'GET') return send(200, await memorySettings())
+      if (req.method === 'PUT') {
+        const b = await readBody(req)
+        await db.setSetting('memory', { tidy_nightly: b.tidy_nightly === true })
+        return send(200, await memorySettings())
+      }
+    }
+
     // .../self is the second store: the notes the agent writes himself (memory.mjs). Agents only —
     // groups have no self-notes, because only a person can write a group's memory.
     const mm = url.pathname.match(/^\/api\/memory\/(agent|group)\/([\w-]+)(\/self)?$/)
@@ -2907,6 +2969,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'PUT') {
         const text = str((await readBody(req)).text)
         await (own ? db.setSelfMemory(id, text) : db.setMemory(kind, id, text))
+        if (own) await db.setSetting(prevSelfKey(id), null)   // edited by hand: nothing left to undo
         return send(200, { ok: true })
       }
     }
