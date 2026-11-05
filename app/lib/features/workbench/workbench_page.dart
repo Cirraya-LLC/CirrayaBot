@@ -33,6 +33,7 @@ import 'message_view.dart';
 import 'attachments.dart';
 import 'session_panel.dart';
 import 'task_view.dart';
+import 'templates_page.dart';
 
 /// Collapsed width of the conversation list. Expanded it is whatever the
 /// sidebar was dragged to ([_wide]).
@@ -990,9 +991,14 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     child: compact
         ? SizedBox(width: 32, height: 32, child: Icon(Icons.add, size: 20, color: C.dim))
         : null,
-    onSelected: (v) => v == 'agent' ? showAgentEditor(context, bench) : showGroupEditor(context, bench),
+    onSelected: (v) => switch (v) {
+      'agent' => showAgentEditor(context, bench),
+      'template' => showTemplates(context, bench),
+      _ => showGroupEditor(context, bench),
+    },
     itemBuilder: (_) => [
       PopupMenuItem(value: 'agent', child: Text(tr('wb.newAgent'), style: const TextStyle(fontSize: 13))),
+      PopupMenuItem(value: 'template', child: Text(tr('tpl.newFrom'), style: const TextStyle(fontSize: 13))),
       PopupMenuItem(value: 'group', child: Text(tr('wb.newGroup'), style: const TextStyle(fontSize: 13))),
     ],
   );

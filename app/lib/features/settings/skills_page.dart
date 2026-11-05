@@ -59,7 +59,13 @@ class _SkillsPageState extends State<SkillsPage> {
 
   String _agentName(String id) => widget.agents.where((a) => a.id == id).firstOrNull?.name ?? id;
 
+  /// The shipped skill templates, for "from a template".
+  List<SkillTemplate> _templates = const [];
+
   Future<void> _load({String? select}) async {
+    widget.api.templates().then((t) {
+      if (mounted) setState(() => _templates = t.skills);
+    }, onError: (_) {});
     try {
       _rows = await widget.api.skills();
       final hit = select == null ? null : _rows.where((k) => k.id == select).firstOrNull;
@@ -169,7 +175,27 @@ class _SkillsPageState extends State<SkillsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(backgroundColor: C.side, title: Text(tr('skills.title'), style: const TextStyle(fontSize: 15))),
+      appBar: AppBar(
+        backgroundColor: C.side,
+        title: Text(tr('skills.title'), style: const TextStyle(fontSize: 15)),
+        actions: [
+          PopupMenuButton<SkillTemplate>(
+            key: const ValueKey('skill-templates'),
+            tooltip: tr('tpl.skillFrom'),
+            icon: const Icon(Icons.library_add_outlined, size: 20),
+            onSelected: (k) {
+              _fill(null);
+              _name.text = k.name;
+              _desc.text = k.description;
+              _body.text = k.body;
+              setState(() {});
+            },
+            itemBuilder: (_) => [
+              for (final k in _templates) PopupMenuItem(value: k, child: Text(k.name, style: const TextStyle(fontSize: 13))),
+            ],
+          ),
+        ],
+      ),
       body: _loading
           ? Center(child: CircularProgressIndicator(strokeWidth: 2, color: C.dim))
           : Center(

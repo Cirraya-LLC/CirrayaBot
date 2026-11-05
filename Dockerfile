@@ -17,6 +17,7 @@ RUN npm ci --prefix web --no-audit --no-fund --omit=dev
 COPY web ./web
 COPY deploy ./deploy
 COPY bots ./bots
+COPY templates ./templates
 
 ENV NODE_ENV=production WEB_PORT=8080 BIND_HOST=0.0.0.0
 EXPOSE 8080

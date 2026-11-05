@@ -571,6 +571,14 @@
   dialog textarea{resize:vertical;min-height:120px;line-height:1.7}
   dialog textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;min-height:90px}
   .bsec{margin:8px 0 2px}
+  .tplgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin:12px 0}
+  .tplcard{border:1px solid var(--line);border-radius:11px;padding:12px;display:flex;flex-direction:column;gap:6px;cursor:pointer;
+    background:var(--field);text-align:left;color:var(--ink);font:inherit}
+  .tplcard:hover,.tplcard:focus-visible{border-color:var(--accent)}
+  .tplcard b{font-size:13.5px}
+  .tplcard small{color:var(--dim);font-size:12px;line-height:1.5}
+  .tplcard .tags{display:flex;flex-wrap:wrap;gap:4px}
+  .tplcard .tags span{font-size:10.5px;padding:2px 7px;border-radius:999px;background:var(--chip);color:var(--dim)}
   .actdlg{width:760px}
   .acthead{display:flex;align-items:center;gap:12px;margin-bottom:6px}
   .acthead h4{margin:0}
@@ -803,6 +811,7 @@
     <button class="btn" id="kexp" data-i18n="common.export"></button>
     <button class="btn" id="kimp" data-i18n="k.importMd"></button>
     <input type="file" id="kfile" accept=".md,text/markdown,text/plain" hidden>
+    <button class="btn" id="ktpl" data-i18n="tpl.skillFrom" aria-haspopup="menu"></button>
     <button class="btn" id="knew" data-i18n="common.new"></button>
     <button class="btn" id="kclose" data-i18n="common.close"></button>
     <button class="btn pri" id="ksave" data-i18n="common.save"></button>
@@ -886,10 +895,23 @@
     <div class="strow"><span id="bsetupstate"></span><button class="btn" id="bsetuprun" type="button" data-i18n="st.run"></button></div>
     <pre id="bsetupout" class="stout" hidden></pre>
   </details>
+  <small class="rhint" id="btplnote" hidden></small>
   <div class="acts">
     <button class="btn" style="margin-right:auto;color:var(--bad)" id="bdel" data-i18n="common.delete"></button>
+    <button class="btn" id="bexport" data-i18n="tpl.export"></button>
     <button class="btn" id="bcancel" data-i18n="common.cancel"></button>
     <button class="btn pri" id="bsave" data-i18n="common.save"></button>
+  </div>
+</dialog>
+
+<dialog id="tpldlg" style="width:720px">
+  <h4 data-i18n="tpl.title"></h4>
+  <small class="rhint" data-i18n="tpl.intro"></small>
+  <div id="tpllist" class="tplgrid"></div>
+  <div class="acts">
+    <button class="btn" style="margin-right:auto" id="tplimp" data-i18n="tpl.importFile"></button>
+    <input type="file" id="tplfile" accept=".json,application/json" hidden>
+    <button class="btn" id="tplclose" data-i18n="common.close"></button>
   </div>
 </dialog>
 

@@ -57,6 +57,10 @@ function openMenu(anchor, items) {
     b.onclick = () => { closeMenu(); it.on() }
     menu.append(b)
   }
+  // An open modal dialog sits in the top layer, above everything else on the page: a menu opened from
+  // inside one has to live inside it, or the dialog covers it and swallows its clicks.
+  const host = anchor.closest('dialog[open]') ?? document.body
+  if (menu.parentElement !== host) host.append(menu)
   menu.hidden = false
   const r = anchor.getBoundingClientRect(), up = !!anchor.closest('.foot')
   menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`
@@ -1386,10 +1390,61 @@ $('#vtry').onclick = async () => {
   speaker.stop(); speaker.say(t('vo.sample'), cur?.kind === 'agent' ? cur.id : null)
 }
 
+// ═══ Templates ═══
+// Shipped agents to start from, and files exported from another CirrayaBot. A template never brings a model:
+// the editor opens with everything else filled in, and the person picks the upstream and model.
+let TEMPLATES = null
+async function openTemplates() {
+  TEMPLATES ??= await fetch(api('/api/templates')).then(r => r.json()).catch(() => null)
+  const box = $('#tpllist'); box.innerHTML = ''
+  for (const tp of TEMPLATES?.agents ?? []) {
+    const card = document.createElement('button'); card.type = 'button'; card.className = 'tplcard'
+    card.innerHTML = `<b></b><small class="d"></small><div class="tags"></div>`
+    card.querySelector('b').textContent = tp.name
+    card.querySelector('.d').textContent = tp.description
+    card.querySelector('.tags').innerHTML = [...tp.skills.map(k => k.name), ...tp.setup ? [t('tpl.hasSetup')] : []]
+      .map(x => `<span>${esc(x)}</span>`).join('')
+    card.onclick = () => { $('#tpldlg').close(); editBot(null, tp) }
+    box.append(card)
+  }
+  $('#tpldlg').showModal()
+}
+$('#tplclose').onclick = () => $('#tpldlg').close()
+$('#tplimp').onclick = () => $('#tplfile').click()
+$('#tplfile').onchange = async () => {
+  const f = $('#tplfile').files[0]; $('#tplfile').value = ''
+  if (!f) return
+  let doc
+  try { doc = JSON.parse(await f.text()) } catch { alert(t('x.notJson')); return }
+  const r = await fetch(api('/api/templates/check'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ doc }) })
+  if (!r.ok) { alert(await errText(r)); return }
+  $('#tpldlg').close(); editBot(null, await r.json())
+}
+// The open Agent, as a template file someone else can import.
+$('#bexport').onclick = async () => {
+  if (!bEditing) return
+  const r = await fetch(api(`/api/bots/${bEditing.id}/template`))
+  if (!r.ok) { alert(await errText(r)); return }
+  const doc = await r.json()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' }))
+  a.download = `${doc.name}.cirrayabot-agent.json`
+  a.click(); URL.revokeObjectURL(a.href)
+}
+// A skill template fills the skill editor; the person picks who gets it and saves.
+$('#ktpl').onclick = async e => {
+  const btn = e.currentTarget
+  TEMPLATES ??= await fetch(api('/api/templates')).then(r => r.json()).catch(() => null)
+  openMenu(btn, (TEMPLATES?.skills ?? []).map(k => ({ label: k.name, on: () => {
+    fillSkill(null); $('#kname').value = k.name; $('#kdesc').value = k.description; $('#kbody').value = k.body
+  } })))
+}
+
 // ═══ Groups ═══
 let gEditing = null
 const newMenu = e => openMenu(e.currentTarget, [
   { label: t('side.newAgent'), on: () => editBot(null) },
+  { label: t('tpl.newFrom'), on: () => openTemplates() },
   { label: t('side.newGroup'), on: () => openGroupDlg(null) },
 ])
 $('#newconv').onclick = newMenu
@@ -1464,9 +1519,13 @@ $('#hedit').onclick = () => {
 
 // ═══ Agent ═══
 let bEditing = null
-function editBot(b) {
+// A new Agent started from a template: its fields fill the editor, its skills come along on save.
+let bTemplate = null
+function editBot(b, tpl = null) {
   bEditing = b
-  $('#btitle').textContent = b ? t('b.edit', { name: b.name }) : t('b.new')
+  bTemplate = b ? null : tpl
+  if (tpl && !b) b = { ...tpl, id: null }
+  $('#btitle').textContent = bEditing ? t('b.edit', { name: bEditing.name }) : t('b.new')
   $('#bname').value = b?.name ?? ''
   $('#bdesc').value = b?.description ?? ''
   $('#bpersona').value = b?.persona ?? ''
@@ -1490,10 +1549,13 @@ function editBot(b) {
   $('#bcap').value = dollars(b?.daily_cap_micro)
   $('#bvoice').value = b?.voice ?? ''
   // A cap only means something when the upstream has prices; say so rather than let it look guarded.
-  const u = b && spendOf(b.id)
+  const u = bEditing && spendOf(bEditing.id)
   $('#bcaphint').textContent = u && !u.priced ? t('sp.unpricedWhy')
     : USAGE.default_cap_micro != null ? t('sp.capDefault', { cap: money(USAGE.default_cap_micro) }) : ''
-  $('#bdel').style.display = b ? '' : 'none'
+  $('#bdel').style.display = $('#bexport').style.display = bEditing ? '' : 'none'
+  $('#btplnote').hidden = !bTemplate
+  $('#btplnote').textContent = bTemplate ? [t('tpl.pickModel'), bTemplate.skills?.length ? t('tpl.comesWith', { list: listJoin(bTemplate.skills.map(k => k.name)) }) : '',
+    bTemplate.note ?? ''].filter(Boolean).join(' ') : ''
   // Check-ins: goals it works toward on its own, and how often.
   $('#bcksec').hidden = BOTS.length ? !BOTS[0].machine : false
   $('#bgoals').value = b?.goals ?? ''
@@ -1519,7 +1581,7 @@ function paintCheckin(b) {
   if (b?.checkin_every && b?.checkin_next_at) parts.push(t('ck.next', { when: at(b.checkin_next_at) }))
   if (b?.checkin_last) parts.push(t(`ck.last.${b.checkin_last.status}`, { when: at(b.checkin_last.at) }))
   $('#bckstate').textContent = parts.join(' · ')
-  $('#bcknow').hidden = !b?.goals
+  $('#bcknow').hidden = !b?.goals || !b?.id
 }
 $('#bcknow').onclick = async () => {
   if (!bEditing) return
@@ -1540,7 +1602,7 @@ function paintSetup(b) {
   clearTimeout(setupPoll)
   const st = b?.setup_state, el = $('#bsetupstate')
   el.className = ''
-  $('#bsetuprun').hidden = !b?.setup
+  $('#bsetuprun').hidden = !b?.setup || !b?.id
   $('#bsetuprun').disabled = !!b?.setup_running
   $('#bsetupout').hidden = !st?.tail
   $('#bsetupout').textContent = st?.tail ?? ''
@@ -1653,7 +1715,8 @@ $('#bsave').onclick = async () => {
     provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
     daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), task_model: chosenTaskModel(), voice: $('#bvoice').value.trim(),
     ...$('#bsetupsec').hidden ? {} : { setup: $('#bsetup').value },
-    ...$('#bcksec').hidden ? {} : { goals: $('#bgoals').value, checkin_every: Number($('#bckevery').value) } }
+    ...$('#bcksec').hidden ? {} : { goals: $('#bgoals').value, checkin_every: Number($('#bckevery').value) },
+    ...!bEditing && bTemplate ? { skills: bTemplate.skills ?? [], ...bTemplate.color ? { color: bTemplate.color } : {} } : {} }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
   const r = bEditing

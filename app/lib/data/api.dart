@@ -203,6 +203,68 @@ class Agent {
   );
 }
 
+/// A skill as a template ships it (or an exported agent carries it).
+class SkillTemplate {
+  const SkillTemplate({required this.name, required this.description, required this.body});
+  final String name;
+  final String description;
+  final String body;
+  Map<String, Object?> toJson() => {'name': name, 'description': description, 'body': body};
+  static SkillTemplate fromJson(Map<String, Object?> j) => SkillTemplate(
+    name: (j['name'] as String?) ?? '',
+    description: (j['description'] as String?) ?? '',
+    body: (j['body'] as String?) ?? '',
+  );
+}
+
+/// An agent to start from — shipped, or from a file someone exported. Never a model: the person picks one.
+class AgentTemplate {
+  const AgentTemplate({
+    this.id = '',
+    required this.name,
+    this.description = '',
+    this.note = '',
+    required this.persona,
+    this.color,
+    this.approval = '',
+    this.autonomy = '',
+    this.setup = '',
+    this.goals = '',
+    this.checkinEvery = 0,
+    this.skills = const [],
+  });
+  final String id;
+  final String name;
+  final String description;
+  final String note;
+  final String persona;
+  final String? color;
+  final String approval;
+  final String autonomy;
+  final String setup;
+  final String goals;
+  final int checkinEvery;
+  final List<SkillTemplate> skills;
+
+  static AgentTemplate fromJson(Map<String, Object?> j) => AgentTemplate(
+    id: (j['id'] as String?) ?? '',
+    name: (j['name'] as String?) ?? '',
+    description: (j['description'] as String?) ?? '',
+    note: (j['note'] as String?) ?? '',
+    persona: (j['persona'] as String?) ?? '',
+    color: j['color'] as String?,
+    approval: (j['approval'] as String?) ?? '',
+    autonomy: (j['autonomy'] as String?) ?? '',
+    setup: (j['setup'] as String?) ?? '',
+    goals: (j['goals'] as String?) ?? '',
+    checkinEvery: (j['checkin_every'] as num?)?.toInt() ?? 0,
+    skills: [
+      for (final k in (j['skills'] as List?) ?? const [])
+        if (k is Map<String, Object?>) SkillTemplate.fromJson(k),
+    ],
+  );
+}
+
 /// How an agent's setup script last went.
 class SetupState {
   const SetupState({required this.at, required this.code, this.ms = 0, this.tail = '', this.stale = false});
@@ -1031,6 +1093,31 @@ class Api {
   }
 
   Future<void> updateAgent(String id, Map<String, Object?> body) => _json('PATCH', '/api/bots/$id', body);
+
+  /// The shipped templates, in the UI's language.
+  Future<({List<AgentTemplate> agents, List<SkillTemplate> skills})> templates() async {
+    final j = await _map('GET', '/api/templates');
+    return (
+      agents: [
+        for (final t in (j['agents'] as List?) ?? const [])
+          if (t is Map<String, Object?>) AgentTemplate.fromJson(t),
+      ],
+      skills: [
+        for (final k in (j['skills'] as List?) ?? const [])
+          if (k is Map<String, Object?>) SkillTemplate.fromJson(k),
+      ],
+    );
+  }
+
+  /// A template file someone picked, checked by the server (an ApiException says what is wrong with it).
+  Future<AgentTemplate> checkTemplate(Object? doc) async =>
+      AgentTemplate.fromJson(await _map('POST', '/api/templates/check', {'doc': doc}));
+
+  /// An agent as a template file (JSON text): what makes it itself, never its model, memory or secrets.
+  Future<String> exportTemplate(String id) async {
+    final j = await _map('GET', '/api/bots/$id/template');
+    return const JsonEncoder.withIndent('  ').convert(j);
+  }
 
   /// Start a check-in now; its report (if any) goes to the agent's Check-ins session.
   Future<void> checkInNow(String id) => _json('POST', '/api/bots/$id/checkin');

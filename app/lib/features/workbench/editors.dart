@@ -5,18 +5,25 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../../data/api.dart';
 import '../../l10n.dart';
+import '../../platform.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
 
-/// [agent] null = create. Returns once the lists are reloaded.
-Future<void> showAgentEditor(BuildContext context, Workbench bench, {Agent? agent}) => showDialog<void>(
-  context: context,
-  builder: (_) => _AgentEditor(bench: bench, agent: agent),
-);
+/// [agent] null = create; [template] fills a new one (its skills are installed when it is saved).
+/// Returns once the lists are reloaded.
+Future<void> showAgentEditor(BuildContext context, Workbench bench, {Agent? agent, AgentTemplate? template}) =>
+    showDialog<void>(
+      context: context,
+      builder: (_) => _AgentEditor(bench: bench, agent: agent, template: agent == null ? template : null),
+    );
+
+/// Template files, for the save and open dialogs.
+const templateFiles = XTypeGroup(label: 'CirrayaBot agent', extensions: ['json'], mimeTypes: ['application/json']);
 
 /// [group] null = create.
 Future<void> showGroupEditor(BuildContext context, Workbench bench, {Conversation? group}) => showDialog<void>(
@@ -65,18 +72,19 @@ class _FallbackPick {
 const _maxFallbacks = 3;
 
 class _AgentEditor extends StatefulWidget {
-  const _AgentEditor({required this.bench, this.agent});
+  const _AgentEditor({required this.bench, this.agent, this.template});
   final Workbench bench;
   final Agent? agent;
+  final AgentTemplate? template;
 
   @override
   State<_AgentEditor> createState() => _AgentEditorState();
 }
 
 class _AgentEditorState extends State<_AgentEditor> {
-  late final _name = TextEditingController(text: widget.agent?.name ?? '');
-  late final _desc = TextEditingController(text: widget.agent?.description ?? '');
-  late final _persona = TextEditingController(text: widget.agent?.persona ?? '');
+  late final _name = TextEditingController(text: widget.agent?.name ?? widget.template?.name ?? '');
+  late final _desc = TextEditingController(text: widget.agent?.description ?? widget.template?.description ?? '');
+  late final _persona = TextEditingController(text: widget.agent?.persona ?? widget.template?.persona ?? '');
 
   /// Typed model name — only used when the upstream will not list its models.
   late final _manualModel = TextEditingController(text: widget.agent?.model ?? '');
@@ -88,8 +96,14 @@ class _AgentEditorState extends State<_AgentEditor> {
 
   /// '' = send nothing, which is what every model got before this setting existed.
   late String _effort = const ['low', 'medium', 'high'].contains(widget.agent?.effort) ? widget.agent!.effort : '';
-  late String _approval = const ['off', 'match', 'all'].contains(widget.agent?.approval) ? widget.agent!.approval : '';
-  late String _autonomy = const ['auto', 'manual'].contains(widget.agent?.autonomy) ? widget.agent!.autonomy : '';
+  late String _approval = (() {
+    final v = widget.agent?.approval ?? widget.template?.approval;
+    return const ['off', 'match', 'all'].contains(v) ? v! : '';
+  })();
+  late String _autonomy = (() {
+    final v = widget.agent?.autonomy ?? widget.template?.autonomy;
+    return const ['auto', 'manual'].contains(v) ? v! : '';
+  })();
   List<Provider> _providers = const [];
   List<String> _models = const [];
   String _model = '';
@@ -106,12 +120,15 @@ class _AgentEditorState extends State<_AgentEditor> {
   late final _taskPick = _FallbackPick(widget.agent?.taskModel?.providerId ?? '', widget.agent?.taskModel?.model ?? '');
 
   /// Check-ins: goals it works toward on its own, and how often.
-  late final _goals = TextEditingController(text: widget.agent?.goals ?? '');
-  late int _checkinEvery = const [0, 60, 240, 720, 1440].contains(widget.agent?.checkinEvery) ? widget.agent!.checkinEvery : 0;
+  late final _goals = TextEditingController(text: widget.agent?.goals ?? widget.template?.goals ?? '');
+  late int _checkinEvery = (() {
+    final v = widget.agent?.checkinEvery ?? widget.template?.checkinEvery ?? 0;
+    return const [0, 60, 240, 720, 1440].contains(v) ? v : 0;
+  })();
   String _checkinNote = '';
 
   /// The machine's setup script, and how it last went (polled while it runs).
-  late final _setup = TextEditingController(text: widget.agent?.setup ?? '');
+  late final _setup = TextEditingController(text: widget.agent?.setup ?? widget.template?.setup ?? '');
   late SetupState? _setupState = widget.agent?.setupState;
   late bool _setupRunning = widget.agent?.setupRunning ?? false;
   Timer? _setupPoll;
@@ -471,12 +488,36 @@ class _AgentEditorState extends State<_AgentEditor> {
       if (_hasMachine) 'setup': _setup.text,
       if (_hasMachine) 'goals': _goals.text,
       if (_hasMachine) 'checkin_every': _checkinEvery,
+      // From a template: its skills come along, and its colour.
+      if (a == null && widget.template != null) 'skills': [for (final k in widget.template!.skills) k.toJson()],
+      if (a == null && widget.template?.color != null) 'color': widget.template!.color,
     };
     await _run(() async {
       if (a == null) return widget.bench.api.createAgent(body);
       await widget.bench.api.updateAgent(a.id, body);
       return a.id;
     });
+  }
+
+  /// This agent as a template file: saved where the person picks (desktop), or shared (Android).
+  Future<void> _export() async {
+    final a = widget.agent!;
+    try {
+      final text = await widget.bench.api.exportTemplate(a.id);
+      final name = '${a.name}.cirrayabot-agent.json';
+      if (!AppPlatform.canSaveAs) {
+        await AppPlatform.shareText(name, text, 'application/json');
+        return;
+      }
+      final loc = await getSaveLocation(suggestedName: name, acceptedTypeGroups: const [templateFiles]);
+      if (loc == null) return;
+      await File(loc.path).writeAsString(text);
+      if (mounted) setState(() => _error = tr('ed.tplExported', {'path': loc.path}));
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } on FileSystemException catch (e) {
+      if (mounted) setState(() => _error = e.osError?.message ?? e.message);
+    }
   }
 
   Future<void> _delete() async {
@@ -664,7 +705,7 @@ class _AgentEditorState extends State<_AgentEditor> {
                   key: const ValueKey('ed-checkin'),
                   tilePadding: EdgeInsets.zero,
                   childrenPadding: EdgeInsets.zero,
-                  initiallyExpanded: (widget.agent?.goals ?? '').isNotEmpty,
+                  initiallyExpanded: (widget.agent?.goals ?? widget.template?.goals ?? '').isNotEmpty,
                   title: Text(tr('ed.checkins'), style: TextStyle(fontSize: 13, color: C.dim)),
                   expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -712,7 +753,7 @@ class _AgentEditorState extends State<_AgentEditor> {
                   key: const ValueKey('ed-setup'),
                   tilePadding: EdgeInsets.zero,
                   childrenPadding: EdgeInsets.zero,
-                  initiallyExpanded: (widget.agent?.setup ?? '').isNotEmpty,
+                  initiallyExpanded: (widget.agent?.setup ?? widget.template?.setup ?? '').isNotEmpty,
                   title: Text(tr('ed.setup'), style: TextStyle(fontSize: 13, color: C.dim)),
                   expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -752,6 +793,20 @@ class _AgentEditorState extends State<_AgentEditor> {
                   ],
                 ),
               ),
+            if (widget.template != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  [
+                    tr('ed.tplPickModel'),
+                    if (widget.template!.skills.isNotEmpty)
+                      tr('ed.tplComesWith', {'list': widget.template!.skills.map((k) => k.name).join(', ')}),
+                    if (widget.template!.note.isNotEmpty) widget.template!.note,
+                  ].join(' '),
+                  key: const ValueKey('ed-template'),
+                  style: TextStyle(fontSize: 11.5, color: C.dim),
+                ),
+              ),
             if (_error.isNotEmpty) ...[
               const SizedBox(height: 10),
               Text(_error, style: TextStyle(fontSize: 12, color: C.code)),
@@ -760,6 +815,8 @@ class _AgentEditorState extends State<_AgentEditor> {
         ),
       ),
       actions: [
+        if (editing)
+          TextButton(onPressed: _busy ? null : _export, child: Text(tr('ed.tplExport'))),
         if (editing)
           TextButton(
             onPressed: _busy ? null : _delete,

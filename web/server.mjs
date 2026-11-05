@@ -22,6 +22,7 @@ import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, atta
 import { langOf, tr, Say, errorText } from './i18n.mjs'
 import { checkVoice, DEFAULT_VOICE, SPEAK_MAX, AUDIO_MAX } from './voice.mjs'
 import { hasEffect, callKey, answerFromLog } from './effects.mjs'
+import { loadSkillTemplates, loadAgentTemplates, checkTemplate, forLang, templateOf } from './templates.mjs'
 import { checkSecret, NEEDS, seal, open as unseal, parseKey, newKey, redact, headerFor, isPrivateAddress } from './secrets.mjs'
 import { createServer } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -2663,6 +2664,31 @@ async function checkinDone(t, result) {
   notify({ kind: 'reply', conv: { kind: 'agent', id: bot.id, name: bot.name }, session: t.session_id, agent: bot.name, text: result })
 }
 
+// ---------- Templates ----------
+// The shipped ones (templates/), loaded once; agents export to the same format and import from it.
+const SKILL_TEMPLATES = loadSkillTemplates(join(ROOT, 'templates', 'skills'))
+const AGENT_TEMPLATES = loadAgentTemplates(join(ROOT, 'templates', 'agents'), SKILL_TEMPLATES)
+
+/**
+ * The skills that came with a template, installed on a new agent. One with the same name and the same
+ * body is shared (the agent is added to it); one that differs gets its own name — "(2)" — rather than
+ * replacing someone's skill.
+ */
+async function installSkills(agentId, skills) {
+  for (const raw of (Array.isArray(skills) ? skills : []).slice(0, 20)) {
+    let k
+    try { k = checkSkill(raw) } catch { continue }
+    const same = await db.skillByName(k.name)
+    if (same && same.body.trim() === k.body.trim()) {
+      if (!same.agents.includes(agentId)) await db.saveSkill({ ...same, agents: [...same.agents, agentId] })
+      continue
+    }
+    let name = k.name
+    for (let n = 2; same && await db.skillByName(name) && n < 50; n++) name = `${k.name.slice(0, 54)} (${n})`
+    await db.saveSkill({ id: 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ...k, name, agents: [agentId], source: 'human' })
+  }
+}
+
 // ---------- Tidying an agent's own notes ----------
 // One call to the agent's model (its background model when it has one — this is background work),
 // counted and capped like any other. The notes before are kept so one tidy can be undone.
@@ -3027,7 +3053,11 @@ const server = createServer(async (req, res) => {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) slug = 'agent-' + Math.random().toString(36).slice(2, 8)
       if (await db.getAgent(slug)) return send(409, { error: t('agent.idExists', { id: slug }) })
       const n = (await db.listAgents()).length
-      await db.upsertAgent({ description: '', provider_id: '', model: '', effort: '', approval: '', ...checked, id: slug, ord: n + 1, color: db.nextColor(n) })
+      await db.upsertAgent({ description: '', provider_id: '', model: '', effort: '', approval: '', ...checked, id: slug, ord: n + 1,
+        color: checked.color ?? db.nextColor(n) })
+      // From a template: its skills come along, and its check-ins start on their schedule.
+      if (b.skills) await installSkills(slug, b.skills)
+      if (checked.checkin_every) await scheduleCheckins(slug, checked.checkin_every, lang)
       return send(200, { id: slug })
     }
 
@@ -3054,6 +3084,21 @@ const server = createServer(async (req, res) => {
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
       await removeContainer(bm[1]).catch(() => {})
       return send(200, { ok: true })
+    }
+
+    // ---- Templates ----
+    if (url.pathname === '/api/templates' && req.method === 'GET')
+      return send(200, { agents: AGENT_TEMPLATES.map(x => forLang(x, lang)), skills: SKILL_TEMPLATES })
+    // A template file someone picked: checked, its shipped skill names resolved, in this language — for the editor.
+    if (url.pathname === '/api/templates/check' && req.method === 'POST') {
+      try { return send(200, forLang(checkTemplate((await readBody(req)).doc, SKILL_TEMPLATES), lang)) }
+      catch (e) { if (e.field) return send(400, { error: t('template.bad', { field: e.field }) }); throw e }
+    }
+    const tx = url.pathname.match(/^\/api\/bots\/([a-z0-9-]+)\/template$/)
+    if (tx && req.method === 'GET') {
+      const a = await db.getAgent(tx[1])
+      if (!a) return send(404, { error: t('err.noAgent') })
+      return send(200, templateOf(a, await db.skillsFor(a.id)))
     }
 
     // Check in now, without waiting for the next one (the schedule stays as it was).

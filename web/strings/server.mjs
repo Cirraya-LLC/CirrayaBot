@@ -41,6 +41,7 @@ export const serverStrings = {
   'chat.needTarget':  ['Pick an agent or a group, and do not send an empty message', '要选一个 Agent 或一个群，并且不能发空消息', '請選一個 Agent 或一個群組，而且不能傳送空白訊息'],
   'voice.need.sttModel': ['Speech recognition on an upstream needs a model: the name your upstream gives its speech-to-text model', '用上游识别语音，要填模型：上游给它的语音转文字模型起的名字', '用上游辨識語音，要填模型：上游為語音轉文字模型取的名稱'],
   'voice.need.ttsModel': ['Reading aloud on an upstream needs a model: the name your upstream gives its text-to-speech model', '用上游朗读，要填模型：上游给它的文字转语音模型起的名字', '用上游朗讀，要填模型：上游為文字轉語音模型取的名稱'],
+  'template.bad':      ['That is not an Agent template this server can read (problem with: {field})', '这不是能用的 Agent 模板（有问题的地方：{field}）', '這不是能用的 Agent 範本（有問題的地方：{field}）'],
   'checkin.session':   ['Check-ins', '主动汇报', '主動回報'],
   'checkin.goalsLong': ['The goals are too long (at most {max} characters)', '目标写得太长了（最多 {max} 个字符）', '目標寫得太長了（最多 {max} 個字元）'],
   'checkin.every':     ['How often must be one of {list} (minutes; 0 = never)', '频率只能是 {list} 之一（分钟；0 表示不主动汇报）', '頻率只能是 {list} 之一（分鐘；0 表示不主動回報）'],

@@ -2591,6 +2591,27 @@ Activity lists the coming ones (`checkins`). UI: a "Check-ins" section in both e
 "Check in now") — ⚠️ in the client the status and the button are two lines: side by side they overflowed the dialog
 by 29 px at 360 wide × 1.3. Tests: `node web/tasks.mjs`, `test/e2e/checkin.test.mjs`, `app/test/editor_test.dart`.
 
+### 2.40.8 Templates: agents and skills to start from
+
+`templates/agents/*.json` (format `cirrayabot-agent` v1: localized `name` / `description` / optional `note`, an
+English `persona`, `color`, `approval`, `autonomy`, `setup`, `goals`, `checkin_every`, `skills` by name) and
+`templates/skills/*.md` (SKILL.md). Six of each ship: Researcher, Writer, Developer (its setup installs a compiler and
+Node), Web tester, Data analyst (setup: pandas), Watcher; web-research, write-report, bug-report, code-change,
+data-summary, page-watch. **A template never carries an upstream, a model, memory or secrets** (scope, 3.1): the
+editor opens with everything else filled in and the person picks the model. Rules in `web/templates.mjs`
+(`node web/templates.mjs` loads and checks every shipped file). The Dockerfile copies `templates/`.
+
+- `GET /api/templates` (in the request's language); `POST /api/templates/check {doc}` for a file someone picked (400
+  `template.bad` names the field); `GET /api/bots/:id/template` exports an agent (its skills' bodies included).
+- `POST /api/bots` takes `skills` (installed on save: one with the same name **and** body is shared, a different one
+  gets "(2)" rather than replacing someone's) and `color`; a template with `checkin_every` starts its schedule.
+- UI: "New Agent from a template" in the + menu → a gallery (web dialog / client page) with "Import a file"; "Export"
+  in the editor of an existing agent (desktop: save dialog; Android: share sheet); "From a template" in the skill
+  library fills the skill editor. ⚠️ **Web: a menu opened from inside a modal dialog must live in that dialog** —
+  `openMenu` appended it to the body, and the dialog (top layer) covered it and ate its clicks; it now moves into
+  `anchor.closest('dialog[open]')`.
+Tests: `test/e2e/templates.test.mjs`, `app/test/templates_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/tpl.mjs`).
+
 ## 3. What runs now
 
 ```bash
@@ -2608,6 +2629,7 @@ node web/files.mjs         # self-test for attachments: types, what they're serv
 node web/secrets.mjs       # self-test for secrets: sealing, origins, masking, internal addresses
 node web/voice.mjs         # self-test for what is read aloud, sentences, and echo vs. cutting in on a call
 node web/effects.mjs       # self-test for which tool calls are side effects and what the log answers after a restart
+node web/templates.mjs     # self-test: every shipped template loads; import / export round trip, never a model
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)
