@@ -87,7 +87,9 @@ void main() {
       final bench = Workbench(const Settings(baseUrl: 'http://127.0.0.1:1', token: 't'));
       const agent = Agent(id: 'op', name: 'Op', description: '', persona: 'p', color: '#4f8cff', model: 'm', machine: true,
           taskModel: Fallback(model: 'light'), setup: 'apt-get install -y jq',
-          setupState: SetupState(at: 1700000000000, code: 100, tail: 'E: Unable to locate package jq'));
+          setupState: SetupState(at: 1700000000000, code: 100, tail: 'E: Unable to locate package jq'),
+          goals: 'Watch the build', checkinEvery: 240, checkinNextAt: '2026-11-05T12:00:00Z',
+          checkinLast: {'status': 'nothing', 'at': 1700000000000});
       await tester.pumpWidget(MaterialApp(
         theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
         builder: (context, child) => UiScale(scale: size.width < 400 ? 1.3 : 1, child: child!),
@@ -104,6 +106,14 @@ void main() {
       expect(find.text('E: Unable to locate package jq'), findsOneWidget);
       expect(find.text(tr('ed.setupRun')), findsOneWidget);
       expect(tester.takeException(), isNull);
+      // Check-ins: open, since there are goals; the next one and the last result are shown.
+      final ck = find.byKey(const ValueKey('ed-checkin'));
+      await tester.ensureVisible(ck);
+      expect(find.widgetWithText(TextField, 'Watch the build'), findsOneWidget);
+      expect(find.text(tr('ed.ckEvery.240')), findsOneWidget);
+      expect(find.textContaining(tr('ed.ckLast.nothing', {'when': ''}).split(' ').first), findsWidgets);
+      expect(find.text(tr('ed.ckNow')), findsOneWidget);
+      expect(tester.takeException(), isNull);
       bench.dispose();
     });
   }
@@ -118,6 +128,7 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('ed-setup')), findsNothing);
+    expect(find.byKey(const ValueKey('ed-checkin')), findsNothing);
     bench.dispose();
   });
 }

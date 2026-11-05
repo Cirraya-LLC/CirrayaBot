@@ -1494,6 +1494,13 @@ function editBot(b) {
   $('#bcaphint').textContent = u && !u.priced ? t('sp.unpricedWhy')
     : USAGE.default_cap_micro != null ? t('sp.capDefault', { cap: money(USAGE.default_cap_micro) }) : ''
   $('#bdel').style.display = b ? '' : 'none'
+  // Check-ins: goals it works toward on its own, and how often.
+  $('#bcksec').hidden = BOTS.length ? !BOTS[0].machine : false
+  $('#bgoals').value = b?.goals ?? ''
+  $('#bckevery').innerHTML = [0, 60, 240, 720, 1440].map(m => `<option value="${m}">${esc(t(`ck.every.${m}`))}</option>`).join('')
+  $('#bckevery').value = String(b?.checkin_every ?? 0)
+  $('#bcksec').open = !!b?.goals
+  paintCheckin(b)
   // The machine's setup script. Only where there is a machine; "Run now" only for a saved Agent.
   $('#bsetupsec').hidden = BOTS.length ? !BOTS[0].machine : false
   $('#bsetup').value = b?.setup ?? ''
@@ -1504,6 +1511,27 @@ function editBot(b) {
   for (const f of b?.fallbacks ?? []) addFallbackRow(f)
   paintFallbackAdd()
   $('#bdlg').showModal()
+}
+
+function paintCheckin(b) {
+  const at = v => v ? new Date(v).toLocaleString(lang, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
+  const parts = []
+  if (b?.checkin_every && b?.checkin_next_at) parts.push(t('ck.next', { when: at(b.checkin_next_at) }))
+  if (b?.checkin_last) parts.push(t(`ck.last.${b.checkin_last.status}`, { when: at(b.checkin_last.at) }))
+  $('#bckstate').textContent = parts.join(' · ')
+  $('#bcknow').hidden = !b?.goals
+}
+$('#bcknow').onclick = async () => {
+  if (!bEditing) return
+  if ($('#bgoals').value.trim() !== (bEditing.goals ?? '')) {
+    const r = await fetch(api(`/api/bots/${bEditing.id}`), { method:'PATCH', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ goals: $('#bgoals').value }) })
+    if (!r.ok) { alert(await errText(r)); return }
+    bEditing.goals = $('#bgoals').value.trim()
+  }
+  const r = await fetch(api(`/api/bots/${bEditing.id}/checkin`), { method:'POST' })
+  if (!r.ok) { alert(await errText(r)); return }
+  $('#bckstate').textContent = t('ck.started')
 }
 
 // How the setup script last went, and polling while it runs (it can take minutes).
@@ -1624,7 +1652,8 @@ $('#bsave').onclick = async () => {
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
     provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
     daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), task_model: chosenTaskModel(), voice: $('#bvoice').value.trim(),
-    ...$('#bsetupsec').hidden ? {} : { setup: $('#bsetup').value } }
+    ...$('#bsetupsec').hidden ? {} : { setup: $('#bsetup').value },
+    ...$('#bcksec').hidden ? {} : { goals: $('#bgoals').value, checkin_every: Number($('#bckevery').value) } }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
   const r = bEditing

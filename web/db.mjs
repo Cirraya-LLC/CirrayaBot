@@ -295,6 +295,14 @@ alter table agents add column if not exists setup_state jsonb;
 alter table agents add column if not exists task_model jsonb;
 -- A task that asked for the agent's own (main) model instead of its background one.
 alter table tasks add column if not exists main_model boolean not null default false;
+-- Check-ins: an agent works on its own toward goals the person wrote, every so often, read-only, and
+-- reports into a session of its own only when there is something new.
+alter table agents add column if not exists goals text not null default '';
+alter table agents add column if not exists checkin_every int not null default 0;
+alter table agents add column if not exists checkin_next_at timestamptz;
+alter table agents add column if not exists checkin_session text;
+alter table agents add column if not exists checkin_last jsonb;
+alter table tasks add column if not exists checkin boolean not null default false;
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -345,21 +353,40 @@ export async function getAgent(id) {
 export async function upsertAgent(a) {
   const { rows } = await q(`
     insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy,
-                        fallbacks, voice, setup, task_model)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                        fallbacks, voice, setup, task_model, goals, checkin_every)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
       approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks, voice = excluded.voice,
-      setup = excluded.setup, task_model = excluded.task_model
+      setup = excluded.setup, task_model = excluded.task_model, goals = excluded.goals, checkin_every = excluded.checkin_every
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
      a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? '',
-     JSON.stringify(a.fallbacks ?? []), a.voice ?? '', a.setup ?? '', a.task_model ? JSON.stringify(a.task_model) : null])
+     JSON.stringify(a.fallbacks ?? []), a.voice ?? '', a.setup ?? '', a.task_model ? JSON.stringify(a.task_model) : null,
+     a.goals ?? '', a.checkin_every ?? 0])
   return rows[0]
+}
+
+/** When its next check-in is due, which session they go into, how the last one went. Only the fields given. */
+export async function setCheckin(id, { next_at, session, last } = {}) {
+  if (next_at !== undefined) await q('update agents set checkin_next_at = $2 where id = $1', [id, next_at])
+  if (session !== undefined) await q('update agents set checkin_session = $2 where id = $1', [id, session])
+  if (last !== undefined) await q('update agents set checkin_last = $2 where id = $1', [id, last == null ? null : JSON.stringify(last)])
+}
+
+/** Agents whose check-in is due. */
+export async function dueCheckins() {
+  return (await q(`select * from agents where checkin_every > 0 and goals <> '' and checkin_next_at <= now() order by checkin_next_at`)).rows
+}
+
+/** The last few check-in reports of an agent, newest last — so the next one doesn't repeat them. */
+export async function lastCheckinReports(agentId, n = 3) {
+  return (await q(`select result, finished_at from tasks where agent_id = $1 and checkin and status = 'done' and result <> ''
+    order by id desc limit $2`, [agentId, n])).rows.reverse()
 }
 
 /** How the agent's setup script last went; null forgets it (the script was removed). */
@@ -949,12 +976,12 @@ export async function seedProviderFromEnv(env) {
 
 // ---------- tasks ----------
 const TASK_COLS = `id, scope, scope_id, session_id, agent_id, by_agent, title, brief, status, question, approval,
-  result, created_at, updated_at, finished_at, main_model`
+  result, created_at, updated_at, finished_at, main_model, checkin`
 
 export async function createTask(t) {
-  const { rows } = await q(`insert into tasks (scope, scope_id, session_id, agent_id, by_agent, title, brief, main_model)
-    values ($1,$2,$3,$4,$5,$6,$7,$8) returning ${TASK_COLS}`,
-    [t.scope, t.scope_id, t.session_id, t.agent_id, t.by_agent ?? '', t.title, t.brief ?? '', !!t.main_model])
+  const { rows } = await q(`insert into tasks (scope, scope_id, session_id, agent_id, by_agent, title, brief, main_model, checkin)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning ${TASK_COLS}`,
+    [t.scope, t.scope_id, t.session_id, t.agent_id, t.by_agent ?? '', t.title, t.brief ?? '', !!t.main_model, !!t.checkin])
   return rows[0]
 }
 

@@ -14,7 +14,8 @@ import { addNote, NOTE_MAX_CHARS, TIDY_SYSTEM, cleanTidy, noteLines } from './me
 import { APPROVAL_MODES, RISKY, gate, forbidden, toolSubject } from './approve.mjs'
 import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
-  taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText } from './tasks.mjs'
+  taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText,
+  CHECKIN_EVERY, GOALS_MAX, isNothingNew, checkinBrief } from './tasks.mjs'
 import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD, EGRESS_SCRIPT, AGENT_UID } from './sandbox.mjs'
 import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, attachmentNote, sendablePath,
   VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
@@ -62,6 +63,10 @@ const toBot = (r, lang = 'en') => ({
   setup: r.setup ?? '',
   setup_state: r.setup_state ? { ...r.setup_state, stale: r.setup_state.hash !== setupHash(r.setup) } : null,
   setup_running: setupRunning.has(r.id),
+  // Check-ins: the goals it works toward on its own, how often (minutes, 0 = never), when the next one is,
+  // how the last one went, and the session they report into.
+  goals: r.goals ?? '', checkin_every: Number(r.checkin_every) || 0,
+  checkin_next_at: r.checkin_next_at ?? null, checkin_last: r.checkin_last ?? null, checkin_session: r.checkin_session ?? null,
   // What its background tasks run on: {provider_id, model}, null = its own model.
   task_model: r.task_model?.model ? r.task_model : null,
   // Whether it has a machine at all (tools on): no machine, nothing to set up, watch or browse.
@@ -1653,8 +1658,10 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       onTool?.({ phase: 'run', name: c.name, args })
       // A rule the person set wins over everything: never done, nobody asked, in any mode.
       const never = forbidden(c.name, args, ctx.approval?.forbid)
-      const need = never ? null : gate(c.name, args, ctx.approval ?? { mode: 'off' }, await allowedFor(ctx.bot.id))
-      const allowed = !never && (!need || await askApproval(ctx, onTool, c.name, args, need.allow))
+      // A check-in looks, it doesn't touch: nobody asked for it, and nobody is there to approve anything.
+      const readOnly = !never && ctx.checkin && hasEffect(c.name, args)
+      const need = never || readOnly ? null : gate(c.name, args, ctx.approval ?? { mode: 'off' }, await allowedFor(ctx.bot.id))
+      const allowed = !never && !readOnly && (!need || await askApproval(ctx, onTool, c.name, args, need.allow))
       // Hanging up while a card waits is not a refusal — recording one would leave the transcript
       // saying the user said no to something they never saw an answer for.
       if (ctx.signal?.aborted) throw new Say('chat.aborted')
@@ -1664,6 +1671,8 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
         ? await runOnce(c.name, args, ctx)
         : never ? `Refused by a rule the user set (never allowed: ${never}): ${toolSubject(c.name, args)}
 This is never allowed. Don't look for another way to get the same result; if the work needs it, tell the user.`
+        : readOnly ? `Refused: a check-in is read-only, and this would change something (${toolSubject(c.name, args)}).
+Look things up only. If it should be done, propose it in your report — the user can ask you to do it.`
         : `Refused${ctx.task ? ' by the user' : ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)'
           : ctx.run?.detached ? ' (the user closed the page, so nobody was there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
 Do not try this again. Do it another way, or say why you cannot.`
@@ -2150,7 +2159,8 @@ async function runTask(id) {
     const policy = await approvalPolicy()
     // Always the auto limits: a background task has nobody to push it along by definition.
     const ctx = { container, signal: ac.signal, bot, lang: 'en', scope: t.scope, scopeId: t.scope_id, session: t.session_id,
-      task: t, specs: specsFor({ task: true }), autonomy: 'auto', approval: { ...policy, mode: bot.approval || policy.mode },
+      task: t, specs: specsFor({ task: true }).filter(s => !t.checkin || s.function.name !== 'ask_user'), checkin: !!t.checkin,
+      autonomy: 'auto', approval: { ...policy, mode: bot.approval || policy.mode },
       onStep: messages => db.updateTask(id, { transcript: forStorage(messages) }), ...fallbacks ? { fallbacks } : {} }
     const text = await runAgent(p, [{ role: 'system', content: system }, ...convo], null, null, ctx)
     if (ctx.question) {
@@ -2160,13 +2170,15 @@ async function runTask(id) {
       // Ended without finish_task: what it said last is the report. Files it sent go with the report.
       const result = ctx.result ?? clipText(text || '(finished without a report)', RESULT_MAX)
       if (await db.updateTask(id, { status: 'done', result, approval: null, finished_at: new Date() }, { from: ['running', 'waiting'] }))
-        await taskEvent(t, 'done', result, ctx.sent?.length ? { files: ctx.sent } : {})
+        await (t.checkin ? checkinDone(t, result) : taskEvent(t, 'done', result, ctx.sent?.length ? { files: ctx.sent } : {}))
     }
   } catch (e) {
     if (ac.signal.aborted) return     // stopped: stopTask already wrote the status and the card
     const message = errorText(e, 'en').slice(0, 500)
-    if (await db.updateTask(id, { status: 'failed', result: message, approval: null, finished_at: new Date() }, { from: OPEN }))
-      await taskEvent(t, 'failed', message)
+    if (await db.updateTask(id, { status: 'failed', result: message, approval: null, finished_at: new Date() }, { from: OPEN })) {
+      if (t.checkin) await db.setCheckin(t.agent_id, { last: { at: Date.now(), status: e.capped ? 'capped' : 'failed', error: message } })
+      else await taskEvent(t, 'failed', message)
+    }
   } finally {
     taskAborts.delete(id)
     // This run is over (done, waiting, failed, stopped): its saved transcript has everything it did.
@@ -2379,6 +2391,9 @@ async function activityView(lang) {
       conv_name: convName(r.target_kind, r.target_id), next_run_at: r.next_run_at, running: routineRunning.has(r.id),
       last_status: r.last_status ?? '' })).sort((a, b) => new Date(a.next_run_at) - new Date(b.next_run_at)),
     machines: await machinesNow(bots),
+    checkins: bots.filter(b => b.checkin_every && b.goals && b.checkin_next_at)
+      .map(b => ({ agent_id: b.id, who: b.name, next_at: b.checkin_next_at, every: b.checkin_every, last: b.checkin_last }))
+      .sort((x, y) => new Date(x.next_at) - new Date(y.next_at)),
     actions: actions.slice(0, 80),
   }
 }
@@ -2591,6 +2606,61 @@ async function taskModel(bot, t) {
     console.warn(`[task] ${bot.name}: background model ${bot.task_model.model} unusable (${errorText(e, 'en')}); using its own`)
     return { p: await providerFor(bot), fallbacks: null }
   }
+}
+
+// ---------- Check-ins ----------
+// An agent working on its own toward the person's goals, every checkin_every minutes: a background task
+// in a session of its own ("Check-ins"), read-only (runAgent refuses side effects when ctx.checkin), on
+// its background model. Its report becomes a message there, with a notification — unless it says
+// NOTHING_NEW, in which case nobody is disturbed.
+
+/** The session check-ins go into, made (titled in the language of whoever turned them on) if it's gone. */
+async function checkinSession(agentId, lang = 'en') {
+  const a = await db.getAgent(agentId)
+  if (a?.checkin_session && await db.getSession(a.checkin_session)) return a.checkin_session
+  const s = await db.createSession('dm', agentId, tr(lang, 'checkin.session'))
+  await db.setCheckin(agentId, { session: s.id })
+  return s.id
+}
+
+async function scheduleCheckins(agentId, every, lang) {
+  if (!every) return db.setCheckin(agentId, { next_at: null })
+  await checkinSession(agentId, lang)
+  await db.setCheckin(agentId, { next_at: new Date(Date.now() + every * 60_000) })
+}
+
+/** Start a check-in now (unless one of this agent's is still open). Returns the task, or null. */
+async function startCheckin(a) {
+  if (!CFG.tools) return null       // nothing to look anything up with
+  if ((await db.tasksWithStatus(OPEN)).some(t => t.agent_id === a.id && t.checkin)) return null
+  const session = await checkinSession(a.id)
+  const reports = (await db.lastCheckinReports(a.id)).map(r => ({ at: r.finished_at, text: r.result }))
+  const t = await db.createTask({ scope: 'dm', scope_id: a.id, session_id: session, agent_id: a.id, by_agent: a.id,
+    title: 'Check-in', brief: checkinBrief(a.goals, reports), checkin: true })
+  enqueueTask(t)
+  return t
+}
+
+async function tickCheckins() {
+  for (const a of await db.dueCheckins()) {
+    // The next one is booked before this one runs: a process dying halfway must not run it twice.
+    await db.setCheckin(a.id, { next_at: new Date(Date.now() + Number(a.checkin_every) * 60_000) })
+    await startCheckin(a).catch(e => console.warn(`[checkin] ${a.name}: ${e.message}`))
+  }
+}
+setInterval(() => tickCheckins().catch(e => console.warn(`[checkin] ${e.message}`)), Number(env.CHECKIN_TICK_MS) || 60_000).unref()
+
+/** A check-in finished: its report goes into the session as the agent's message, unless there was nothing. */
+async function checkinDone(t, result) {
+  const bot = await db.getAgent(t.agent_id)
+  if (!bot) return
+  if (isNothingNew(result)) {
+    await db.setCheckin(bot.id, { last: { at: Date.now(), status: 'nothing' } })
+    return
+  }
+  await db.addMessage('dm', bot.id, t.session_id, { role: 'assistant', speaker: bot.name, content: result })
+  await db.setCheckin(bot.id, { last: { at: Date.now(), status: 'reported' } })
+  notify({ kind: 'reply', conv: { kind: 'agent', id: bot.id, name: bot.name }, session: t.session_id, agent: bot.name, text: result })
 }
 
 // ---------- Tidying an agent's own notes ----------
@@ -2806,6 +2876,16 @@ async function checkAgent(b, selfId = null, cur = null) {
     const main = `${out.provider_id ?? cur?.provider_id ?? ''}|${out.model ?? cur?.model ?? ''}`
     out.task_model = model && `${provider_id}|${model}` !== main ? { provider_id, model } : null
   }
+  if (b.goals !== undefined) {
+    const goals = str(b.goals).replace(/\r\n?/g, '\n').trim()
+    if (goals.length > GOALS_MAX) throw new Say('checkin.goalsLong', { max: GOALS_MAX })
+    out.goals = goals
+  }
+  if (b.checkin_every !== undefined) {
+    const every = Number(b.checkin_every)
+    if (!CHECKIN_EVERY.includes(every)) throw new Say('checkin.every', { list: CHECKIN_EVERY.join(' / ') })
+    out.checkin_every = every
+  }
   if (b.setup !== undefined) {
     const setup = str(b.setup).replace(/\r\n?/g, '\n')
     if (setup.length > SETUP_MAX) throw new Say('setup.long', { max: SETUP_MAX })
@@ -2958,6 +3038,8 @@ const server = createServer(async (req, res) => {
       const patch = await checkAgent(await readBody(req), cur.id, cur)
       await db.upsertAgent({ ...cur, ...patch })
       if (patch.setup === '' && cur.setup_state) await db.setSetupState(cur.id, null)
+      if (patch.checkin_every !== undefined && patch.checkin_every !== Number(cur.checkin_every))
+        await scheduleCheckins(cur.id, patch.checkin_every, lang)
       // Group logs identify people by name. Without syncing a rename, what he said in groups would become "someone else's"
       if (patch.name && patch.name !== cur.name) await db.renameSpeaker(cur.name, patch.name)
       return send(200, { ok: true })
@@ -2972,6 +3054,19 @@ const server = createServer(async (req, res) => {
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
       await removeContainer(bm[1]).catch(() => {})
       return send(200, { ok: true })
+    }
+
+    // Check in now, without waiting for the next one (the schedule stays as it was).
+    const ck = url.pathname.match(/^\/api\/bots\/([a-z0-9-]+)\/checkin$/)
+    if (ck && req.method === 'POST') {
+      const a = await db.getAgent(ck[1])
+      if (!a) return send(404, { error: t('err.noAgent') })
+      if (!a.goals?.trim()) return send(400, { error: t('checkin.noGoals') })
+      if (!CFG.tools) return send(400, { error: t('setup.noTools') })
+      await checkinSession(a.id, lang)
+      const task = await startCheckin(await db.getAgent(a.id))
+      if (!task) return send(409, { error: t('checkin.running') })
+      return send(202, { task: Number(task.id), session: task.session_id })
     }
 
     // Run the setup script now — after it failed, or to check a change without waiting for the next turn.

@@ -115,6 +115,36 @@ Nobody is watching this run, and nobody will tell you to continue. Take it all t
 export const clipText = (s, n) => { const t = String(s ?? ''); return t.length > n ? t.slice(0, n) + '…' : t }
 
 // ---------- self-test ----------
+// ---------- Check-ins ----------
+// An agent working on its own, every so often, toward goals the person wrote. It runs as a background
+// task, but read-only: anything that changes something outside (a command, a click, a write) is refused
+// — it proposes such things in its report instead. And it speaks only when there is something new.
+
+/** How often, in minutes. 0 = never. */
+export const CHECKIN_EVERY = [0, 60, 240, 720, 1440]
+export const GOALS_MAX = 4000
+export const NOTHING_NEW = 'NOTHING_NEW'
+/** The report says there is nothing worth the person's attention. */
+export const isNothingNew = r => !String(r ?? '').trim() || /^\W*nothing[_ ]new\W*$/i.test(String(r).trim())
+
+/** What a check-in is asked to do. `reports`: the last few it sent, oldest first, so it doesn't repeat them. */
+export function checkinBrief(goals, reports = [], now = new Date()) {
+  const past = reports.length
+    ? `\n\nWhat you reported at your last check-ins (don't repeat it; follow it up if there is news):\n` +
+      reports.map(r => `--- ${r.at ? new Date(r.at).toISOString().slice(0, 16).replace('T', ' ') : ''}\n${clipText(r.text, 1500)}`).join('\n')
+    : ''
+  return `It is ${now.toISOString().slice(0, 16).replace('T', ' ')} UTC. This is one of your regular check-ins: nobody asked for it ` +
+    `just now. Work toward the goals the user gave you, below — find out what changed, what needs attention, what is ` +
+    `coming up — and report.\n\nThe user's goals for you:\n${goals}${past}\n\n` +
+    `Rules for a check-in:\n` +
+    `- Read-only. Look things up (files, web pages, APIs with GET) but change nothing: commands, clicks, writes and ` +
+    `requests that change something are refused. If something should be done, propose it in your report — the user ` +
+    `can ask you to do it.\n` +
+    `- Report only what is new and worth the user's attention, short and concrete. If there is nothing, finish with ` +
+    `exactly ${NOTHING_NEW} as the result: then nothing is sent and nobody is disturbed.\n` +
+    `- Finish with finish_task. You cannot ask the user anything during a check-in.`
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const assert = (await import('node:assert/strict')).default
   assert.match(checkTaskInput({}), /title is required/)
@@ -139,5 +169,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   assert.match(frontSection({ group: false, open: [{ id: 1, agent_id: 'a', status: 'running', title: 'x' }], nameOf: x => x }), /#1 a · working · x/)
   assert.match(taskSection({ t: { id: 2, title: 'x' }, groupDir: '/groups/g1' }), /\/groups\/g1/)
   assert.ok(isOpen({ status: 'waiting' }) && !isOpen({ status: 'done' }))
+  // Check-ins
+  assert.ok(isNothingNew('NOTHING_NEW') && isNothingNew('  nothing new. ') && isNothingNew('') && !isNothingNew('The build is red.'))
+  const brief = checkinBrief('Watch the build', [{ at: 0, text: 'The build was red.' }], new Date(Date.UTC(2026, 10, 5, 9, 30)))
+  assert.match(brief, /2026-11-05 09:30 UTC/)
+  assert.match(brief, /Watch the build/)
+  assert.match(brief, /The build was red\./)
+  assert.match(brief, /Read-only/)
+  assert.ok(CHECKIN_EVERY.includes(0) && CHECKIN_EVERY.includes(1440))
   console.log('tasks: all checks pass')
 }

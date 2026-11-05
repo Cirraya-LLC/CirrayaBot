@@ -105,6 +105,11 @@ class _AgentEditorState extends State<_AgentEditor> {
   late bool _taskSame = widget.agent?.taskModel == null;
   late final _taskPick = _FallbackPick(widget.agent?.taskModel?.providerId ?? '', widget.agent?.taskModel?.model ?? '');
 
+  /// Check-ins: goals it works toward on its own, and how often.
+  late final _goals = TextEditingController(text: widget.agent?.goals ?? '');
+  late int _checkinEvery = const [0, 60, 240, 720, 1440].contains(widget.agent?.checkinEvery) ? widget.agent!.checkinEvery : 0;
+  String _checkinNote = '';
+
   /// The machine's setup script, and how it last went (polled while it runs).
   late final _setup = TextEditingController(text: widget.agent?.setup ?? '');
   late SetupState? _setupState = widget.agent?.setupState;
@@ -274,6 +279,32 @@ class _AgentEditorState extends State<_AgentEditor> {
     ],
   );
 
+  String _checkinLine() {
+    if (_checkinNote.isNotEmpty) return _checkinNote;
+    String at(Object? v) {
+      final d = (v is num ? DateTime.fromMillisecondsSinceEpoch(v.toInt()) : DateTime.tryParse('$v'))?.toLocal();
+      return d == null ? '' : '${d.month}/${d.day} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    }
+    final a = widget.agent;
+    return [
+      if (a != null && a.checkinEvery > 0 && a.checkinNextAt != null) tr('ed.ckNext', {'when': at(a.checkinNextAt)}),
+      if (a?.checkinLast != null) tr('ed.ckLast.${a!.checkinLast!['status']}', {'when': at(a.checkinLast!['at'])}),
+    ].join(' · ');
+  }
+
+  Future<void> _checkInNow() async {
+    final a = widget.agent;
+    if (a == null) return;
+    setState(() => _error = '');
+    try {
+      if (_goals.text.trim() != a.goals) await widget.bench.api.updateAgent(a.id, {'goals': _goals.text});
+      await widget.bench.api.checkInNow(a.id);
+      setState(() => _checkinNote = tr('ed.ckStarted'));
+    } on ApiException catch (e) {
+      setState(() => _error = e.message);
+    }
+  }
+
   String _setupLine() {
     if (_setupRunning) return tr('ed.setupRunning');
     final st = _setupState;
@@ -382,6 +413,7 @@ class _AgentEditorState extends State<_AgentEditor> {
       f.manual.dispose();
     }
     _taskPick.manual.dispose();
+    _goals.dispose();
     _setup.dispose();
     _setupPoll?.cancel();
     super.dispose();
@@ -437,6 +469,8 @@ class _AgentEditorState extends State<_AgentEditor> {
       ],
       'task_model': _taskSame || _taskPick.chosen.isEmpty ? null : {'provider_id': _taskPick.providerId, 'model': _taskPick.chosen},
       if (_hasMachine) 'setup': _setup.text,
+      if (_hasMachine) 'goals': _goals.text,
+      if (_hasMachine) 'checkin_every': _checkinEvery,
     };
     await _run(() async {
       if (a == null) return widget.bench.api.createAgent(body);
@@ -623,6 +657,54 @@ class _AgentEditorState extends State<_AgentEditor> {
               padding: const EdgeInsets.only(top: 6),
               child: Text(tr('vo.agentVoiceHint'), style: TextStyle(fontSize: 11, color: C.dim2)),
             ),
+            if (_hasMachine)
+              Theme(
+                data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  key: const ValueKey('ed-checkin'),
+                  tilePadding: EdgeInsets.zero,
+                  childrenPadding: EdgeInsets.zero,
+                  initiallyExpanded: (widget.agent?.goals ?? '').isNotEmpty,
+                  title: Text(tr('ed.checkins'), style: TextStyle(fontSize: 13, color: C.dim)),
+                  expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    TextField(
+                      controller: _goals,
+                      minLines: 3,
+                      maxLines: 8,
+                      decoration: InputDecoration(hintText: tr('ed.goalsHint')),
+                      style: const TextStyle(fontSize: 12.5),
+                    ),
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<int>(
+                      initialValue: _checkinEvery,
+                      isExpanded: true,
+                      decoration: InputDecoration(labelText: tr('ed.ckEvery')),
+                      items: [
+                        for (final m in const [0, 60, 240, 720, 1440])
+                          DropdownMenuItem(value: m, child: Text(tr('ed.ckEvery.$m'))),
+                      ],
+                      onChanged: (v) => setState(() => _checkinEvery = v ?? 0),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(tr('ed.ckHint'), style: TextStyle(fontSize: 11, color: C.dim)),
+                    ),
+                    // Two lines, not one Row: on a phone at 130 % the status and the button don't fit side by side.
+                    if (widget.agent != null && widget.agent!.goals.isNotEmpty) ...[
+                      if (_checkinLine().isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(_checkinLine(), style: TextStyle(fontSize: 11.5, color: C.dim)),
+                        ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(onPressed: _checkInNow, child: Text(tr('ed.ckNow'))),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             if (_hasMachine)
               Theme(
                 data: Theme.of(context).copyWith(dividerColor: Colors.transparent),

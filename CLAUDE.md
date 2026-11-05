@@ -2571,6 +2571,26 @@ and session (`Workbench.openAt`). Tests: `test/e2e/activity.test.mjs` (a card an
 conversation; task traces; routines; machines), `app/test/activity_test.dart` (desktop and 277 logical px, empty).
 Web checked in headless Chromium (`$CLAUDE_JOB_DIR/tmp/vui/nov.mjs`, also 2.40.1–2.40.5).
 
+### 2.40.7 Check-ins: working on its own toward the person's goals
+
+`agents.goals` (≤ 4000) + `agents.checkin_every` (minutes: 0 / 60 / 240 / 720 / 1440, `CHECKIN_EVERY` in tasks.mjs) +
+`checkin_next_at` / `checkin_session` / `checkin_last` (`{at, status: reported | nothing | failed | capped}`). Turning
+them on books the first one an interval away and makes the session — **titled in the language of whoever turned them
+on** (`checkin.session`); a deleted one is made again. `tickCheckins` (every 60 s, `CHECKIN_TICK_MS` for tests) books
+the next one **before** starting this one, and skips an agent whose check-in is still open.
+
+A check-in **is a background task** (`tasks.checkin`, title "Check-in", in the DM, the check-ins session) with
+`checkinBrief(goals, last 3 reports)` as its brief, on the background model (2.40.4), under the daily cap. Different
+from a task: **read-only** — `runAgent` refuses every call `hasEffect` (2.39) counts as a side effect (bash, browser
+actions, computer actions, writing http requests…) with "propose it in your report"; reading files, opening/reading
+pages, GET requests and screenshots go through. No `ask_user` (nobody asked for it). **Its report becomes the agent's
+message in the check-ins session, with a notification** — not a task card, and no front-thread wake-up; a report of
+`NOTHING_NEW` (or empty) posts nothing (`isNothingNew`). Failed / capped: only `checkin_last` says so.
+`POST /api/bots/:id/checkin` runs one now (202; 409 while one is open; 400 without goals or without tools).
+Activity lists the coming ones (`checkins`). UI: a "Check-ins" section in both editors (goals, how often, next / last,
+"Check in now") — ⚠️ in the client the status and the button are two lines: side by side they overflowed the dialog
+by 29 px at 360 wide × 1.3. Tests: `node web/tasks.mjs`, `test/e2e/checkin.test.mjs`, `app/test/editor_test.dart`.
+
 ## 3. What runs now
 
 ```bash

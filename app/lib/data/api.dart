@@ -119,6 +119,10 @@ class Agent {
     this.setupState,
     this.setupRunning = false,
     this.machine = false,
+    this.goals = '',
+    this.checkinEvery = 0,
+    this.checkinNextAt,
+    this.checkinLast,
   });
 
   final String id;
@@ -163,6 +167,13 @@ class Agent {
   /// Whether it has a machine at all (the server runs with tools on).
   final bool machine;
 
+  /// Check-ins: what it works toward on its own, how often (minutes, 0 = never), when the next one is,
+  /// and how the last one went ({status: reported / nothing / failed / capped, at}).
+  final String goals;
+  final int checkinEvery;
+  final String? checkinNextAt;
+  final Map<String, Object?>? checkinLast;
+
   static Agent fromJson(Map<String, Object?> j) => Agent(
     id: (j['id'] as String?) ?? '',
     name: (j['name'] as String?) ?? '',
@@ -185,6 +196,10 @@ class Agent {
     setupState: j['setup_state'] is Map<String, Object?> ? SetupState.fromJson(j['setup_state'] as Map<String, Object?>) : null,
     setupRunning: j['setup_running'] == true,
     machine: j['machine'] == true,
+    goals: (j['goals'] as String?) ?? '',
+    checkinEvery: (j['checkin_every'] as num?)?.toInt() ?? 0,
+    checkinNextAt: j['checkin_next_at'] as String?,
+    checkinLast: j['checkin_last'] is Map<String, Object?> ? j['checkin_last'] as Map<String, Object?> : null,
   );
 }
 
@@ -1016,6 +1031,9 @@ class Api {
   }
 
   Future<void> updateAgent(String id, Map<String, Object?> body) => _json('PATCH', '/api/bots/$id', body);
+
+  /// Start a check-in now; its report (if any) goes to the agent's Check-ins session.
+  Future<void> checkInNow(String id) => _json('POST', '/api/bots/$id/checkin');
 
   /// Run the agent's setup script now. It runs in the background; [agents] says when it is done.
   Future<void> runSetup(String id) => _json('POST', '/api/bots/$id/setup');
