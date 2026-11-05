@@ -3,6 +3,10 @@
 //
 // The boundary, in one place:
 //   /work             ← workspace/agents/<id>      its own desk
+//                       (a helper — a task on a machine of its own — gets workspace/helpers/<id>/<task> as
+//                       /work, the desk read-only at /desk, and only the drive of the group it works for.
+//                       NOT a folder inside the desk: docker resolves a mount's source on the host, following
+//                       links, and the agent decides what links its desk holds)
 //   /groups/<gid>     ← workspace/groups/<gid>     ONE mount per group it belongs to — a group it
 //                                                  isn't in does not exist inside its container
 //   network           ← a bridge of our own with inter-container traffic off, so agents can't reach
@@ -31,18 +35,25 @@ export const CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL', 'SETUI
 /** The groups an agent belongs to, as a stable label value. */
 export const groupsLabel = ids => [...new Set(ids)].sort().join(',')
 
-/** `docker run` arguments for one agent's container. */
-export function runArgs({ name, image, hostWork, botId, groups, network, memory = '2g', cpus = '2' }) {
+/** The host directory a helper works in. Outside every desk: no container can plant a link on the way to it. */
+export const helperWork = (hostWork, botId, taskId) => join(hostWork, 'helpers', botId, String(taskId))
+
+/** `docker run` arguments for one agent's container — or, with `helper` (a task id), for a helper of it. */
+export function runArgs({ name, image, hostWork, botId, groups, network, memory = '2g', cpus = '2', helper = null }) {
   const mounts = [...new Set(groups)].sort().flatMap(g => ['-v', `${join(hostWork, 'groups', g)}:/groups/${g}`])
+  const desk = join(hostWork, 'agents', botId)
+  const work = helper == null ? ['-v', `${desk}:/work`]
+    : ['-v', `${helperWork(hostWork, botId, helper)}:/work`, '-v', `${desk}:/desk:ro`]
   return ['run', '-d', '--name', name,
     '--label', `ma.sandbox=${SANDBOX_VERSION}`,
     '--label', `ma.groups=${groupsLabel(groups)}`,
+    ...helper == null ? [] : ['--label', `ma.helper=${helper}`],
     '--network', network,
     '--user', `${AGENT_UID}:${AGENT_UID}`,
     '--cap-drop', 'ALL', ...CAPS.flatMap(c => ['--cap-add', c]),
     '--security-opt', 'no-new-privileges',
     '--memory', memory, '--cpus', cpus, '--pids-limit', '512',
-    '-v', `${join(hostWork, 'agents', botId)}:/work`,
+    ...work,
     ...mounts,
     '-w', '/work', image, 'sleep', 'infinity']
 }
@@ -140,6 +151,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.ok(['169.254.0.0/16', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'].every(n => INTERNAL_NETS.includes(n)), 'metadata and the LAN are listed')
   a.ok(EGRESS_SCRIPT.includes(`for net in ${INTERNAL_NETS.join(' ')}; do $ipt -A "$out" -d $net -j DROP; done`), 'and dropped')
   a.ok(EGRESS_SCRIPT.includes('-i "$br"'), 'only the agents\' bridge is matched')
+  // A helper: its own /work (outside the desk), the desk read-only, one group, and nothing else of the agent's.
+  const h = runArgs({ name: 'ma-helper-7', image: 'img:2', hostWork: '/h/ws', botId: 'x', groups: ['g1'], network: 'n', helper: 7 })
+  a.deepEqual(h.filter((v, i) => h[i - 1] === '-v'), ['/h/ws/helpers/x/7:/work', '/h/ws/agents/x:/desk:ro', '/h/ws/groups/g1:/groups/g1'])
+  a.ok(h.includes('ma.helper=7') && h.includes('--user') && h[h.indexOf('--cap-drop') + 1] === 'ALL', 'same rules as the agent itself')
+  a.ok(!args.some(v => v.startsWith('ma.helper')), 'an agent\'s own machine is not a helper')
   a.ok(!runArgs({ name: 'n', image: 'i', hostWork: '/h', botId: 'x', groups: [], network: 'n' }).some(v => v.includes(':/groups')),
     'an agent in no group gets no group mount')
 

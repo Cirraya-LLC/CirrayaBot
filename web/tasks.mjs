@@ -94,7 +94,7 @@ ${open.length ? `Open tasks in this conversation right now:\n${open.map(t => '- 
 }
 
 /** The task's own section: replaces "how you work" for the agent running it. */
-export function taskSection({ t, byName, groupDir }) {
+export function taskSection({ t, byName, groupDir, helper = false }) {
   return `
 
 --- You are working on a background task ---
@@ -108,7 +108,14 @@ Nobody is watching this run, and nobody will tell you to continue. Take it all t
 - When you're done, call finish_task with your report: what you did, where the results are, what the user should check.
   If you can't do it, call finish_task saying exactly why.
 - If a command is refused, don't retry it: find another way, or explain in your report.${groupDir ? `
-- The group's shared drive is ${groupDir} — put what colleagues or the user should get there.` : ''}`
+- The group's shared drive is ${groupDir} — put what colleagues or the user should get there.` : ''}${helper ? `
+
+--- A machine of your own for this task ---
+This task runs on a fresh machine, beside your other work, not on your usual one.
+- /work here is a scratch folder for this task only. Your usual desk is at /desk, read-only: read what you need from it.
+- Put what you hand back in /work/out: when the task is done it is copied to /work/helpers/${t.id} on your usual
+  machine. Everything else here — other files, what you installed — is thrown away with this machine.
+- If you ask the user something, this machine is rebuilt when you carry on: files in /work stay, installed packages don't.` : ''}`
 }
 
 /** A tool result or event text, cut to fit. */

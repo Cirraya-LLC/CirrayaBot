@@ -17,7 +17,7 @@ import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, pl
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
   taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText,
   CHECKIN_EVERY, GOALS_MAX, isNothingNew, checkinBrief } from './tasks.mjs'
-import { runArgs, decide, groupsLabel, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD, EGRESS_SCRIPT, AGENT_UID } from './sandbox.mjs'
+import { runArgs, decide, groupsLabel, helperWork, INSPECT_FORMAT, READ_SCRIPT, WRITE_SCRIPT, PATH_GUARD, EGRESS_SCRIPT, AGENT_UID } from './sandbox.mjs'
 import { MB, mimeOf, kindOf, servedHeaders, safeName, uniqueName, sizeText, attachmentNote, sendablePath,
   VISION_MIMES, VISION_MAX, VISION_COUNT, INLINE_TEXT_MAX, INLINE_TEXT_TOTAL } from './files.mjs'
 import { langOf, tr, Say, errorText } from './i18n.mjs'
@@ -284,7 +284,7 @@ async function groupRecallFor(bot) {
  *   tools off — no machine, no tasks.
  */
 function systemFor(bot, memory, { peers = null, box = null, recall = '', skills = [], lead = null, auto = false,
-  groupId = null, task = null, byName = '', open = [], nameOf = id => id, secrets = [], call = false } = {}) {
+  groupId = null, task = null, byName = '', open = [], nameOf = id => id, secrets = [], call = false, helper = false } = {}) {
   const parts = [bot.persona]
   parts.push(`
 
@@ -313,7 +313,7 @@ each was saved for.${secrets.length ? '\n' + secrets.map(s => s.kind === 'login'
     : `- ${s.name}: sent as the ${s.header} header to ${s.origin} — use http_request with secret "${s.name}"`).join('\n') : ''}
 ${task ? 'If you need one you don\'t have, ask the user (ask_user) to add it under your Secrets in the side panel.'
     : 'If you need one you don\'t have, ask with request_secret.'} Never ask for a password, key or code in the chat.`)
-  if (task) parts.push(taskSection({ t: task, byName, groupDir: groupId && box ? `/groups/${groupId}` : '' }))
+  if (task) parts.push(taskSection({ t: task, byName, groupDir: groupId && box ? `/groups/${groupId}` : '', helper: helper && !!box }))
   else {
     if (auto && box) parts.push(`
 
@@ -682,6 +682,93 @@ async function removeContainer(botId) {
   await cliRun(['rm', '-f', name], null, 60_000)
 }
 
+// ---------- Helpers: a task on a machine of its own ----------
+// start_task with helper: the task runs on a fresh container beside the agent's other work instead of
+// queueing behind it on the agent's machine — several independent pieces at once. Same image, same rules
+// (sandbox.mjs), the agent's setup script; /work is a scratch folder of its own, the agent's desk is
+// read-only at /desk, and only the drive of the group the task is for is there. What it leaves in
+// /work/out is copied to /work/helpers/<task> on the agent's own machine when it finishes; the rest goes
+// with it. Up to AGENT_HELPERS_MAX (3) per agent at a time; more wait for a free one.
+// ⚠️ Its folder is not inside the desk on the host (sandbox.mjs, helperWork): docker follows links when it
+// resolves a mount's source, and the agent decides what links its desk holds. The copy back goes through
+// both containers (docker exec), like every other file crossing the boundary.
+const HELPERS_MAX = Math.max(1, Number(env.AGENT_HELPERS_MAX || 3))
+const HELPER_COPY_MAX = Math.max(1, Number(env.AGENT_HELPER_COPY_MB || 200)) * MB
+const hname = taskId => `${PREFIX}-helper-${taskId}`
+const helperDir = (botId, taskId) => helperWork(LOCALWORK, botId, taskId)
+const helperRunning = new Map()        // agent id -> helpers running now
+const helperWaiting = new Map()        // agent id -> resolvers waiting for a slot
+
+/** A helper slot for this agent; resolves to the function that gives it back. A freed slot passes straight to the next in line. */
+function helperSlot(agentId) {
+  const release = () => {
+    const next = helperWaiting.get(agentId)?.shift()
+    if (next) return next(release)
+    const n = (helperRunning.get(agentId) ?? 1) - 1
+    n > 0 ? helperRunning.set(agentId, n) : helperRunning.delete(agentId)
+  }
+  const n = helperRunning.get(agentId) ?? 0
+  if (n < HELPERS_MAX) { helperRunning.set(agentId, n + 1); return Promise.resolve(release) }
+  return new Promise(r => helperWaiting.set(agentId, [...helperWaiting.get(agentId) ?? [], r]))
+}
+
+async function startHelper(botId, t, groupId) {
+  await ensureImage()
+  await ensureNetwork()
+  const name = hname(t.id)
+  await mkdir(helperDir(botId, t.id), { recursive: true })
+  await mkdir(join(LOCALWORK, 'agents', botId), { recursive: true })
+  if (groupId) await mkdir(join(LOCALWORK, 'groups', groupId), { recursive: true })
+  await cliRun(['rm', '-f', name], null, 60_000)             // one left from a run that waited, or from before a restart
+  const r = await cliRun(runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups: groupId ? [groupId] : [], network: NETWORK,
+    memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2', helper: t.id }), null, 120_000)
+  if (r.code !== 0) throw new Say('container.startFailed', { id: botId, detail: (r.err || r.out).slice(0, 300) }, 500)
+  const script = (await db.getAgent(botId))?.setup?.trim()
+  if (script) {
+    const s = await cliRun(['exec', '-u', '0', '-e', 'HOME=/root', name, 'bash', '-lc', script], null, SETUP_TIMEOUT)
+    if (s.code !== 0) console.warn(`[helper] task #${t.id}: ${botId}'s setup script exited ${s.code}`)
+  }
+  await cliRun(['exec', '-u', '0', name, 'sh', '-c', 'chown -R "$0:$0" /work; for g in "$@"; do chown "$0:$0" "$g"; done', AGENT_UID,
+    ...groupId ? [`/groups/${groupId}`] : []], null, 300_000)
+  return name
+}
+
+/** /work/out of a finished helper, into /work/helpers/<task> on its agent's machine. Returns a line for the report, or ''. */
+async function copyBack(botId, t, name) {
+  const size = Number((await cliRun(['exec', name, 'sh', '-c', '[ -d /work/out ] && du -sb /work/out | cut -f1'], null, 120_000)).out.trim()) || 0
+  if (!size) return ''
+  if (size > HELPER_COPY_MAX) return `(Its /work/out — ${sizeText(size)} — was over the ${sizeText(HELPER_COPY_MAX)} limit for copying back, so it was not kept.)`
+  const tmp = join(LOCALWORK, 'helpers', `.${t.id}.tar`)
+  try {
+    const a = await execStream([name, 'tar', '-C', '/work/out', '-cf', '-', '.'], { to: tmp, max: HELPER_COPY_MAX * 2 })
+    if (a.code !== 0) throw new Error(a.err || `tar exited ${a.code}`)
+    const main = await ensureContainer(botId, null)
+    const dest = `/work/helpers/${t.id}`
+    const b = await execStream([main, 'sh', '-c', 'mkdir -p "$0" && tar -C "$0" -xf - --no-same-owner', dest], { from: tmp })
+    if (b.code !== 0) throw new Error(b.err || `tar exited ${b.code}`)
+    return `(What it left in /work/out is now at ${dest} on ${(await db.getAgent(botId))?.name ?? botId}'s machine.)`
+  } finally { await rm(tmp, { force: true }).catch(() => {}) }
+}
+
+/** The helper's machine goes when its run ends; its folder too, once the task is over (a waiting one keeps it). */
+async function dropHelper(botId, t, { keepFiles = false } = {}) {
+  await cliRun(['rm', '-f', hname(t.id)], null, 60_000)
+  if (!keepFiles) await rm(helperDir(botId, t.id), { recursive: true, force: true }).catch(() => {})
+}
+
+/** After a restart: no helper is running, so their machines go; folders of tasks that are over go too. */
+async function sweepHelpers() {
+  if (!CFG.tools) return
+  const { out } = await cliRun(['ps', '-a', '--filter', `name=^${PREFIX}-helper-`, '--format', '{{.Names}}'], null, 30_000)
+  for (const c of out.split('\n').map(x => x.trim()).filter(Boolean)) await cliRun(['rm', '-f', c], null, 60_000)
+  const open = new Set((await db.tasksWithStatus(OPEN)).map(t => String(t.id)))
+  for (const agent of await readdir(join(LOCALWORK, 'helpers')).catch(() => [])) {
+    if (agent.startsWith('.')) { await rm(join(LOCALWORK, 'helpers', agent), { force: true }).catch(() => {}); continue }   // a half-done copy
+    for (const id of await readdir(join(LOCALWORK, 'helpers', agent)).catch(() => []))
+      if (!open.has(id)) await rm(join(LOCALWORK, 'helpers', agent, id), { recursive: true, force: true }).catch(() => {})
+  }
+}
+
 // ---------- Files: sent by people and by agents ----------
 // The bytes are stored once, at <workspace>/files/<id>, a directory no agent container mounts. A
 // message carries the list it needs to draw them. Moving a file into or out of an agent's machine
@@ -1002,6 +1089,10 @@ const frontSpecs = group => [
     brief: { type: 'string', description: 'Everything needed to do it without this conversation' },
     main_model: { type: 'boolean', description: 'Background tasks may run on a lighter model than yours. True = run this one on your own model: ' +
       'for work that needs your full reasoning. Leave it out for routine work' },
+    ...CFG.tools ? { helper: { type: 'boolean', description: `True = run it on a fresh machine of its own, at the same time as ${group ? 'that agent\'s' : 'your'} other tasks, ` +
+      `instead of waiting for them to finish (up to ${HELPERS_MAX} at once). For independent pieces you want done in parallel — ` +
+      'looking into several things at once. It starts clean: the usual desk is read-only at /desk, what it puts in /work/out comes back ' +
+      'to /work/helpers/<task number>, nothing else is kept. Leave it out for work that builds on the usual machine' } } : {},
     ...group ? { agent: { type: 'string', description: 'The colleague to give it to, by name. Empty = yourself' } } : {} },
   ['title', 'brief']),
   fn('list_tasks', 'Where this conversation\'s background tasks stand: number, who, status, and what a waiting one is asking.'),
@@ -2124,13 +2215,16 @@ const taskView = t => ({
   approval: t.approval ? { id: t.approval.id, name: t.approval.name, subject: toolSubject(t.approval.name, t.approval.args ?? {}),
     always: t.approval.always ?? [] } : null,
   result: t.result, created_at: t.created_at, updated_at: t.updated_at, finished_at: t.finished_at,
+  helper: !!t.helper,
 })
 
 function enqueueTask(t) {
   const id = String(t.id)
   if (taskQueued.has(id)) return
   taskQueued.add(id)
-  withLock(`task:${t.agent_id}`, () => { taskQueued.delete(id); return runTask(id) })
+  const run = () => { taskQueued.delete(id); return runTask(id) }
+  // A helper has a machine of its own, so it doesn't queue behind the agent's other tasks — only for a free slot.
+  ;(t.helper && CFG.tools ? helperSlot(t.agent_id).then(release => run().finally(release)) : withLock(`task:${t.agent_id}`, run))
     .catch(e => console.error(`[task #${id}]`, e))
 }
 
@@ -2156,7 +2250,9 @@ async function taskEvent(t, kind, text = '', extra = {}) {
  */
 async function stopTask(t, by = '', { quiet = false } = {}) {
   if (!await db.updateTask(t.id, { status: 'stopped', approval: null, finished_at: new Date() }, { from: OPEN })) return false
-  taskAborts.get(String(t.id))?.abort()
+  const runner = taskAborts.get(String(t.id))
+  runner?.abort()
+  if (t.helper && !runner) await dropHelper(t.agent_id, t)        // waiting or queued: nothing else will clear it
   if (!quiet) await taskEvent(t, 'stopped', '', by ? { by } : {})
   return true
 }
@@ -2182,6 +2278,7 @@ async function runTask(id) {
   if (!t || t.status !== 'queued') return
   const ac = new AbortController()
   taskAborts.set(id, ac)
+  let helperBox = false                  // a helper machine was made for this run: it goes when the run ends
   try {
     const all = await loadBots()
     const bot = all.find(b => b.id === t.agent_id)
@@ -2192,11 +2289,13 @@ async function runTask(id) {
     const convo = Array.isArray(t.transcript) && t.transcript.length ? t.transcript : [{ role: 'user', content: taskOpening(t, byName) }]
     if (t.pending) convo.push({ role: 'user', content: `[The user's answer] ${t.pending}` })
     if (!await db.updateTask(id, { status: 'running', pending: null, transcript: convo }, { from: ['queued'] })) return
-    const container = CFG.tools ? await ensureContainer(bot.id, groupId) : null
+    const helper = !!t.helper && CFG.tools
+    if (helper) helperBox = true
+    const container = !CFG.tools ? null : helper ? await startHelper(bot.id, t, groupId) : await ensureContainer(bot.id, groupId)
     const system = systemFor(bot, {
       own: await db.getMemory('agent', bot.id), self: await db.getSelfMemory(bot.id),
       group: groupId ? await db.getMemory('group', groupId) : '',
-    }, { box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id), groupId, task: t, byName,
+    }, { box: CFG.tools ? '/work' : null, skills: await db.skillsFor(bot.id), groupId, task: t, byName, helper,
       secrets: await db.listSecrets(bot.id) })
     const policy = await approvalPolicy()
     // Always the auto limits: a background task has nobody to push it along by definition.
@@ -2210,7 +2309,11 @@ async function runTask(id) {
         await taskEvent(t, 'asked', ctx.question)
     } else {
       // Ended without finish_task: what it said last is the report. Files it sent go with the report.
-      const result = ctx.result ?? clipText(text || '(finished without a report)', RESULT_MAX)
+      let result = ctx.result ?? clipText(text || '(finished without a report)', RESULT_MAX)
+      if (helper) {
+        const where = await copyBack(bot.id, t, container).catch(e => `(Copying back its /work/out failed: ${e.message.slice(0, 200)})`)
+        if (where) result = `${result}\n\n${where}`
+      }
       if (await db.updateTask(id, { status: 'done', result, approval: null, finished_at: new Date() }, { from: ['running', 'waiting'] }))
         await (t.checkin ? checkinDone(t, result) : taskEvent(t, 'done', result, ctx.sent?.length ? { files: ctx.sent } : {}))
     }
@@ -2223,6 +2326,11 @@ async function runTask(id) {
     }
   } finally {
     taskAborts.delete(id)
+    if (helperBox) {
+      const now = await db.getTask(id).catch(() => null)
+      await dropHelper(t.agent_id, t, { keepFiles: now?.status === 'waiting' || now?.status === 'queued' })
+        .catch(e => console.warn(`[helper] task #${id}: ${e.message}`))
+    }
     // This run is over (done, waiting, failed, stopped): its saved transcript has everything it did.
     await db.dropEffects(`task:${id}`).catch(e => console.warn(`[effects] could not clear task ${id}: ${e.message}`))
   }
@@ -2313,14 +2421,16 @@ async function startTaskFrom(ctx, args) {
     return `Not started: ${MAX_OPEN_PER_CONVERSATION} tasks are already open in this conversation. Wait for one to report back, or cancel one.`
   if (await db.sessionTaskCount(ctx.session) >= MAX_PER_SESSION)
     return `Not started: this session has already started ${MAX_PER_SESSION} tasks, which looks like a loop. Tell the user where things stand instead.`
-  const ahead = (await db.tasksWithStatus(['queued', 'running'])).filter(x => x.agent_id === who.id).length
+  const helper = args.helper === true && CFG.tools
+  const ahead = (await db.tasksWithStatus(['queued', 'running'])).filter(x => x.agent_id === who.id && !!x.helper === helper).length
   const t = await db.createTask({ scope: ctx.scope, scope_id: ctx.scopeId, session_id: ctx.session,
-    agent_id: who.id, by_agent: ctx.bot.id, ...input, main_model: args.main_model === true })
+    agent_id: who.id, by_agent: ctx.bot.id, ...input, main_model: args.main_model === true, helper })
   ctx.dispatched = true
   enqueueTask(t)
   const self = who.id === ctx.bot.id
-  return `Started task #${t.id}${self ? '' : ` for ${who.name}`}: "${t.title}"` +
-    (ahead ? ` — queued behind ${ahead} other task${ahead > 1 ? 's' : ''} of ${self ? 'yours' : 'theirs'}` : '') +
+  return `Started task #${t.id}${self ? '' : ` for ${who.name}`}: "${t.title}"` + (helper ? ' on a machine of its own' : '') +
+    (helper ? ahead >= HELPERS_MAX ? ` — waiting for one of ${HELPERS_MAX} helper machines to come free` : ''
+      : ahead ? ` — queued behind ${ahead} other task${ahead > 1 ? 's' : ''} of ${self ? 'yours' : 'theirs'}` : '') +
     '. It reports back here when it is done or needs something; don\'t wait for it.'
 }
 
@@ -2398,7 +2508,7 @@ async function machinesNow(bots) {
   return bots.map(b => {
     const c = cname(b.id), st = psCache.state.get(c)
     return { agent_id: b.id, state: !st ? 'none' : st === 'running' ? 'awake' : 'asleep', last_use: lastUse.get(c) ?? null,
-      busy: holding.has(c) || inUse(b.id) }
+      busy: holding.has(c) || inUse(b.id), helpers: helperRunning.get(b.id) ?? 0 }
   })
 }
 
@@ -3124,6 +3234,7 @@ const server = createServer(async (req, res) => {
       // Delete the container too — an ownerless container only wastes memory,
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
       await removeContainer(bm[1]).catch(() => {})
+      await rm(join(LOCALWORK, 'helpers', bm[1]), { recursive: true, force: true }).catch(() => {})
       return send(200, { ok: true })
     }
 
@@ -3383,17 +3494,17 @@ const server = createServer(async (req, res) => {
         next_run_at: r.enabled ? nextRun(r) : null, last_status: '', last_error: '', failures: 0 })
       return send(200, routineView(row))
     }
-    const rm = url.pathname.match(/^\/api\/routines\/([\w-]+)(\/run)?$/)
-    if (rm) {
-      const cur = await db.getRoutine(rm[1])
+    const rtm = url.pathname.match(/^\/api\/routines\/([\w-]+)(\/run)?$/)
+    if (rtm) {
+      const cur = await db.getRoutine(rtm[1])
       if (!cur) return send(404, { error: t('err.noRoutine') })
-      if (rm[2] && req.method === 'POST') {
+      if (rtm[2] && req.method === 'POST') {
         // A manual run doesn't change the next run time: "try it now" shouldn't move tomorrow's 9 a.m. run
         if (routineRunning.has(cur.id)) return send(409, { error: t('routine.running') })
         runRoutine(cur)
         return send(202, routineView({ ...cur, running: true }))
       }
-      if (!rm[2] && req.method === 'PATCH') {
+      if (!rtm[2] && req.method === 'PATCH') {
         const r = await checkRoutine(await readBody(req), cur)
         // Reset the failure count when re-enabling, otherwise a single failure pauses it again
         const revived = r.enabled && !cur.enabled
@@ -3401,7 +3512,7 @@ const server = createServer(async (req, res) => {
           failures: revived ? 0 : cur.failures, last_error: revived ? '' : cur.last_error })
         return send(200, routineView(row))
       }
-      if (!rm[2] && req.method === 'DELETE') { await db.deleteRoutine(cur.id); return send(200, { ok: true }) }
+      if (!rtm[2] && req.method === 'DELETE') { await db.deleteRoutine(cur.id); return send(200, { ok: true }) }
     }
 
     // ---- Spending ----
@@ -3951,6 +4062,7 @@ await mkdir(join(LOCALWORK, 'agents'), { recursive: true })
 await mkdir(join(LOCALWORK, 'groups'), { recursive: true })
 await mkdir(FILES_DIR, { recursive: true })
 await db.pruneEffects().catch(e => console.warn(`[effects] could not prune: ${e.message}`))
+await sweepHelpers().catch(e => console.warn(`[helper] sweeping after the restart: ${e.message}`))
 await recoverTasks()
 await recoverFrontRuns()
 

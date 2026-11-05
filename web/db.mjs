@@ -295,6 +295,8 @@ alter table agents add column if not exists setup_state jsonb;
 alter table agents add column if not exists task_model jsonb;
 -- A task that asked for the agent's own (main) model instead of its background one.
 alter table tasks add column if not exists main_model boolean not null default false;
+-- A task run on a machine of its own, beside the agent's other tasks (helper): see server.mjs, Helpers.
+alter table tasks add column if not exists helper boolean not null default false;
 -- Check-ins: an agent works on its own toward goals the person wrote, every so often, read-only, and
 -- reports into a session of its own only when there is something new.
 alter table agents add column if not exists goals text not null default '';
@@ -976,12 +978,12 @@ export async function seedProviderFromEnv(env) {
 
 // ---------- tasks ----------
 const TASK_COLS = `id, scope, scope_id, session_id, agent_id, by_agent, title, brief, status, question, approval,
-  result, created_at, updated_at, finished_at, main_model, checkin`
+  result, created_at, updated_at, finished_at, main_model, checkin, helper`
 
 export async function createTask(t) {
-  const { rows } = await q(`insert into tasks (scope, scope_id, session_id, agent_id, by_agent, title, brief, main_model, checkin)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning ${TASK_COLS}`,
-    [t.scope, t.scope_id, t.session_id, t.agent_id, t.by_agent ?? '', t.title, t.brief ?? '', !!t.main_model, !!t.checkin])
+  const { rows } = await q(`insert into tasks (scope, scope_id, session_id, agent_id, by_agent, title, brief, main_model, checkin, helper)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning ${TASK_COLS}`,
+    [t.scope, t.scope_id, t.session_id, t.agent_id, t.by_agent ?? '', t.title, t.brief ?? '', !!t.main_model, !!t.checkin, !!t.helper])
   return rows[0]
 }
 

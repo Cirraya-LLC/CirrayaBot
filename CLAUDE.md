@@ -2648,6 +2648,33 @@ so it isn't recorded.
   Enter submitting a GET login form, back, `click_xy` / `type_raw` from HTTP. **Not verified**: in a real agent
   container, and a real model's draft.
 
+### 2.40.10 Helpers: a task on a machine of its own
+
+`start_task {helper: true}` (offered only with tools on): the task runs on a fresh container beside the agent's other
+work instead of queueing behind it (`task:<agent>` lock) — several independent pieces at once. Up to
+`AGENT_HELPERS_MAX` (3) per agent; more wait for a slot (`helperSlot`, a freed slot passes straight to the next).
+Same image and sandbox rules, the agent's setup script runs in it, name `<prefix>-helper-<task>`, label `ma.helper`.
+
+- Mounts (`runArgs({helper})`): `/work` = `workspace/helpers/<agent>/<task>`, the desk **read-only** at `/desk`, and
+  only the drive of the group the task is for. ⚠️ **Not a folder inside the desk** (my first design): docker resolves
+  a mount's source on the host *following links*, and the agent decides what links its desk holds — `helpers -> /`
+  planted in /work would have mounted the host's root into the helper. Nothing any container can write sits on the
+  path to `workspace/helpers/<agent>/<task>`.
+- What it leaves in `/work/out` is copied to `/work/helpers/<task>` on the agent's own machine when it finishes
+  (tar through both containers, `copyBack`, ≤ `AGENT_HELPER_COPY_MB` 200), and a line saying where is added to its
+  report. Only on done — a failed or stopped helper's files go with it.
+- The machine goes when the run ends (any outcome); the folder goes when the task is over — a helper waiting for the
+  person keeps it and gets a fresh machine on the same folder when it carries on (installed packages don't survive
+  that; the prompt says so). Stopping a waiting / queued helper clears its folder (`stopTask`). On startup
+  `sweepHelpers` removes every helper container and the folders of tasks no longer open. Deleting an agent removes
+  `workspace/helpers/<agent>`. Idle sleep never touches helpers.
+- `tasks.helper`; `/api/tasks` and the activity page carry it ("own machine" on the card); activity machines carry
+  `helpers` (running now), and an agent with helpers but no machine of its own is listed.
+- Tests: `test/e2e/helpers.test.mjs` (2 at once under a limit of 2, mounts, removal, plain tasks still one at a time,
+  copy-back through the agent's container, waiting keeps the folder and stop clears it), sandbox self-test (Linux),
+  `app/test/activity_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/helpers.mjs`). **Not verified with real
+  containers yet.**
+
 ## 3. What runs now
 
 ```bash

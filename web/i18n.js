@@ -481,6 +481,8 @@ const M = {
   'tk.st.running': ['Working', '进行中', '進行中'],
   'tk.st.waiting': ['Needs you', '等你回复', '等你回覆'],
   'tk.st.done': ['Done', '已完成', '已完成'],
+  'tk.helper': ['own machine', '独立机器', '獨立機器'],
+  'act.helpers': ['helpers running: {n}', '另有 {n} 台助手机器', '另有 {n} 台助手機器'],
   'tk.st.failed': ['Failed', '失败', '失敗'],
   'tk.st.stopped': ['Stopped', '已停止', '已停止'],
   'tk.by': ['handed out by {name}', '由 {name} 派出', '由 {name} 派出'],

@@ -416,6 +416,7 @@ class Task {
     required this.result,
     required this.createdAt,
     required this.updatedAt,
+    this.helper = false,
   });
 
   factory Task.fromJson(Map<String, Object?> j) {
@@ -435,12 +436,16 @@ class Task {
       result: (j['result'] as String?) ?? '',
       createdAt: (j['created_at'] as num?)?.toInt() ?? 0,
       updatedAt: (j['updated_at'] as num?)?.toInt() ?? 0,
+      helper: j['helper'] == true,
     );
   }
 
   final int id;
   final String session;
   final String agentId;
+
+  /// Runs on a machine of its own, beside the agent's other tasks.
+  final bool helper;
   final String byAgent;
   final String title;
   final String brief;

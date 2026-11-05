@@ -154,7 +154,7 @@ class _ActivityPageState extends State<ActivityPage> {
   Widget build(BuildContext context) {
     final a = _a;
     final asks = _list('asks'), runs = _list('runs'), tasks = _list('tasks'), routines = _list('routines'),
-        checkins = _list('checkins'), machines = _list('machines').where((m) => m['state'] != 'none').toList(),
+        checkins = _list('checkins'), machines = _list('machines').where((m) => m['state'] != 'none' || ((m['helpers'] as num?) ?? 0) > 0).toList(),
         actions = _list('actions');
     final questions = tasks.where((t) => t['status'] == 'waiting' && '${t['question'] ?? ''}'.isNotEmpty && t['approval'] == null);
     final working = tasks.where((t) => t['status'] == 'queued' || t['status'] == 'running');
@@ -236,7 +236,7 @@ class _ActivityPageState extends State<ActivityPage> {
                       ),
                     for (final x in working)
                       _card(
-                        body: _line('${x['who']}', _join([_where(x), '#${x['id']}']), second: '${x['title']}'),
+                        body: _line('${x['who']}', _join([_where(x), '#${x['id']}', if (x['helper'] == true) tr('tk.helper')]), second: '${x['title']}'),
                         actions: [
                           TextButton(onPressed: () => _do(() => _api.stopTask((x['id'] as num).toInt())), child: Text(tr('act.stop'))),
                           TextButton(
@@ -268,7 +268,11 @@ class _ActivityPageState extends State<ActivityPage> {
                             Chip(
                               visualDensity: VisualDensity.compact,
                               label: Text(
-                                '${widget.bench.agents.where((b) => b.id == m['agent_id']).firstOrNull?.name ?? m['agent_id']} · ${tr('act.m.${m['state']}')}',
+                                [
+                                  widget.bench.agents.where((b) => b.id == m['agent_id']).firstOrNull?.name ?? '${m['agent_id']}',
+                                  tr('act.m.${m['state']}'),
+                                  if (((m['helpers'] as num?) ?? 0) > 0) tr('act.helpers', {'n': '${m['helpers']}'}),
+                                ].join(' · '),
                                 style: TextStyle(fontSize: 11.5, color: m['state'] == 'awake' ? C.accent : C.dim),
                               ),
                             ),

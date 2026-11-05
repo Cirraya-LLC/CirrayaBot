@@ -19,6 +19,8 @@ case "$1" in
     body=$(cat 2>/dev/null)    # the server always closes stdin; reading it avoids a broken pipe on big inputs
     # What listens inside: nothing, in here.
     case "${@: -1}" in *"/proc/net/tcp"*) exit 0 ;; esac
+    # A helper's /work/out: as big as <log>.helper-out says (absent: empty, nothing to copy back).
+    case "${@: -1}" in *"du -sb /work/out"*) [ -f "$STATE.helper-out" ] && cat "$STATE.helper-out"; exit 0 ;; esac
     # The browser daemon: a test that wrote <log>.browser gets that as every answer, and the requests are kept.
     if [ "${@: -1}" = "http://127.0.0.1:9230/" ] && [ -f "$STATE.browser" ]; then
       [ -n "$body" ] && printf '%s\n' "$body" >> "$STATE.browser-calls"

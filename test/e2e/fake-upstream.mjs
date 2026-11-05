@@ -77,6 +77,7 @@ export async function fakeUpstream({ models = [{ id: 'fake' }], name = 'fake' } 
     const body = JSON.parse(raw || '{}')
     const r = describe(body)
     r.headers = req.headers
+    r.body = body
     requests.push(r)
     let reply
     try { reply = await handler(r, requests.length) ?? { text: 'ok' } }

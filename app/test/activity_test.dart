@@ -20,7 +20,7 @@ Map<String, Object?> sample() => {
     {'id': 7, 'status': 'waiting', 'question': 'Which branch should I deploy?', 'approval': null, 'title': 'Deploy',
       'who': 'Lee', 'conv_name': 'Ops team', 'kind': 'group', 'conv': 'g1', 'session': 's2'},
     {'id': 8, 'status': 'running', 'question': '', 'approval': null, 'title': 'Count the files in every repository',
-      'who': 'Max', 'conv_name': 'Max', 'kind': 'agent', 'conv': 'max', 'session': 's3'},
+      'who': 'Max', 'conv_name': 'Max', 'kind': 'agent', 'conv': 'max', 'session': 's3', 'helper': true},
   ],
   'routines': [
     {'id': 'r1', 'name': 'Morning digest', 'kind': 'agent', 'conv': 'kim', 'conv_name': 'Kim',
@@ -29,7 +29,7 @@ Map<String, Object?> sample() => {
   'machines': [
     {'agent_id': 'kim', 'state': 'awake', 'last_use': _now},
     {'agent_id': 'lee', 'state': 'asleep', 'last_use': _now - 3600000},
-    {'agent_id': 'max', 'state': 'none'},
+    {'agent_id': 'max', 'state': 'none', 'helpers': 2},
   ],
   'actions': [
     for (var i = 0; i < 5; i++)
@@ -56,10 +56,13 @@ void main() {
       expect(find.byKey(const ValueKey('ask-ap1')), findsOneWidget);
       expect(find.text(tr('ap.approve')), findsOneWidget);
       expect(find.text('Which branch should I deploy?'), findsOneWidget);
+      await tester.dragUntilVisible(find.textContaining('Count the files'), find.byType(ListView), const Offset(0, -150));
+      expect(find.textContaining(tr('tk.helper')), findsOneWidget, reason: 'a task on a machine of its own says so');
       await tester.dragUntilVisible(find.textContaining('Morning digest'), find.byType(ListView), const Offset(0, -150));
       await tester.dragUntilVisible(find.text(tr('act.recent')), find.byType(ListView), const Offset(0, -200));
       expect(find.textContaining('awake'), findsOneWidget);
-      expect(find.textContaining('no machine'), findsNothing, reason: 'an agent without a machine is not listed');
+      expect(find.textContaining(tr('act.helpers', {'n': '2'})), findsOneWidget,
+          reason: 'an agent with helpers running is listed even without a machine of its own');
       expect(tester.takeException(), isNull);
       bench.dispose();
     });

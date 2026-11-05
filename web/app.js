@@ -2763,7 +2763,7 @@ function renderTasks() {
     el.className = 'tk' + (openTask === x.id ? ' on' : '')
     const who = bot(x.agent_id)?.name ?? x.agent_id
     el.innerHTML = `<div class="tkh" tabindex="0" role="button"><b>${stPill(x.status)} <span>#${x.id}</span> ${esc(x.title)}</b>
-      <small>${esc(who)} · ${esc(when(x.created_at))}</small></div>`
+      <small>${esc(who)} · ${esc(when(x.created_at))}${x.helper ? ` · ${esc(t('tk.helper'))}` : ''}</small></div>`
     const head = el.querySelector('.tkh')
     head.onclick = () => { openTask = openTask === x.id ? null : x.id; renderTasks() }
     head.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); head.click() } }
@@ -3037,7 +3037,7 @@ async function paintActivity() {
   for (const x of a.runs) work.append(actRow('', `<b>${esc(x.who || x.conv_name)}</b> <span class="d">${where(x.who, x.conv_name)} · ${esc(t('act.since', { ago: ago(x.started_at) }))}${x.detached ? ` · ${esc(t('act.background'))}` : ''}</span>`,
     [[t('act.stop'), () => post('/api/runs/stop', { session: x.session }).then(paintActivity)], [t('act.open'), async () => actOpen(x.kind, x.id, x.session)]]))
   for (const x of a.tasks.filter(x => x.status === 'queued' || x.status === 'running'))
-    work.append(actRow('', `<b>${esc(x.who)}</b> <span class="d">${where(x.who, x.conv_name)} · #${x.id} · ${esc(t(`tk.st.${x.status}`))}</span><br>${esc(x.title)}`,
+    work.append(actRow('', `<b>${esc(x.who)}</b> <span class="d">${where(x.who, x.conv_name)} · #${x.id} · ${esc(t(`tk.st.${x.status}`))}${x.helper ? ` · ${esc(t('tk.helper'))}` : ''}</span><br>${esc(x.title)}`,
       [[t('act.stop'), () => post(`/api/tasks/${x.id}/stop`).then(paintActivity)], [t('act.open'), async () => actOpen(x.kind, x.conv, x.session)]]))
   actEmpty(work, 'act.noWork')
   // Coming up: scheduled tasks by when they next run.
@@ -3050,10 +3050,10 @@ async function paintActivity() {
     [[t('act.open'), async () => actOpen('agent', x.agent_id)]]))
   actEmpty(coming, 'act.noComing')
   // Machines: awake or asleep (only where Agents have machines).
-  const machines = a.machines.filter(m => m.state !== 'none')
+  const machines = a.machines.filter(m => m.state !== 'none' || m.helpers)
   $('#actmachsec').hidden = !machines.length
   $('#actmach').innerHTML = machines.map(m => `<span class="${m.state}" title="${esc(m.last_use ? t('act.lastUse', { ago: ago(m.last_use) }) : '')}">${
-    esc(bot(m.agent_id)?.name ?? m.agent_id)} · ${esc(t(`act.m.${m.state}`))}</span>`).join('')
+    esc(bot(m.agent_id)?.name ?? m.agent_id)} · ${esc(t(`act.m.${m.state}`))}${m.helpers ? ` · ${esc(t('act.helpers', { n: m.helpers }))}` : ''}</span>`).join('')
   // What was run lately, newest first; a click opens where it happened.
   const rec = $('#actrecent'); rec.innerHTML = ''
   for (const x of a.actions.slice(0, 60)) {

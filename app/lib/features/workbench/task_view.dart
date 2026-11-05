@@ -282,7 +282,7 @@ class _TaskListState extends State<TaskList> {
                     ],
                   ),
                   Text(
-                    bench.agentById(x.agentId)?.name ?? x.agentId,
+                    [bench.agentById(x.agentId)?.name ?? x.agentId, if (x.helper) tr('tk.helper')].join(' · '),
                     style: TextStyle(fontSize: 11.5, color: C.dim2),
                   ),
                 ],
