@@ -248,7 +248,17 @@ release notes and press; dates marked (2nd) were not confirmed against a primary
   activity view; idle machines asleep; a per-agent setup script; "forbid" rules; a model per task / a cheaper model
   for background work; templates (agents + skills) inside the product; teach-by-demonstration; memory consolidation
   and import; parallel helpers on their own machines; multiple users / a team agent; acting on the person's own
-  computer from the desktop client.
+  computer from the desktop client. **All closed in 2.40 (2026-11-05) except the last two, which the boss left out.**
+- **Still ahead of us after 2.40, in scope** (compared 2026-11-05): **VM isolation** — Grok (Firecracker), Devin, Muse
+  and Manus give each machine its own kernel; ours are containers on a shared one (rules in 2.28/2.36.8, but a kernel
+  bug is a way out); a **model reviewing risky actions** (Grok Auto Review, dots' automatic review) where we only match
+  patterns; **automatic model choice per task** (dots switches mid-task; ours is a background model + `main_model`);
+  a **template / skill marketplace** with first-party agents (we ship 6 + files); Devin's Windows / macOS / Android
+  machines (ours are Linux only); exportable audit (Grok OTel, Muse's trail of every action; ours is the activity page
+  and transcripts); and on the client side iOS, desktop notifications and macOS / Windows builds never compiled.
+  Since 11-04: dots added GPT-6.1 Terra (11-03), are free to preview until 11-18 and billed after, and per VentureBeat
+  come with a "ChatGPT Space" where dots and a human team work together; Grok's usage cut is confirmed (Musk: serving
+  it cost more than subscriptions brought in); Devin Desktop runs up to eight local sessions side by side.
 
 ## 2.7 So what's left — after checking one by one, only one and a half items
 
