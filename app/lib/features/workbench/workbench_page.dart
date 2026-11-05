@@ -1739,6 +1739,55 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       ? '${(n / 1000).toStringAsFixed(1)}k'
       : '$n';
 
+  Widget _triggerTile(Conversation c, Trigger x) {
+    final (label, color, bg) = !x.enabled
+        ? (tr('wb.paused'), C.dim, C.selected)
+        : x.lastStatus == 'failed'
+        ? (tr('tg.failed'), C.bad, C.badBg)
+        : x.lastStatus == 'limited'
+        ? (tr('tg.limited'), C.warn, C.warnBg)
+        : ('', C.dim, Colors.transparent);
+    final sub = [
+      x.kind == 'github' ? 'GitHub · ${x.events.join(', ')}' : tr('tg.kindWebhook'),
+      if (c.isGroup) bench.agentById(x.agentId)?.name ?? x.agentId,
+      if (x.fired > 0) tr('tg.count', {'n': '${x.fired}'}),
+    ].join(' · ');
+    return InkWell(
+      onTap: () => showTriggerEditor(context, bench, c, trigger: x),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    x.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 13, color: x.enabled ? C.ink : C.dim),
+                  ),
+                ),
+                if (label.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: x.lastError,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(5)),
+                      child: Text(label, style: TextStyle(fontSize: 10.5, color: color)),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: C.dim2)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _routineTile(Conversation c, Routine r) {
     final (label, color, bg) = r.running
         ? (tr('wb.running'), C.tintInk, C.tint)
@@ -2155,6 +2204,21 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                         onPressed: () => showRoutineEditor(context, bench, c),
                         icon: const Icon(Icons.add, size: 15),
                         label: Text(tr('wb.newRoutine'), style: const TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ),
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.triggers'))),
+                  for (final x in bench.triggers) _triggerTile(c, x),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 2, 8, 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        key: const ValueKey('tg-new'),
+                        onPressed: () => showTriggerEditor(context, bench, c),
+                        icon: const Icon(Icons.add, size: 15),
+                        label: Text(tr('wb.newTrigger'), style: const TextStyle(fontSize: 12)),
                       ),
                     ),
                   ),

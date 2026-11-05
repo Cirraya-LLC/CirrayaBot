@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../data/api.dart';
 import '../../l10n.dart';
@@ -1335,6 +1336,288 @@ class _RoutineEditorState extends State<_RoutineEditor> {
         ],
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: Text(tr('common.cancel'))),
         FilledButton(onPressed: _busy ? null : _save, child: Text(tr(r == null ? 'ed.create' : 'common.save'))),
+      ],
+    );
+  }
+}
+
+// ── triggers ─────────────────────────────────────────────────────────────
+
+/// Make or edit a trigger: a URL a service calls (GitHub, or any webhook). A new one stays open after saving, since
+/// its address and secret have to be copied into the service and the secret is never shown again.
+Future<void> showTriggerEditor(BuildContext context, Workbench bench, Conversation target, {Trigger? trigger}) =>
+    showDialog<void>(
+      context: context,
+      builder: (_) => _TriggerEditor(bench: bench, target: target, trigger: trigger),
+    );
+
+class _TriggerEditor extends StatefulWidget {
+  const _TriggerEditor({required this.bench, required this.target, this.trigger});
+  final Workbench bench;
+  final Conversation target;
+  final Trigger? trigger;
+
+  @override
+  State<_TriggerEditor> createState() => _TriggerEditorState();
+}
+
+class _TriggerEditorState extends State<_TriggerEditor> {
+  late Trigger? _t = widget.trigger;
+  late String _kind = _t?.kind ?? 'github';
+  late final _name = TextEditingController(text: _t?.name ?? '');
+  late final _prompt = TextEditingController(text: _t?.prompt ?? '');
+  late final _events = TextEditingController(text: _t?.events.join(', ') ?? '');
+  late final _actions = TextEditingController(text: _t?.actions.join(', ') ?? '');
+  late final _branches = TextEditingController(text: _t?.branches.join(', ') ?? '');
+  late final _keywords = TextEditingController(text: _t?.keywords.join(', ') ?? '');
+  late final _perHour = TextEditingController(text: '${_t?.maxPerHour ?? 6}');
+  late String _agent = widget.target.isGroup ? (_t?.agentId ?? '') : '';
+  late bool _enabled = _t?.enabled ?? true;
+  String _secret = '';
+  String _copied = '';
+  String _error = '';
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    for (final c in [_name, _prompt, _events, _actions, _branches, _keywords, _perHour]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() job) async {
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    try {
+      await job();
+      unawaited(widget.bench.loadTriggers());
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _save() => _run(() async {
+    final body = <String, Object?>{
+      'name': _name.text.trim(),
+      'prompt': _prompt.text.trim(),
+      'keywords': _keywords.text,
+      'max_per_hour': int.tryParse(_perHour.text.trim()) ?? 0,
+      'enabled': _enabled,
+      if (_kind == 'github') ...{'events': _events.text, 'actions': _actions.text, 'branches': _branches.text},
+      if (widget.target.isGroup) 'agent': _agent.isEmpty ? null : _agent,
+    };
+    final t = _t;
+    if (t != null) {
+      await widget.bench.api.updateTrigger(t.id, body);
+      if (mounted) Navigator.of(context).pop();
+      return;
+    }
+    final (made, secret) = await widget.bench.api.createTrigger({
+      ...body,
+      'kind': _kind,
+      'target': {'kind': widget.target.kind, 'id': widget.target.id},
+    });
+    if (mounted) {
+      setState(() {
+        _t = made;
+        _secret = secret;
+        _agent = widget.target.isGroup ? made.agentId : '';
+      });
+    }
+  });
+
+  Future<void> _newSecret() async {
+    final t = _t!;
+    if (!await _confirm(context, tr('tg.newSecret'), tr('tg.confirmRotate', {'name': t.name}))) return;
+    await _run(() async {
+      final (fresh, secret) = await widget.bench.api.newTriggerSecret(t.id);
+      if (mounted) {
+        setState(() {
+          _t = fresh;
+          _secret = secret;
+        });
+      }
+    });
+  }
+
+  Future<void> _delete() async {
+    final t = _t!;
+    if (!await _confirm(context, tr('tg.confirmDelete', {'name': t.name}), tr('tg.deleteBody'))) return;
+    await _run(() async {
+      await widget.bench.api.deleteTrigger(t.id);
+      if (mounted) Navigator.of(context).pop();
+    });
+  }
+
+  static bool _local(String url) {
+    final h = Uri.tryParse(url)?.host ?? '';
+    return h == 'localhost' || h.startsWith('127.') || h == '::1' || h == '0.0.0.0';
+  }
+
+  Widget _copyRow(String key, String text) => Padding(
+    padding: const EdgeInsets.only(top: 6),
+    child: Row(
+      children: [
+        Expanded(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(color: C.field, borderRadius: BorderRadius.circular(6)),
+            child: SelectableText(text, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+          ),
+        ),
+        const SizedBox(width: 6),
+        TextButton(
+          key: ValueKey('tg-copy-$key'),
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: text));
+            if (mounted) setState(() => _copied = key);
+          },
+          child: Text(tr(_copied == key ? 'tg.copied' : 'tg.copy'), style: const TextStyle(fontSize: 12)),
+        ),
+      ],
+    ),
+  );
+
+  String _status(Trigger t) {
+    if (t.lastAt == null) return tr('tg.never');
+    final why = t.lastError;
+    final result = switch (t.lastStatus) {
+      'fired' => tr('tg.st.fired'),
+      'skipped' => tr('tg.st.skipped', {'why': why}),
+      'limited' => tr('tg.st.limited'),
+      'failed' => tr('tg.st.failed', {'why': why}),
+      _ => '',
+    };
+    final at = DateTime.fromMillisecondsSinceEpoch(t.lastAt!);
+    return tr('tg.last', {'time': '${at.year}/${at.month}/${at.day} ${_clock(at)}', 'result': result});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = _t;
+    final small = TextStyle(fontSize: 11.5, color: C.dim2);
+    final members = widget.target.members;
+    return AlertDialog(
+      title: Text(t == null ? tr('tg.new') : tr('ed.editTitle', {'name': t.name}), style: const TextStyle(fontSize: 16)),
+      content: SizedBox(
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (t == null) ...[
+                SegmentedButton<String>(
+                  segments: [
+                    ButtonSegment(value: 'github', label: Text(tr('tg.kindGithub'), style: const TextStyle(fontSize: 12))),
+                    ButtonSegment(value: 'webhook', label: Text(tr('tg.kindWebhookShort'), style: const TextStyle(fontSize: 12))),
+                  ],
+                  selected: {_kind},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (v) => setState(() => _kind = v.first),
+                ),
+                const SizedBox(height: 12),
+              ],
+              TextField(
+                key: const ValueKey('tg-name'),
+                controller: _name,
+                autofocus: t == null,
+                maxLength: 60,
+                decoration: InputDecoration(hintText: tr('tg.namePh'), counterText: ''),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                key: const ValueKey('tg-prompt'),
+                controller: _prompt,
+                minLines: 3,
+                maxLines: 8,
+                decoration: InputDecoration(hintText: tr('tg.promptPh')),
+              ),
+              if (widget.target.isGroup) ...[
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  key: const ValueKey('tg-agent'),
+                  initialValue: members.contains(_agent) ? _agent : '',
+                  isExpanded: true,
+                  decoration: InputDecoration(labelText: tr('tg.agent')),
+                  items: [
+                    DropdownMenuItem(value: '', child: Text(tr('tg.lead'), overflow: TextOverflow.ellipsis)),
+                    for (final id in members)
+                      DropdownMenuItem(value: id, child: Text(widget.bench.agentById(id)?.name ?? id, overflow: TextOverflow.ellipsis)),
+                  ],
+                  onChanged: (v) => setState(() => _agent = v ?? ''),
+                ),
+              ],
+              if (_kind == 'github') ...[
+                const SizedBox(height: 10),
+                TextField(key: const ValueKey('tg-events'), controller: _events, decoration: InputDecoration(hintText: tr('tg.eventsPh'))),
+                const SizedBox(height: 10),
+                TextField(controller: _actions, decoration: InputDecoration(hintText: tr('tg.actionsPh'))),
+                const SizedBox(height: 10),
+                TextField(controller: _branches, decoration: InputDecoration(hintText: tr('tg.branchesPh'))),
+              ],
+              const SizedBox(height: 10),
+              TextField(controller: _keywords, decoration: InputDecoration(hintText: tr('tg.keywordsPh'))),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  SizedBox(
+                    width: 80,
+                    child: TextField(controller: _perHour, keyboardType: TextInputType.number),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(tr('tg.perHour'), style: TextStyle(fontSize: 12, color: C.dim))),
+                ],
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(tr('ed.enabled'), style: const TextStyle(fontSize: 13)),
+                value: _enabled,
+                onChanged: (v) => setState(() => _enabled = v),
+              ),
+              if (t != null) ...[
+                Text(
+                  tr(t.kind == 'github' ? 'tg.howGithub' : 'tg.howWebhook') + (_local(t.url) ? ' ${tr('tg.localUrl')}' : ''),
+                  style: small,
+                ),
+                _copyRow('url', t.url),
+                if (_secret.isNotEmpty) _copyRow('secret', _secret),
+                const SizedBox(height: 6),
+                Text(tr(_secret.isNotEmpty ? 'tg.secretOnce' : 'tg.secretHidden'), style: small),
+                const SizedBox(height: 6),
+                Text(_status(t), style: TextStyle(fontSize: 11.5, color: C.dim)),
+              ],
+              const SizedBox(height: 8),
+              Text(tr('tg.safety'), style: small),
+              if (_error.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(_error, style: TextStyle(fontSize: 12, color: C.code)),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        if (t != null) ...[
+          TextButton(
+            onPressed: _busy ? null : _delete,
+            style: TextButton.styleFrom(foregroundColor: C.code),
+            child: Text(tr('common.delete')),
+          ),
+          TextButton(key: const ValueKey('tg-rotate'), onPressed: _busy ? null : _newSecret, child: Text(tr('tg.newSecret'))),
+        ],
+        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: Text(tr(t == null ? 'common.cancel' : 'common.close'))),
+        FilledButton(
+          key: const ValueKey('tg-save'),
+          onPressed: _busy ? null : _save,
+          child: Text(tr(t == null ? 'ed.create' : 'common.save')),
+        ),
       ],
     );
   }

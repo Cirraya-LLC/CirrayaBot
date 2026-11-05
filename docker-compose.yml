@@ -49,6 +49,9 @@ services:
       # or exactly kata / gvisor / runc; in auto never below AGENT_RUNTIME_FLOOR (e.g. gvisor = no plain containers)
       AGENT_RUNTIME: ${AGENT_RUNTIME:-auto}
       AGENT_RUNTIME_FLOOR: ${AGENT_RUNTIME_FLOOR:-runc}
+      # where external triggers (/hooks/…) are reached from outside; empty = https://PUBLIC_HOST, else this page's own address
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
       # resolvers for Kata / gVisor machines, which can't use Docker's own DNS
       AGENT_DNS: ${AGENT_DNS:-8.8.8.8 1.1.1.1}
       # an agent's machine nobody used for this many minutes is stopped (files kept), 0 = never

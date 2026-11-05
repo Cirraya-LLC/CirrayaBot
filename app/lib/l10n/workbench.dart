@@ -149,6 +149,8 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.addSkill': ['Install / write a skill', '装技能 / 写技能', '安裝技能 / 撰寫技能'],
   'wb.routines': ['Scheduled tasks', '定时任务', '排程任務'],
   'wb.newRoutine': ['New scheduled task', '新建定时任务', '新增排程任務'],
+  'wb.triggers': ['Triggers', '触发器', '觸發器'],
+  'wb.newTrigger': ['New trigger', '新建触发器', '新增觸發器'],
   'wb.memory': ['Memory', '记忆', '記憶'],
   'wb.groupMemory': [
     "{name}'s group memory — everyone in the group reads it",

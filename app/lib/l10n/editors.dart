@@ -2,6 +2,81 @@
 library;
 
 const Map<String, List<String>> editorStrings = {
+  // Triggers
+  'tg.new': ['New trigger', '新建触发器', '新增觸發器'],
+  'tg.kindGithub': ['GitHub', 'GitHub', 'GitHub'],
+  'tg.kindWebhook': ['Webhook (any service)', 'Webhook（任意服务）', 'Webhook（任意服務）'],
+  'tg.kindWebhookShort': ['Webhook', 'Webhook', 'Webhook'],
+  'tg.namePh': ['Name, e.g. "Triage new issues"', '名称，例如「分拣新 issue」', '名稱，例如「分類新 issue」'],
+  'tg.promptPh': [
+    'What the agent should do when it fires — the event is handed over with it',
+    '触发时 Agent 要做什么——事件内容会一起交给它',
+    '觸發時 Agent 要做什麼——事件內容會一起交給它',
+  ],
+  'tg.agent': ['Who runs it', '由谁执行', '由誰執行'],
+  'tg.lead': ['The lead or first member', '统筹（没有就是第一个成员）', '統籌（沒有就是第一個成員）'],
+  'tg.eventsPh': [
+    'GitHub events, e.g. issues, pull_request, push (required)',
+    'GitHub 事件，例如 issues, pull_request, push（必填）',
+    'GitHub 事件，例如 issues, pull_request, push（必填）',
+  ],
+  'tg.actionsPh': ['Actions (optional), e.g. opened, closed', '动作（可选），例如 opened, closed', '動作（選填），例如 opened, closed'],
+  'tg.branchesPh': ['Branches (optional), e.g. main, release/*', '分支（可选），例如 main, release/*', '分支（選填），例如 main, release/*'],
+  'tg.keywordsPh': [
+    'Only when it mentions any of (optional, comma-separated)',
+    '只在内容包含这些词之一时（可选，逗号分隔）',
+    '只在內容包含這些詞之一時（選填，逗號分隔）',
+  ],
+  'tg.perHour': ['at most this many an hour', '每小时最多这么多次', '每小時最多這麼多次'],
+  'tg.copy': ['Copy', '复制', '複製'],
+  'tg.copied': ['Copied', '已复制', '已複製'],
+  'tg.howGithub': [
+    'In the repository: Settings → Webhooks → Add webhook. Payload URL: the address below; content type: application/json; Secret: the secret below; then pick the events you named here.',
+    '在仓库里：Settings → Webhooks → Add webhook。Payload URL 填下面的地址，Content type 选 application/json，Secret 填下面的密钥，再勾上你在这里写的事件。',
+    '在儲存庫裡：Settings → Webhooks → Add webhook。Payload URL 填下面的位址，Content type 選 application/json，Secret 填下面的密鑰，再勾選你在這裡寫的事件。',
+  ],
+  'tg.howWebhook': [
+    'Have the service POST to the address below, with the secret in an X-Hook-Token header (or the body signed with HMAC-SHA256, hex, in X-Signature-256).',
+    '让服务向下面的地址发 POST，把密钥放在 X-Hook-Token 请求头里（或者用 HMAC-SHA256 给正文签名，十六进制，放在 X-Signature-256 里）。',
+    '讓服務向下面的位址發 POST，把密鑰放在 X-Hook-Token 請求標頭裡（或者用 HMAC-SHA256 為內文簽章，十六進位，放在 X-Signature-256 裡）。',
+  ],
+  'tg.localUrl': [
+    'Only the server\'s own machine can reach this address. Set PUBLIC_URL (or PUBLIC_HOST for HTTPS) in .env so services outside can.',
+    '这个地址只有服务器本机能访问。在 .env 里设置 PUBLIC_URL（或开 HTTPS 用的 PUBLIC_HOST），外面的服务才连得进来。',
+    '這個位址只有伺服器本機能存取。在 .env 裡設定 PUBLIC_URL（或開 HTTPS 用的 PUBLIC_HOST），外面的服務才連得進來。',
+  ],
+  'tg.secretOnce': ['The secret is shown only now. Lost it? Make a new one.', '密钥只显示这一次。丢了就生成一个新的。', '密鑰只顯示這一次。遺失了就產生一個新的。'],
+  'tg.secretHidden': [
+    'The secret was shown when it was made. "New secret" replaces it; the old one stops working.',
+    '密钥在创建时显示过。「新密钥」会换掉它，旧的随即失效。',
+    '密鑰在建立時顯示過。「新密鑰」會換掉它，舊的隨即失效。',
+  ],
+  'tg.newSecret': ['New secret', '新密钥', '新密鑰'],
+  'tg.confirmRotate': [
+    'Make a new secret for "{name}"? The old one stops working at once — change it where the service sends from.',
+    '给「{name}」换一个新密钥？旧的立刻失效——记得在发送方那边也改掉。',
+    '為「{name}」換一個新密鑰？舊的立刻失效——記得在傳送方那邊也改掉。',
+  ],
+  'tg.confirmDelete': ['Delete trigger "{name}"?', '删掉触发器「{name}」？', '刪除觸發器「{name}」？'],
+  'tg.deleteBody': [
+    'Its address stops working. The tasks it already started stay.',
+    '它的地址随即失效。它已经开出的后台任务还在。',
+    '它的位址隨即失效。它已經開出的背景任務還在。',
+  ],
+  'tg.safety': [
+    'What arrives is handed to the agent as data, never as instructions. A delivery runs once, however often it is sent.',
+    '收到的内容只作为资料交给 Agent，不当作指令。同一次投递无论重发多少次只跑一次。',
+    '收到的內容只作為資料交給 Agent，不當作指令。同一次投遞無論重送多少次只跑一次。',
+  ],
+  'tg.never': ['Never fired yet', '还没触发过', '還沒觸發過'],
+  'tg.last': ['Last {time}: {result}', '上次 {time}：{result}', '上次 {time}：{result}'],
+  'tg.st.fired': ['started a background task', '开了一个后台任务', '開了一個背景任務'],
+  'tg.st.skipped': ['skipped ({why})', '跳过了（{why}）', '略過了（{why}）'],
+  'tg.st.limited': ['over the hourly limit', '超过每小时上限', '超過每小時上限'],
+  'tg.st.failed': ['failed: {why}', '失败：{why}', '失敗：{why}'],
+  'tg.count': ['fired {n}×', '触发 {n} 次', '觸發 {n} 次'],
+  'tg.limited': ['Over the limit', '超上限', '超上限'],
+  'tg.failed': ['Failed', '失败', '失敗'],
   // Agent editor
   'ed.needNamePersona': ['Name and responsibilities are both required', '名字和职责说明都要填', '名字和職責說明都要填'],
   'ed.modelsLoading': ['Still asking the provider for its models — one moment', '还在问上游有哪些模型，等一下', '還在詢問上游有哪些模型，請稍候'],

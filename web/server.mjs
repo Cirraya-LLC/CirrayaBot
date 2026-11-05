@@ -34,7 +34,8 @@ import { existsSync, statSync, createReadStream, createWriteStream } from 'node:
 import { pipeline } from 'node:stream/promises'
 import { join, extname, posix } from 'node:path'
 import { spawn } from 'node:child_process'
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { checkTrigger, verify as verifyHook, deliveryId, matches as hookMatches, summarize as hookSummary, briefFor } from './triggers.mjs'
 
 const WEB = join(ROOT, 'web')
 const WORKROOT = join(ROOT, 'workspace')
@@ -2922,6 +2923,91 @@ async function taskModel(bot, t) {
 // NOTHING_NEW, in which case nobody is disturbed.
 
 /** The session check-ins go into, made (titled in the language of whoever turned them on) if it's gone. */
+// ---------- External triggers (web/triggers.mjs) ----------
+// A signed request to /hooks/<id> whose event passes the trigger's filters becomes a background task for its agent,
+// in a session of its own; at most max_per_hour of them an hour; a delivery seen before is not run again.
+const HOOK_BODY_MAX = MB
+const BRIEF_HARD_MAX = 9000
+
+async function handleHook(req, id, send) {
+  if (req.method !== 'POST') return send(405, { error: 'POST only' })
+  let raw
+  try { raw = await readBytes(req, HOOK_BODY_MAX, () => Object.assign(new Error('too big'), { status: 413 })) }
+  catch (e) { return send(e.status ?? 400, { error: e.message }) }
+  const t = await db.getTrigger(id, { secret: true })
+  if (!t || !t.enabled) return send(404, { error: 'no such hook' })        // unknown and switched off look the same
+  let secret = ''
+  try { secret = unseal(await secretKey(), t.secret_enc) } catch {}
+  if (!verifyHook(secret, raw, req.headers)) return send(401, { error: 'missing or wrong signature' })
+  const event = t.kind === 'github' ? String(req.headers['x-github-event'] ?? '').toLowerCase() : 'webhook'
+  if (t.kind === 'github' && event === 'ping') return send(200, { ok: true, pong: true })   // GitHub's "is this on?"
+  const text = raw.toString('utf8')
+  let payload = null
+  try { payload = JSON.parse(text) } catch {
+    try { payload = JSON.parse(new URLSearchParams(text).get('payload') ?? '') } catch {}   // GitHub's form-encoded option
+  }
+  const delivery = deliveryId(req.headers, raw)
+  if (!await db.noteDelivery(t.id, delivery)) return send(200, { ok: true, duplicate: true })
+  const summary = hookSummary(t.kind, event, payload, payload ? JSON.stringify(payload) : text)
+  const m = hookMatches(t, { event, payload, text: t.kind === 'github' ? summary : text })
+  const seen = { last_at: new Date() }
+  if (!m.ok) { await db.updateTrigger(t.id, { ...seen, last_status: 'skipped', last_error: m.why }); return send(200, { ok: true, skipped: m.why }) }
+  if (await db.ranLastHour(t.id) >= t.max_per_hour) {
+    await db.updateTrigger(t.id, { ...seen, last_status: 'limited', last_error: `more than ${t.max_per_hour} in an hour` })
+    return send(429, { error: 'too many this hour' })
+  }
+  try {
+    const task = await fireTrigger(t, summary)
+    await db.markDeliveryRan(t.id, delivery)
+    await db.updateTrigger(t.id, { ...seen, last_status: 'fired', last_error: '' }, { fired: true })
+    return send(202, { ok: true, task: Number(task.id) })
+  } catch (e) {
+    const why = errorText(e, 'en').slice(0, 300)
+    await db.updateTrigger(t.id, { ...seen, last_status: 'failed', last_error: why })
+    return send(e.status === 429 ? 429 : 500, { error: why })
+  }
+}
+
+async function fireTrigger(t, summary) {
+  if (!await db.getAgent(t.agent_id)) throw new Say('trigger.noAgent')
+  if (t.scope === 'group' && !(await db.listGroups()).find(g => g.id === t.scope_id)?.members.includes(t.agent_id))
+    throw new Say('trigger.noAgent')
+  if (await db.openTaskCount(t.scope, t.scope_id) >= MAX_OPEN_PER_CONVERSATION) throw new Say('trigger.busy', {}, 429)
+  let session = t.session_id && await db.getSession(t.session_id) ? t.session_id : null
+  if (!session) {
+    session = (await db.createSession(t.scope, t.scope_id, t.name)).id
+    await db.updateTrigger(t.id, { session_id: session })
+  }
+  const task = await db.createTask({ scope: t.scope, scope_id: t.scope_id, session_id: session, agent_id: t.agent_id,
+    by_agent: t.agent_id, title: t.name, brief: clipText(briefFor(t, summary), BRIEF_HARD_MAX) })
+  enqueueTask(task)
+  return task
+}
+
+/** Where a trigger is reached from outside: PUBLIC_URL, else the HTTPS name (PUBLIC_HOST), else how this page was reached. */
+function hookBase(req) {
+  if (env.PUBLIC_URL) return env.PUBLIC_URL.replace(/\/+$/, '')
+  if (env.PUBLIC_HOST) return `https://${env.PUBLIC_HOST}`
+  const proto = String(req.headers['x-forwarded-proto'] ?? 'http').split(',')[0].trim()
+  return `${proto}://${req.headers['x-forwarded-host'] ?? req.headers.host ?? 'localhost'}`
+}
+const triggerView = (x, req) => ({
+  id: x.id, kind: x.kind, name: x.name, target: { kind: x.scope === 'group' ? 'group' : 'agent', id: x.scope_id },
+  agent_id: x.agent_id, prompt: x.prompt, ...x.filters, max_per_hour: x.max_per_hour, enabled: x.enabled,
+  created_at: x.created_at ? +new Date(x.created_at) : null, last_at: x.last_at ? +new Date(x.last_at) : null, last_status: x.last_status, last_error: x.last_error, fired: x.fired,
+  url: `${hookBase(req)}/hooks/${x.id}`,
+})
+/** What is wrong with a trigger, in the person's words: the field's own message, else the generic one. */
+const triggerBad = (t, e) => { const k = `trigger.bad.${e.field}`, m = t(k); return m === k ? t('trigger.bad', { field: e.field ?? 'trigger' }) : m }
+/** The agent a trigger in this conversation runs: the agent of a DM; in a group the one named, else the lead, else the first. */
+async function triggerAgent(scope, scopeId, wanted) {
+  if (scope === 'dm') return (await db.getAgent(scopeId)) ? scopeId : null
+  const g = (await db.listGroups()).find(x => x.id === scopeId)
+  if (!g) return null
+  if (wanted) return g.members.includes(wanted) ? wanted : null
+  return g.lead && g.members.includes(g.lead) ? g.lead : g.members[0] ?? null
+}
+
 async function checkinSession(agentId, lang = 'en') {
   const a = await db.getAgent(agentId)
   if (a?.checkin_session && await db.getSession(a.checkin_session)) return a.checkin_session
@@ -3291,6 +3377,12 @@ const server = createServer(async (req, res) => {
     try { await db.pool.query('select 1'); return send(200, { ok: true }) }
     catch (e) { return send(503, { ok: false, error: String(e.message ?? e) }) }
   }
+  // External triggers (web/triggers.mjs): no access token — the sender signs with the trigger's own secret instead.
+  const hook = url.pathname.match(/^\/hooks\/([A-Za-z0-9_-]{16,64})$/)
+  if (hook) return handleHook(req, hook[1], send).catch(e => {
+    console.error('[hook]', e)
+    if (!res.headersSent) send(500, { error: 'internal error' })
+  })
   if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
   // HttpOnly: no script on the page can read it. Lax, not Strict: Strict would drop it when the page is
   // opened from a link in another app, and every write here is a POST/PUT/PATCH/DELETE, which Lax
@@ -3645,6 +3737,44 @@ const server = createServer(async (req, res) => {
         return send(200, await db.saveSkill({ ...cur, ...row, source: edited ? 'human' : cur.source }))
       }
       if (!km[2] && req.method === 'DELETE') { await db.deleteSkill(cur.id); return send(200, { ok: true }) }
+    }
+
+    // ---- External triggers ----
+    if (url.pathname === '/api/triggers' && req.method === 'GET') {
+      const kind = url.searchParams.get('kind'), id = url.searchParams.get('id') ?? ''
+      return send(200, (await db.listTriggers(scopeOf(kind), id)).map(x => triggerView(x, req)))
+    }
+    if (url.pathname === '/api/triggers' && req.method === 'POST') {
+      const b = await readBody(req)
+      const scope = scopeOf(b.target?.kind), scopeId = str(b.target?.id)
+      const agentId = await triggerAgent(scope, scopeId, b.agent ? str(b.agent) : null)
+      if (!agentId) return send(400, { error: t('trigger.noAgent') })
+      let ok
+      try { ok = checkTrigger(b) } catch (e) { return send(400, { error: triggerBad(t, e) }) }
+      const secret = randomBytes(24).toString('hex')
+      const row = await db.createTrigger({ id: randomBytes(18).toString('base64url'), ...ok, scope, scope_id: scopeId,
+        agent_id: agentId, secret_enc: seal(await secretKey(), secret) })
+      // The secret is shown this once: it goes into GitHub (or the other service), and is never sent back again.
+      return send(200, { ...triggerView(row, req), secret })
+    }
+    const trm = url.pathname.match(/^\/api\/triggers\/([A-Za-z0-9_-]{16,64})(\/secret)?$/)
+    if (trm) {
+      const cur = await db.getTrigger(trm[1])
+      if (!cur) return send(404, { error: t('trigger.none') })
+      if (trm[2] && req.method === 'POST') {
+        const secret = randomBytes(24).toString('hex')
+        const row = await db.updateTrigger(cur.id, { secret_enc: seal(await secretKey(), secret) })
+        return send(200, { ...triggerView(row, req), secret })
+      }
+      if (!trm[2] && req.method === 'PATCH') {
+        const b = await readBody(req)
+        let ok
+        try { ok = checkTrigger(b, cur) } catch (e) { return send(400, { error: triggerBad(t, e) }) }
+        const agent_id = b.agent !== undefined ? await triggerAgent(cur.scope, cur.scope_id, str(b.agent) || null) : cur.agent_id
+        if (!agent_id) return send(400, { error: t('trigger.noAgent') })
+        return send(200, triggerView(await db.updateTrigger(cur.id, { ...ok, agent_id }), req))
+      }
+      if (!trm[2] && req.method === 'DELETE') { await db.deleteTrigger(cur.id); return send(200, { ok: true }) }
     }
 
     // ---- Scheduled tasks ----
@@ -4139,6 +4269,7 @@ const server = createServer(async (req, res) => {
         // Someone who left the group stops working for it: their open tasks here are stopped (with a card saying so).
         for (const x of await db.listTasks('group', g.id, 1000))
           if (gone.includes(x.agent_id) && isOpen(x)) await stopTask(x)
+        for (const id of gone) await db.deleteTriggersOf(id, 'group', g.id)
         dropContainersOf(gone)
       }
       return send(200, saved)
@@ -4237,6 +4368,8 @@ await mkdir(join(LOCALWORK, 'agents'), { recursive: true })
 await mkdir(join(LOCALWORK, 'groups'), { recursive: true })
 await mkdir(FILES_DIR, { recursive: true })
 await db.pruneEffects().catch(e => console.warn(`[effects] could not prune: ${e.message}`))
+await db.pruneDeliveries().catch(() => {})
+setInterval(() => db.pruneDeliveries().catch(() => {}), 3_600_000).unref()
 await sweepHelpers().catch(e => console.warn(`[helper] sweeping after the restart: ${e.message}`))
 await recoverTasks()
 await recoverFrontRuns()

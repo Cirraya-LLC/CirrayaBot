@@ -155,7 +155,8 @@ class Pending {
 }
 
 class Workbench extends ChangeNotifier {
-  Workbench(Settings settings) : api = Api(settings) {
+  /// [api] stands in for the server in tests.
+  Workbench(Settings settings, {Api? api}) : api = api ?? Api(settings) {
     // Scheduled tasks write into conversations while nobody is typing, so look
     // again every so often: left-list previews, task states, and the open
     // conversation's history when something new landed in it.
@@ -164,6 +165,7 @@ class Workbench extends ChangeNotifier {
 
   late final Timer _poller;
   List<Routine> routines = const [];
+  List<Trigger> triggers = const [];
 
   /// The open conversation's background tasks, newest first.
   List<Task> tasks = const [];
@@ -355,6 +357,7 @@ class Workbench extends ChangeNotifier {
     selfMemory = '';
     selfMemoryFor = null;
     routines = const [];
+    triggers = const [];
     skills = const [];
     secrets = const [];
     tasks = const [];
@@ -365,6 +368,7 @@ class Workbench extends ChangeNotifier {
     notifyListeners();
     unawaited(_loadMemory(c, ticket));
     unawaited(loadRoutines());
+    unawaited(loadTriggers());
     unawaited(loadSkills());
     unawaited(loadSecrets());
     unawaited(loadTasks());
@@ -558,6 +562,19 @@ class Workbench extends ChangeNotifier {
     }
   }
 
+  Future<void> loadTriggers() async {
+    final c = current;
+    if (c == null) return;
+    try {
+      final list = await api.triggers(c);
+      if (current?.id != c.id) return;
+      triggers = list;
+      notifyListeners();
+    } on ApiException catch (_) {
+      // Best effort, like routines.
+    }
+  }
+
   Future<void> loadSecrets() async {
     final c = current;
     if (c == null || c.isGroup) return;
@@ -611,6 +628,7 @@ class Workbench extends ChangeNotifier {
     final c = current;
     if (c == null || busy || ticket != _shown) return;
     unawaited(loadRoutines());
+    unawaited(loadTriggers());
     if (runs.isEmpty) unawaited(loadRuns()); // started elsewhere (another device, a scheduled task)
     if (c.at != before) {
       // A scheduled task may have written into a session of its own

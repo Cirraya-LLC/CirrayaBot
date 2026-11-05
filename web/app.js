@@ -299,6 +299,7 @@ async function openConv(c) {
   renderSpend(c)
   loadMemory(c)
   loadRoutines()
+  loadTriggers()
   loadBotSkills()
   loadBotSecrets()
   loadDesktop()
@@ -2952,6 +2953,111 @@ $('#rrun').onclick = async () => {
   $('#rdlg').close(); loadRoutines()
 }
 
+// Triggers: a URL that a service (GitHub, or anything that sends a webhook) calls; an event that passes the filters
+// becomes a background task. The secret is only ever shown in the answer that made it.
+let TGS = [], tgEditing = null
+const tgUrlLocal = u => { try { return /^(localhost|127\.|\[::1\]|0\.0\.0\.0)/.test(new URL(u).hostname) } catch { return false } }
+function tgResult(x) {
+  const why = x.last_error || ''
+  return x.last_status === 'fired' ? t('tg.st.fired') : x.last_status === 'skipped' ? t('tg.st.skipped', { why })
+    : x.last_status === 'limited' ? t('tg.st.limited') : x.last_status === 'failed' ? t('tg.st.failed', { why }) : ''
+}
+function tgState(x) {
+  if (!x.enabled) return `<span class="st">${esc(t('r.paused'))}</span>`
+  if (x.last_status === 'failed') return `<span class="st bad" title="${esc(x.last_error)}">${esc(t('tg.failed'))}</span>`
+  if (x.last_status === 'limited') return `<span class="st">${esc(t('tg.limited'))}</span>`
+  return ''
+}
+async function loadTriggers() {
+  const c = cur; if (!c) return
+  const list = await fetch(api(`/api/triggers?kind=${c.kind}&id=${c.id}`)).then(r => r.ok ? r.json() : []).catch(() => [])
+  if (cur !== c) return
+  TGS = list
+  const box = $('#triggers'); box.innerHTML = ''
+  for (const x of list) {
+    const el = document.createElement('div')
+    el.className = 'rt' + (x.enabled ? '' : ' off')
+    const who = c.kind === 'group' ? ` · ${bot(x.agent_id)?.name ?? x.agent_id}` : ''
+    const what = x.kind === 'github' ? `GitHub · ${(x.events ?? []).join(', ')}` : t('tg.kindWebhook')
+    el.innerHTML = `<b>${esc(x.name)} ${tgState(x)}</b><small>${esc(what + who)}${x.fired ? ' · ' + esc(t('tg.count', { n: x.fired })) : ''}</small>`
+    el.onclick = () => editTrigger(x)
+    box.appendChild(el)
+  }
+}
+const tgShowKind = () => { const k = $('#tgkind').value; $('#tgdlg [data-k="github"]').hidden = k !== 'github' }
+$('#tgkind').onchange = tgShowKind
+function tgConnection(x, secret) {
+  $('#tgconn').hidden = !x
+  if (!x) return
+  $('#tghow').textContent = t(x.kind === 'github' ? 'tg.howGithub' : 'tg.howWebhook') + (tgUrlLocal(x.url) ? ' ' + t('tg.localUrl') : '')
+  $('#tgurl').textContent = x.url
+  $('#tgsecrow').hidden = !secret
+  $('#tgsecret').textContent = secret || ''
+  $('#tgsecnote').textContent = t(secret ? 'tg.secretOnce' : 'tg.secretHidden')
+}
+function editTrigger(x, secret = '') {
+  if (!cur) return
+  tgEditing = x
+  $('#tgtitle').textContent = x ? t('common.editNamed', { name: x.name }) : t('tg.new')
+  $('#tgkind').value = x?.kind ?? 'github'
+  $('#tgkind').disabled = !!x
+  $('#tgname').value = x?.name ?? ''
+  $('#tgprompt').value = x?.prompt ?? ''
+  const c = CONVS.find(y => y.kind === cur.kind && y.id === cur.id)
+  $('#tgwho').hidden = cur.kind !== 'group'
+  $('#tgagent').innerHTML = `<option value="">${esc(t('tg.lead'))}</option>` + (c?.members ?? [])
+    .map(id => `<option value="${esc(id)}">${esc(bot(id)?.name ?? id)}</option>`).join('')
+  $('#tgagent').value = x && cur.kind === 'group' ? x.agent_id : ''
+  $('#tgevents').value = (x?.events ?? []).join(', ')
+  $('#tgactions').value = (x?.actions ?? []).join(', ')
+  $('#tgbranches').value = (x?.branches ?? []).join(', ')
+  $('#tgkeywords').value = (x?.keywords ?? []).join(', ')
+  $('#tgper').value = x?.max_per_hour ?? 6
+  $('#tgon').checked = x?.enabled ?? true
+  $('#tgstat').textContent = !x ? '' : x.last_at
+    ? t('tg.last', { time: new Date(x.last_at).toLocaleString(lang), result: tgResult(x) }) : t('tg.never')
+  $('#tgdel').style.display = $('#tgrot').style.display = x ? '' : 'none'
+  tgConnection(x, secret)
+  tgShowKind()
+  if (!$('#tgdlg').open) $('#tgdlg').showModal()
+}
+$('#addtg').onclick = () => editTrigger(null)
+$('#tgcancel').onclick = () => $('#tgdlg').close()
+$('#tgdlg').addEventListener('click', async e => {
+  const b = e.target.closest('[data-copy]'); if (!b) return
+  const text = $('#' + b.dataset.copy).textContent
+  try { await navigator.clipboard.writeText(text) } catch { getSelection().selectAllChildren($('#' + b.dataset.copy)); document.execCommand('copy') }
+  b.textContent = t('tg.copied'); setTimeout(() => { b.textContent = t('tg.copy') }, 1500)
+})
+$('#tgsave').onclick = async () => {
+  const kind = $('#tgkind').value
+  const body = { name: $('#tgname').value.trim(), prompt: $('#tgprompt').value.trim(), keywords: $('#tgkeywords').value,
+    max_per_hour: Number($('#tgper').value), enabled: $('#tgon').checked }
+  if (kind === 'github') Object.assign(body, { events: $('#tgevents').value, actions: $('#tgactions').value, branches: $('#tgbranches').value })
+  if (cur.kind === 'group') body.agent = $('#tgagent').value || null
+  const r = tgEditing
+    ? await fetch(api(`/api/triggers/${tgEditing.id}`), { method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
+    : await fetch(api('/api/triggers'), { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ ...body, kind, target: { kind: cur.kind, id: cur.id } }) })
+  if (!r.ok) { alert(await errText(r)); return }
+  const x = await r.json()
+  loadTriggers()
+  // A new one stays open once more: its address and secret have to be copied to the service, and the secret is never shown again.
+  if (tgEditing) $('#tgdlg').close(); else editTrigger(x, x.secret)
+}
+$('#tgrot').onclick = async () => {
+  if (!tgEditing || !confirm(t('tg.confirmRotate', { name: tgEditing.name }))) return
+  const r = await fetch(api(`/api/triggers/${tgEditing.id}/secret`), { method:'POST' })
+  if (!r.ok) { alert(await errText(r)); return }
+  const x = await r.json()
+  editTrigger(x, x.secret)
+}
+$('#tgdel').onclick = async () => {
+  if (!tgEditing || !confirm(t('tg.confirmDelete', { name: tgEditing.name }))) return
+  await fetch(api(`/api/triggers/${tgEditing.id}`), { method:'DELETE' })
+  $('#tgdlg').close(); loadTriggers()
+}
+
 // Scheduled tasks write into conversations unattended, so poll: left previews, task status,
 // and redraw the open conversation on new messages. Not while busy — a reply is streaming.
 setInterval(async () => {
@@ -2960,6 +3066,7 @@ setInterval(async () => {
   CONVS = await fetch(api('/api/conversations')).then(r => r.json()).catch(() => CONVS)
   renderConvs()
   loadRoutines()
+  loadTriggers()
   loadUsage()
   if (!RUNS.length) loadRuns()                      // started elsewhere (another tab, a scheduled task)
   const now = cur && CONVS.find(x => x.kind === cur.kind && x.id === cur.id)

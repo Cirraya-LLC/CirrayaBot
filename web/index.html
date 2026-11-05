@@ -508,6 +508,11 @@
   .tool .secask input{flex:1;min-width:0;background:var(--field);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit}
   .tool .secask button{padding:3px 12px;font-size:11.5px}
   .rt .st.run{background:var(--tint);color:var(--tintink)}
+  #tgdlg [data-k] input,#tgdlg>input,#tgdlg>select,#tgwho select{width:100%}
+  #tgdlg{width:560px}
+  .tgper{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);margin-bottom:6px} #tgdlg .tgper input{width:90px;margin:0}
+  .tgcopy{display:flex;gap:8px;align-items:center;margin:6px 0} .tgcopy[hidden]{display:none} .tgcopy code{flex:1;min-width:0;overflow-wrap:anywhere;font-size:12px;
+    background:var(--field);padding:6px 8px;border-radius:6px;user-select:all}
   .rt.off b{color:var(--dim)}
   .rt .st.warn,.tk .st.warn{background:var(--warnbg);color:var(--warn)}
 
@@ -786,6 +791,9 @@
   <div class="s2h sub" data-i18n="s2.routines"></div>
   <div id="routines"></div>
   <button class="addm" id="addrt"><b>＋</b> <span data-i18n="s2.addRoutine"></span></button>
+  <div class="s2h sub" data-i18n="s2.triggers"></div>
+  <div id="triggers"></div>
+  <button class="addm" id="addtg"><b>＋</b> <span data-i18n="s2.addTrigger"></span></button>
   <div class="s2mem">
     <small id="memtitle" data-i18n="mem.title"></small>
     <textarea id="mem" data-i18n-placeholder="mem.agentPh"></textarea>
@@ -868,6 +876,39 @@
     <button class="btn" id="rrun" data-i18n="r.runNow"></button>
     <button class="btn" id="rcancel" data-i18n="common.cancel"></button>
     <button class="btn pri" id="rsave" data-i18n="common.save"></button>
+  </div>
+</dialog>
+
+<dialog id="tgdlg">
+  <h4 id="tgtitle" data-i18n="tg.new"></h4>
+  <select id="tgkind">
+    <option value="github" data-i18n="tg.kindGithub"></option>
+    <option value="webhook" data-i18n="tg.kindWebhook"></option>
+  </select>
+  <input type="text" id="tgname" data-i18n-placeholder="tg.namePh" autocomplete="off" maxlength="60">
+  <textarea id="tgprompt" data-i18n-placeholder="tg.promptPh"></textarea>
+  <div id="tgwho"><small class="rhint" data-i18n="tg.agent"></small><select id="tgagent"></select></div>
+  <div data-k="github">
+    <input type="text" id="tgevents" data-i18n-placeholder="tg.eventsPh" autocomplete="off">
+    <input type="text" id="tgactions" data-i18n-placeholder="tg.actionsPh" autocomplete="off">
+    <input type="text" id="tgbranches" data-i18n-placeholder="tg.branchesPh" autocomplete="off">
+  </div>
+  <input type="text" id="tgkeywords" data-i18n-placeholder="tg.keywordsPh" autocomplete="off">
+  <label class="tgper"><input type="number" id="tgper" min="1" max="60" value="6"> <span data-i18n="tg.perHour"></span></label>
+  <label class="pick"><input type="checkbox" id="tgon" checked> <span data-i18n="r.enabled"></span></label>
+  <div id="tgconn" hidden>
+    <small class="rhint" id="tghow"></small>
+    <div class="tgcopy"><code id="tgurl"></code><button class="btn" data-copy="tgurl" data-i18n="tg.copy"></button></div>
+    <div class="tgcopy" id="tgsecrow" hidden><code id="tgsecret"></code><button class="btn" data-copy="tgsecret" data-i18n="tg.copy"></button></div>
+    <small class="rhint" id="tgsecnote"></small>
+  </div>
+  <small class="rhint" id="tgstat"></small>
+  <small class="rhint" data-i18n="tg.safety"></small>
+  <div class="acts">
+    <button class="btn" style="margin-right:auto;color:var(--bad)" id="tgdel" data-i18n="common.delete"></button>
+    <button class="btn" id="tgrot" data-i18n="tg.newSecret"></button>
+    <button class="btn" id="tgcancel" data-i18n="common.cancel"></button>
+    <button class="btn pri" id="tgsave" data-i18n="common.save"></button>
   </div>
 </dialog>
 

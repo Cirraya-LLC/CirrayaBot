@@ -286,6 +286,36 @@ create table if not exists effects (
 );
 create index if not exists effects_run_idx on effects (run, call_key, id desc);
 
+-- External event triggers (web/triggers.mjs): /hooks/<id> called by GitHub or a signed webhook; a matching event is a
+-- background task for agent_id in the conversation (scope, scope_id), in a session of its own (session_id).
+create table if not exists triggers (
+  id           text primary key,
+  kind         text not null check (kind in ('github','webhook')),
+  name         text not null,
+  scope        text not null,
+  scope_id     text not null,
+  agent_id     text not null,
+  prompt       text not null,
+  filters      jsonb not null default '{}',
+  max_per_hour int not null default 6,
+  secret_enc   text not null,
+  enabled      boolean not null default true,
+  session_id   text,
+  created_at   timestamptz not null default now(),
+  last_at      timestamptz,
+  last_status  text not null default '',
+  last_error   text not null default '',
+  fired        int not null default 0
+);
+-- Every delivery seen, so one sent again is not run twice; the ones that ran count against the ceiling per hour.
+create table if not exists trigger_deliveries (
+  trigger_id text not null,
+  delivery   text not null,
+  ran        boolean not null default false,
+  at         timestamptz not null default now(),
+  primary key (trigger_id, delivery)
+);
+
 -- The voice an agent speaks with on an upstream voice (settings.voice.tts): '' = the default one.
 alter table agents add column if not exists voice text not null default '';
 
@@ -424,6 +454,7 @@ export async function deleteAgent(id) {
   await q('delete from agents where id = $1', [id])
   await q('delete from settings where key = any($1)', [[memKey('agent', id), selfMemKey(id), `${selfMemKey(id)}:prev`, `memory.tidied:${id}`]])
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
+  await deleteTriggers(`(scope = 'dm' and scope_id = $1) or agent_id = $1`, [id])
   await q(`update skills set agents = array_remove(agents, $1)`, [id])
   await q('delete from secrets where agent_id = $1', [id])
   await q('delete from front_runs where scope = $1 and scope_id = $2', ['dm', id])
@@ -453,6 +484,7 @@ export async function deleteGroup(id) {
   await q('delete from groups where id = $1', [id])
   await q('delete from settings where key = $1', [memKey('group', id)])
   await q(`delete from routines where target_kind = 'group' and target_id = $1`, [id])
+  await deleteTriggers(`scope = 'group' and scope_id = $1`, [id])
   return dropFiles(`scope = 'group' and scope_id = $1`, [id])
 }
 
@@ -1106,3 +1138,51 @@ export async function dropStaleUploads(hours = 24) {
 export async function dropUpload(id) {
   return dropFiles('id = $1 and session_id is null', [id])
 }
+
+// ---------- triggers ----------
+const TRIGGER_COLS = `id, kind, name, scope, scope_id, agent_id, prompt, filters, max_per_hour, enabled, session_id,
+  created_at, last_at, last_status, last_error, fired`
+
+export async function createTrigger(t) {
+  const { rows } = await q(`insert into triggers (id, kind, name, scope, scope_id, agent_id, prompt, filters, max_per_hour, secret_enc, enabled)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning ${TRIGGER_COLS}`,
+    [t.id, t.kind, t.name, t.scope, t.scope_id, t.agent_id, t.prompt, JSON.stringify(t.filters ?? {}), t.max_per_hour,
+     t.secret_enc, t.enabled !== false])
+  return rows[0]
+}
+export const listTriggers = async (scope, scopeId) =>
+  (await q(`select ${TRIGGER_COLS} from triggers where scope = $1 and scope_id = $2 order by created_at`, [scope, scopeId])).rows
+/** With its sealed secret: only the hook endpoint (and rotating it) needs that. */
+export const getTrigger = async (id, { secret = false } = {}) =>
+  (await q(`select ${TRIGGER_COLS}${secret ? ', secret_enc' : ''} from triggers where id = $1`, [id])).rows[0] ?? null
+const TRIGGER_FIELDS = ['name', 'agent_id', 'prompt', 'filters', 'max_per_hour', 'enabled', 'session_id', 'secret_enc',
+  'last_at', 'last_status', 'last_error']
+export async function updateTrigger(id, fields, { fired = false } = {}) {
+  const sets = [], params = [id]
+  for (const k of TRIGGER_FIELDS) if (fields[k] !== undefined) {
+    params.push(k === 'filters' ? JSON.stringify(fields[k]) : fields[k])
+    sets.push(`${k} = $${params.length}`)
+  }
+  if (fired) sets.push('fired = fired + 1')
+  if (!sets.length) return getTrigger(id)
+  return (await q(`update triggers set ${sets.join(', ')} where id = $1 returning ${TRIGGER_COLS}`, params)).rows[0] ?? null
+}
+async function deleteTriggers(where, params) {
+  const ids = (await q(`delete from triggers where ${where} returning id`, params)).rows.map(r => r.id)
+  if (ids.length) await q('delete from trigger_deliveries where trigger_id = any($1)', [ids])
+}
+export const deleteTrigger = id => deleteTriggers('id = $1', [id])
+/** The triggers an agent runs in one group (it left the group: they go with it). */
+export const deleteTriggersOf = (agentId, scope, scopeId) =>
+  deleteTriggers('agent_id = $1 and scope = $2 and scope_id = $3', [agentId, scope, scopeId])
+/** False when this delivery was already seen. */
+export async function noteDelivery(triggerId, delivery) {
+  return (await q(`insert into trigger_deliveries (trigger_id, delivery) values ($1, $2) on conflict do nothing returning 1`,
+    [triggerId, delivery])).rowCount > 0
+}
+export const markDeliveryRan = (triggerId, delivery) =>
+  q('update trigger_deliveries set ran = true where trigger_id = $1 and delivery = $2', [triggerId, delivery])
+export const ranLastHour = async triggerId =>
+  (await q(`select count(*)::int as n from trigger_deliveries where trigger_id = $1 and ran and at > now() - interval '1 hour'`,
+    [triggerId])).rows[0].n
+export const pruneDeliveries = () => q(`delete from trigger_deliveries where at < now() - interval '2 days'`)

@@ -36,6 +36,11 @@ of each answering on their own.
   conversations still being worked on, and **Stop** is on the conversation. Switch an Agent (or
   the whole platform, in ⚙) to *manual* to go back to a few steps per message. Approvals and the
   daily cap apply either way.
+- **Triggers from outside** — give a conversation a URL that GitHub (or anything that sends a webhook)
+  calls; an event that passes its filters (GitHub events, actions, branches, keywords) becomes a background
+  task for the Agent. Every delivery must be signed with the trigger's secret, runs once however often it is
+  resent, and has a ceiling per hour; what arrives is handed over as data, never as instructions. Set
+  `PUBLIC_URL` (or `PUBLIC_HOST`) so the address shown is one services outside can reach.
 - **Bring your own model upstream** — name / endpoint URL / key / model / context window.
   Configure several and switch any time. Three API shapes are supported:
   OpenAI Chat Completions, OpenAI Responses and Anthropic Messages.
@@ -202,6 +207,8 @@ doesn't reach inside a VM or gVisor.
 ## Exposing it to the internet
 
 Set `BIND_ADDR=0.0.0.0` in `.env`, then `docker compose up -d`.
+`/hooks/<id>` (triggers) is the one path that needs no access token: it is checked against the trigger's
+own secret instead, so a service can call it.
 From then on `ACCESS_TOKEN` is the only door — don't paste the link with `?k=` anywhere public.
 If it is asked to listen externally without a token, the service **refuses to start** rather than
 printing a warning nobody reads.

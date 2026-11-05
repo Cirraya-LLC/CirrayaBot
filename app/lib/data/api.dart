@@ -760,6 +760,71 @@ class Routine {
   );
 }
 
+/// An outside event source: a URL a service calls (GitHub, or any webhook); an event that passes the filters becomes a
+/// background task for [agentId]. The secret is never part of this — the server sends it only when it makes one.
+class Trigger {
+  const Trigger({
+    required this.id,
+    required this.kind,
+    required this.name,
+    required this.agentId,
+    required this.prompt,
+    required this.events,
+    required this.actions,
+    required this.branches,
+    required this.keywords,
+    required this.maxPerHour,
+    required this.enabled,
+    required this.url,
+    required this.fired,
+    required this.lastAt,
+    required this.lastStatus,
+    required this.lastError,
+  });
+
+  final String id;
+
+  /// `github` / `webhook`.
+  final String kind;
+  final String name;
+  final String agentId;
+  final String prompt;
+  final List<String> events;
+  final List<String> actions;
+  final List<String> branches;
+  final List<String> keywords;
+  final int maxPerHour;
+  final bool enabled;
+  final String url;
+  final int fired;
+  final int? lastAt;
+
+  /// '' (never) / `fired` / `skipped` / `limited` / `failed`.
+  final String lastStatus;
+  final String lastError;
+
+  static List<String> _strings(Object? v) => [for (final x in (v as List?) ?? const []) if (x is String) x];
+
+  static Trigger fromJson(Map<String, Object?> j) => Trigger(
+    id: (j['id'] as String?) ?? '',
+    kind: (j['kind'] as String?) ?? 'webhook',
+    name: (j['name'] as String?) ?? '',
+    agentId: (j['agent_id'] as String?) ?? '',
+    prompt: (j['prompt'] as String?) ?? '',
+    events: _strings(j['events']),
+    actions: _strings(j['actions']),
+    branches: _strings(j['branches']),
+    keywords: _strings(j['keywords']),
+    maxPerHour: (j['max_per_hour'] as num?)?.toInt() ?? 6,
+    enabled: (j['enabled'] as bool?) ?? true,
+    url: (j['url'] as String?) ?? '',
+    fired: (j['fired'] as num?)?.toInt() ?? 0,
+    lastAt: (j['last_at'] as num?)?.toInt(),
+    lastStatus: (j['last_status'] as String?) ?? '',
+    lastError: (j['last_error'] as String?) ?? '',
+  );
+}
+
 class Provider {
   const Provider({
     required this.id,
@@ -1441,6 +1506,28 @@ class Api {
 
   Future<void> deleteRoutine(String id) => _json('DELETE', '/api/routines/$id');
   Future<void> runRoutine(String id) => _json('POST', '/api/routines/$id/run');
+
+  Future<List<Trigger>> triggers(Conversation c) async {
+    final j = await _list('/api/triggers?kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}');
+    return j.map((e) => Trigger.fromJson(e as Map<String, Object?>)).toList();
+  }
+
+  /// Make a trigger. The secret comes back this once, beside it.
+  Future<(Trigger, String)> createTrigger(Map<String, Object?> body) async {
+    final j = await _map('POST', '/api/triggers', body);
+    return (Trigger.fromJson(j), (j['secret'] as String?) ?? '');
+  }
+
+  Future<Trigger> updateTrigger(String id, Map<String, Object?> body) async =>
+      Trigger.fromJson(await _map('PATCH', '/api/triggers/$id', body));
+
+  /// Replace a trigger's secret; the old one stops working at once.
+  Future<(Trigger, String)> newTriggerSecret(String id) async {
+    final j = await _map('POST', '/api/triggers/$id/secret');
+    return (Trigger.fromJson(j), (j['secret'] as String?) ?? '');
+  }
+
+  Future<void> deleteTrigger(String id) => _json('DELETE', '/api/triggers/$id');
 
   Future<void> deleteProvider(String id) => _json('DELETE', '/api/providers/$id');
   Future<void> makeDefaultProvider(String id) => _json('POST', '/api/providers/$id/default');
