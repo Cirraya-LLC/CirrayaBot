@@ -49,24 +49,66 @@ MARK_JS = r"""
 """
 
 
-# What a person clicked or typed into, described the way a person would say it. Never an input's value:
-# clicking into a filled-in password box must not record the password.
-DESCRIBE_JS = r"""
-([x, y, focused]) => {
-  let el = focused ? document.activeElement : document.elementFromPoint(x, y)
-  if (!el || el === document.body || el === document.documentElement) return null
-  const t = el.closest('a,button,input,select,textarea,summary,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],label') || el
-  const tag = t.tagName.toLowerCase(), type = (t.getAttribute('type') || '').toLowerCase()
+# Listens inside every page for what a person does — clicks, typing, choices, Enter / Tab / Esc, scrolling — and
+# hands it to this daemon (the __maRec binding) while a demonstration is recorded. Wherever the input comes from (the
+# desktop, the browser view), the page sees it the same way. Elements are described the way a person would point at
+# them, never by an input's value: a password field's value goes only to scrub(), never into a step.
+REC_JS = r"""
+(() => {
+  if (window.__maRecOn) return
+  window.__maRecOn = true
   const clean = s => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 80)
-  const field = tag === 'input' || tag === 'textarea' || tag === 'select'
-  const text = field ? (['submit', 'button', 'reset'].includes(type) ? clean(t.value) : '') : clean(t.innerText)
-  const label = clean(t.getAttribute('aria-label') || (t.labels && t.labels[0] && t.labels[0].innerText) || t.getAttribute('title'))
-  return { tag, type, role: t.getAttribute('role') || '', text, label, name: clean(t.getAttribute('name')),
-           placeholder: clean(t.getAttribute('placeholder')), href: tag === 'a' ? String(t.href || '').slice(0, 200) : '',
-           password: type === 'password' }
-}
+  const describe = el => {
+    if (!el || !el.closest || el === document.body || el === document.documentElement) return null
+    const t = el.closest('a,button,input,select,textarea,summary,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],label') || el
+    const tag = t.tagName.toLowerCase(), type = (t.getAttribute('type') || '').toLowerCase()
+    const field = tag === 'input' || tag === 'textarea' || tag === 'select'
+    const text = field ? (['submit', 'button', 'reset'].includes(type) ? clean(t.value) : '') : clean(t.innerText)
+    const label = clean(t.getAttribute('aria-label') || (t.labels && t.labels[0] && t.labels[0].innerText) || t.getAttribute('title'))
+    return { tag, type, role: t.getAttribute('role') || '', text, label, name: clean(t.getAttribute('name')),
+             placeholder: clean(t.getAttribute('placeholder')), href: tag === 'a' ? String(t.href || '').slice(0, 200) : '',
+             password: type === 'password' }
+  }
+  const send = ev => { try { window.__maRec && window.__maRec(ev) } catch (e) {} }
+  let enterAt = 0
+  // Enter in a form makes the browser itself click the submit button (detail 0, no mouse): that is the Enter.
+  addEventListener('click', e => { if (!(e.detail === 0 && Date.now() - enterAt < 500)) send({ kind: 'click', what: describe(e.target) }) }, true)
+  addEventListener('input', e => {
+    const el = e.target
+    if (!el || !(el.matches && el.matches('input,textarea') || el.isContentEditable)) return
+    const what = describe(el), secret = !!(what && what.password)
+    const value = String(el.isContentEditable ? el.innerText : el.value || '')
+    send({ kind: 'type', what, secret, text: secret ? '' : value.slice(0, 400), ...(secret ? { value } : {}) })
+  }, true)
+  addEventListener('change', e => {
+    const el = e.target
+    if (el && el.tagName === 'SELECT') send({ kind: 'select', what: describe(el), text: clean(el.selectedOptions[0] && el.selectedOptions[0].text) })
+  }, true)
+  addEventListener('keydown', e => {
+    if (e.key === 'Enter') enterAt = Date.now()
+    if (['Enter', 'Tab', 'Escape'].includes(e.key)) send({ kind: 'key', key: e.key })
+  }, true)
+  addEventListener('wheel', () => send({ kind: 'scroll' }), { capture: true, passive: true })
+})()
 """
 PROFILE = '/work/.browser'
+
+
+def no_password_saving(profile):
+    """Chromium on the desktop offers to save what a person types into a login form — into this profile, on the agent's
+    own machine. Passwords belong in the secret store (fill_secret), so its password manager is off, set before every
+    start (the person could have turned it back on in the browser's settings)."""
+    path = os.path.join(profile, 'Default', 'Preferences')
+    try:
+        with open(path) as f:
+            prefs = json.load(f)
+    except (OSError, ValueError):
+        prefs = {}
+    prefs['credentials_enable_service'] = False
+    prefs.setdefault('profile', {})['password_manager_enabled'] = False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(prefs, f)
 
 
 def free_profile(profile):
@@ -149,26 +191,51 @@ class Browser:
     def __init__(self):
         self.rec = None              # a person's demonstration being recorded: {at, steps, url}
         self.ctx = None
+        self.pw = None
+        self.starting = asyncio.Lock()
+        self.agent_acts = 0          # the agent's own actions in flight: what happens meanwhile isn't the person's
         self.lock = asyncio.Lock()
         self.watchers = set()        # one asyncio.Queue per stream viewer (holds only the latest frame)
         self.cast_page = None
         self.cdp = None
 
     async def start(self):
+        """On the agent's desktop when it has one (the person sees and uses the same windows), else headless.
+        Started again by page() when the person closes its last window."""
         free_profile(PROFILE)
-        pw = await async_playwright().start()
-        self.ctx = await pw.chromium.launch_persistent_context(
-            PROFILE,
-            executable_path=os.environ.get('CHROMIUM', '/usr/bin/chromium'),
-            headless=True,
-            # We're root in the container and chromium's sandbox won't start as root; the container itself is this Agent's sandbox
-            args=['--no-sandbox', '--disable-dev-shm-usage'],
-            viewport={'width': 1280, 'height': 800},
-            locale='zh-CN',
-        )
+        no_password_saving(PROFILE)
+        self.pw = self.pw or await async_playwright().start()
+        # Chromium's own sandbox won't start in here; the container (or VM) is this Agent's sandbox.
+        args = ['--no-sandbox', '--disable-dev-shm-usage']
+        common = dict(executable_path=os.environ.get('CHROMIUM', '/usr/bin/chromium'), locale='zh-CN')
+        if os.path.exists('/tmp/.X11-unix/X1'):
+            # Without --enable-automation: no "controlled by automated test software" bar across the person's screen.
+            self.ctx = await self.pw.chromium.launch_persistent_context(PROFILE, headless=False, no_viewport=True,
+                ignore_default_args=['--enable-automation'],
+                # --test-type: no "unsupported flag --no-sandbox" bar either (Chromium's own sandbox can't run in an
+                # unprivileged machine; the machine is the sandbox).
+                env={**os.environ, 'DISPLAY': ':1'}, args=args + ['--start-maximized', '--no-first-run', '--test-type',
+                '--no-default-browser-check', '--password-store=basic', '--hide-crash-restore-bubble'], **common)
+        else:
+            self.ctx = await self.pw.chromium.launch_persistent_context(PROFILE, headless=True, args=args,
+                viewport={'width': 1280, 'height': 800}, **common)
         self.ctx.set_default_timeout(20_000)
+        ctx = self.ctx
+        ctx.on('close', lambda _: self.closed(ctx))
+        await ctx.expose_binding('__maRec', self.on_rec)
+        await ctx.add_init_script(REC_JS)
+        ctx.on('page', self.watch_page)
+        for p in ctx.pages:
+            self.watch_page(p)
+
+    def closed(self, ctx):
+        if self.ctx is ctx:
+            self.ctx, self.cast_page, self.cdp = None, None, None
 
     async def page(self):
+        async with self.starting:
+            if self.ctx is None:
+                await self.start()
         pages = [p for p in self.ctx.pages if not p.is_closed()]
         p = pages[-1] if pages else await self.ctx.new_page()
         # The page changed (new tab, old one closed): move the stream over, or viewers keep seeing the old page
@@ -268,14 +335,13 @@ class Browser:
             if not rec:
                 return {'steps': [], 'seconds': 0}
             return {'steps': scrub(rec['steps'], rec['typed']), 'seconds': round(time.time() - rec['started'])}
-        human = a.get('human') and self.recording()
-        if human and kind == 'click_xy':        # described before the click: afterwards the page may have changed
-            self.note({'kind': 'click', 'what': await self.describe(await self.page(), float(a.get('x', 0)), float(a.get('y', 0)))})
-        async with self.lock:
-            out = await self._act(a)
-        if human:
-            await self.note_act(a)
-        return out
+        agent = not a.get('human')
+        self.agent_acts += agent
+        try:
+            async with self.lock:
+                return await self._act(a)
+        finally:
+            self.agent_acts -= agent
 
     # ── recording a person's demonstration ──
     def recording(self):
@@ -288,9 +354,9 @@ class Browser:
         steps = self.rec['steps']
         last = steps[-1] if steps else None
         # Typing into one field is one step, however many keystrokes; the same for scrolling.
-        if last and step['kind'] == 'type' and last['kind'] == 'type' and last['into'] == step['into']:
+        if last and step['kind'] in ('type', 'select') and last['kind'] == step['kind'] and last['into'] == step['into']:
             if not last.get('secret'):
-                last['text'] = (last['text'] + step['text'])[:400]
+                last['text'] = step['text']          # the page reports the field's whole value each time
             return
         if last and step['kind'] == 'scroll' and last['kind'] == 'scroll':
             return
@@ -301,53 +367,38 @@ class Browser:
             self.rec['url'] = p.url
             self.note({'kind': 'page', 'url': p.url[:300], 'title': (await title_of(p))[:120]})
 
-    async def describe(self, p, x=0, y=0, focused=False):
-        try:
-            return await p.evaluate(DESCRIBE_JS, [x, y, focused])
-        except Exception:
-            return None
+    def watch_page(self, p):
+        # A page moving on (a click, Enter, the address bar) is a step of its own.
+        p.on('framenavigated', lambda f: asyncio.ensure_future(self.on_nav(p)) if f == p.main_frame else None)
 
-    async def note_typed(self, p, text):
-        what = await self.describe(p, focused=True)
-        secret = bool(what and what.get('password'))
-        # Which field, without what is in it (a contenteditable's text changes with every key).
-        into = json.dumps({k: v for k, v in (what or {}).items() if k != 'text'}, sort_keys=True)
-        if secret:      # kept whole, typed key by key or not, so scrub() can find it wherever it shows up later
-            last = self.rec['steps'][-1]
-            if last['kind'] == 'type' and last.get('into') == into and self.rec['typed']:
-                self.rec['typed'][-1] += str(text)
-            else:
-                self.rec['typed'].append(str(text))
-        self.note({'kind': 'type', 'into': into, 'what': what, 'secret': secret, 'text': '' if secret else str(text)[:400]})
+    async def on_nav(self, p):
+        if self.recording() and not self.agent_acts:
+            await self.note_page(p)
 
-    async def note_input(self, p, ev):
-        t = ev.get('t')
-        if t == 'down' and (ev.get('button') or 'left') == 'left':
-            self.note({'kind': 'click', 'what': await self.describe(p, float(ev.get('x', 0)), float(ev.get('y', 0)))})
-        elif t == 'text':
-            await self.note_typed(p, ev.get('text', ''))
-        elif t in ('keydown', 'press') and str(ev.get('key')) in ('Enter', 'Tab', 'Escape'):
-            self.note({'kind': 'key', 'key': str(ev.get('key'))})
-        elif t == 'wheel':
-            self.note({'kind': 'scroll'})
-        # Every event is a chance to see that the page moved on (a click or Enter navigates a moment later).
-        await self.note_page(await self.page())
-
-    async def note_act(self, a):
-        if not self.recording():
+    async def on_rec(self, source, ev):
+        """What the page listener saw (REC_JS). Only while recording, and not while the agent itself is acting."""
+        if not self.recording() or self.agent_acts or not isinstance(ev, dict):
             return
-        p = await self.page()
-        kind = a.get('action')
-        if kind == 'open':
-            self.rec['url'] = p.url
-            self.note({'kind': 'open', 'url': p.url[:300], 'title': (await title_of(p))[:120]})
-        elif kind in ('back', 'reload'):
-            self.note({'kind': kind})
-        elif kind == 'type_raw':
-            await self.note_typed(p, a.get('text', ''))
-        elif kind == 'press':
-            self.note({'kind': 'key', 'key': str(a.get('key') or 'Enter')})
-        await self.note_page(p)
+        kind = ev.get('kind')
+        what = ev.get('what') if isinstance(ev.get('what'), dict) else None
+        if kind == 'click':
+            self.note({'kind': 'click', 'what': what})
+        elif kind in ('type', 'select'):
+            # Which field, without what is in it (a contenteditable's text changes with every key).
+            into = json.dumps({k: v for k, v in (what or {}).items() if k != 'text'}, sort_keys=True)
+            secret = kind == 'type' and bool(ev.get('secret'))
+            if secret:      # the field's whole value, kept only so scrub() can cut it out of URLs and titles
+                value = str(ev.get('value') or '')
+                last = self.rec['steps'][-1]
+                if last['kind'] == 'type' and last.get('into') == into and self.rec['typed']:
+                    self.rec['typed'][-1] = value
+                elif value:
+                    self.rec['typed'].append(value)
+            self.note({'kind': kind, 'into': into, 'what': what, 'secret': secret, 'text': '' if secret else str(ev.get('text') or '')[:400]})
+        elif kind == 'key':
+            self.note({'kind': 'key', 'key': str(ev.get('key'))[:20]})
+        elif kind == 'scroll':
+            self.note({'kind': 'scroll'})
 
     @staticmethod
     def origin_of(url):
@@ -416,6 +467,16 @@ class Browser:
         elif kind == 'reload':
             await p.reload(wait_until='domcontentloaded')
             await self.settle(p)
+        elif kind == 'open_tab':
+            # A link opened on the desktop (LibreOffice, the file manager, the panel): a tab in this browser.
+            url = str(a.get('url', '')).strip()
+            if url:
+                if '://' not in url and not url.startswith(('about:', 'file:')):
+                    url = 'https://' + url
+                if p.url not in ('about:blank', ''):
+                    p = await self.ctx.new_page()
+                await p.goto(url, wait_until='domcontentloaded')
+            await p.bring_to_front()
         elif kind == 'noop':
             pass
         elif kind == 'eval':
@@ -439,11 +500,6 @@ class Browser:
     async def input(self, ev):
         p = await self.page()
         t = ev.get('t')
-        rec = self.recording()
-        # A click is described before it happens: afterwards the page may have changed under it.
-        if rec and t == 'down':
-            await self.note_input(p, ev)
-            rec = False
         x, y = float(ev.get('x', 0)), float(ev.get('y', 0))
         button = ev.get('button') or 'left'
         if t == 'move':
@@ -466,8 +522,6 @@ class Browser:
         elif t == 'text':
             # typed text (including IME-composed text) is inserted into the page, same as a person typing
             await p.keyboard.insert_text(str(ev.get('text', '')))
-        if rec:
-            await self.note_input(p, ev)
 
 
 B = Browser()

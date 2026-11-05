@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# The desktop daemon inside each Agent's container: a screen of its own (Xvfb on :1) with a window
-# manager and a terminal, streamed as MJPEG and driven by mouse and keyboard — by a person (the input
-# channel, the same events the browser view sends) and by the agent (the computer tool, POST /).
-# Same shape as browserd.py, so the clients' browser viewer shows a desktop too.
+# The desktop daemon inside each Agent's container: a screen of its own (Xvfb on :1) running XFCE —
+# panel, file manager, text editor, terminal, LibreOffice, and Chromium as the agent's own browser
+# (browserd.py drives those same windows) — streamed as MJPEG and driven by mouse and keyboard: by a
+# person (the input channel) and by the agent (the computer tool, POST /). An older image without XFCE
+# gets the minimal screen it had: a window manager and a terminal.
 #
 # Started on demand (the server pushes this file and runs it), never at container start: an X server
 # idling in every agent's container costs memory for nothing.
 #
 # Listens on 127.0.0.1 only; reached through `docker exec ... curl` like the browser daemon.
-import asyncio, base64, hashlib, io, json, os, subprocess, sys, time, traceback
+import asyncio, base64, hashlib, io, json, os, shutil, subprocess, sys, time, traceback
 
 from PIL import Image
 from Xlib import X, XK, display
@@ -27,26 +28,141 @@ def spawn(argv, log):
                             start_new_session=True, cwd='/work')
 
 
+def x_alive():
+    """Is an X server answering on :1? Its socket and lock in /tmp outlive it when the machine is stopped and
+    started again (idle sleep), so their being there proves nothing."""
+    try:
+        display.Display(SCREEN).close()
+        return True
+    except Exception:
+        return False
+
+
 def start_screen():
-    """The X server, its window manager, and a terminal to begin with — only when the screen is new: the
-    daemon restarting (a new version pushed) must not open another terminal on a screen already in use."""
-    if os.path.exists('/tmp/.X11-unix/X1'):
+    """The X server and the desktop on it — only when no screen is running: the daemon restarting (a new
+    version pushed) must not start a second session on a screen already in use."""
+    if x_alive():
         return
+    for stale in ('/tmp/.X1-lock', '/tmp/.X11-unix/X1'):
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
     spawn(['Xvfb', SCREEN, '-screen', '0', f'{W}x{H}x24', '-nolisten', 'tcp', '-dpi', '96'], '/tmp/xvfb.log')
     for _ in range(100):
-        if os.path.exists('/tmp/.X11-unix/X1'):
+        if x_alive():
             break
         time.sleep(0.1)
-    time.sleep(0.3)
-    spawn(['openbox'], '/tmp/openbox.log')
-    spawn(['xsetroot', '-solid', '#2b2f36'], '/tmp/xsetroot.log')
-    terminal()
+    if shutil.which('xfce4-session'):
+        prepare_profile()
+        spawn(['dbus-run-session', '--', 'xfce4-session'], '/tmp/xfce.log')
+    else:
+        spawn(['openbox'], '/tmp/openbox.log')
+        spawn(['xsetroot', '-solid', '#2b2f36'], '/tmp/xsetroot.log')
+        terminal()
 
 
 def terminal():
     """A terminal window, in /work, where the person (or the agent) can type commands."""
-    spawn(['xterm', '-fa', 'DejaVu Sans Mono', '-fs', '11', '-bg', '#1e1f24', '-fg', '#e6e6e6', '-geometry', '110x30+60+50',
-           '-title', 'Terminal', '-e', 'bash', '-l'], '/tmp/xterm.log')
+    if shutil.which('xfce4-terminal'):
+        spawn(['xfce4-terminal', '--working-directory=/work'], '/tmp/terminal.log')
+    else:
+        spawn(['xterm', '-fa', 'DejaVu Sans Mono', '-fs', '11', '-bg', '#1e1f24', '-fg', '#e6e6e6', '-geometry', '110x30+60+50',
+               '-title', 'Terminal', '-e', 'bash', '-l'], '/tmp/xterm.log')
+
+
+# ── The desktop's settings, written into the agent's home (/work) before XFCE starts ──
+# Ours are rewritten every start (they may change with this file); XFCE's own are only seeded when missing,
+# so what the person or the agent changes on the desktop stays.
+HOME = os.environ.get('HOME', '/work')
+
+# The desktop's web browser is the agent's own: the Chromium browserd.py drives, with its profile and logins.
+# Opening a link (from LibreOffice, the file manager, the panel) asks browserd for a new tab, starting it if
+# it isn't running; without it, a plain Chromium on a separate profile.
+AGENT_BROWSER = r'''#!/bin/sh
+up() { curl -sf -m 2 http://127.0.0.1:9230/ >/dev/null; }
+if ! up && [ -f /tmp/browserd.py ]; then
+  setsid nohup python3 /tmp/browserd.py >/tmp/browserd.log 2>&1 </dev/null &
+  echo $! > /tmp/browserd.pid
+  for i in $(seq 60); do up && break; sleep 0.5; done
+fi
+if up; then
+  body=$(python3 -c 'import json,sys; print(json.dumps({"action": "open_tab", "url": sys.argv[1] if len(sys.argv) > 1 else ""}))' "$@")
+  curl -sf -m 60 -X POST -H 'content-type: application/json' --data-binary "$body" http://127.0.0.1:9230/ >/dev/null && exit 0
+fi
+exec chromium --no-sandbox --user-data-dir=/tmp/chromium-plain "$@"
+'''
+OURS = {
+    '.local/bin/agent-browser': (AGENT_BROWSER, 0o755),
+    '.local/share/applications/agent-browser.desktop': ('''[Desktop Entry]
+Type=Application
+Name=Web Browser
+Comment=The agent's browser
+Exec=agent-browser %u
+Icon=chromium
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+''', 0o644),
+    # The distro's own entry would start a second, separate Chromium: hidden.
+    '.local/share/applications/chromium.desktop': ('[Desktop Entry]\nType=Application\nName=Chromium\nHidden=true\n', 0o644),
+    '.local/share/xfce4/helpers/agent-browser.desktop': ('''[Desktop Entry]
+Version=1.0
+Icon=chromium
+Type=X-XFCE-Helper
+Name=Web Browser
+X-XFCE-Category=WebBrowser
+X-XFCE-Commands=agent-browser
+X-XFCE-CommandsWithParameter=agent-browser "%s"
+''', 0o644),
+    '.config/xfce4/helpers.rc': ('WebBrowser=agent-browser\n', 0o644),
+    '.config/mimeapps.list': ('''[Default Applications]
+text/html=agent-browser.desktop
+application/xhtml+xml=agent-browser.desktop
+x-scheme-handler/http=agent-browser.desktop
+x-scheme-handler/https=agent-browser.desktop
+''', 0o644),
+}
+XFCONF = '.config/xfce4/xfconf/xfce-perchannel-xml'
+SEEDS = {
+    # Without a panel config XFCE asks on first start whether to use the default one: answer for it.
+    f'{XFCONF}/xfce4-panel.xml': '/etc/xdg/xfce4/panel/default.xml',
+}
+# Compositing costs CPU on a screen nobody may be watching, and the screensaver would lock the person out.
+WRITES = {
+    f'{XFCONF}/xfwm4.xml': '''<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+  </property>
+</channel>
+''',
+    f'{XFCONF}/xfce4-screensaver.xml': '''<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-screensaver" version="1.0">
+  <property name="saver" type="empty"><property name="enabled" type="bool" value="false"/></property>
+  <property name="lock" type="empty"><property name="enabled" type="bool" value="false"/></property>
+</channel>
+''',
+}
+
+
+def prepare_profile():
+    for rel, (text, mode) in OURS.items():
+        path = os.path.join(HOME, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+        os.chmod(path, mode)
+    for rel, src in SEEDS.items():
+        path = os.path.join(HOME, rel)
+        if not os.path.exists(path) and os.path.exists(src):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            shutil.copyfile(src, path)
+    for rel, text in WRITES.items():
+        path = os.path.join(HOME, rel)
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(text)
 
 
 class Screen:

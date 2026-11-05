@@ -2027,23 +2027,21 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   const Divider(height: 22),
                   Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.spend'))),
                   for (final id in ids) _spendTile(id, group: c.isGroup),
+                  // One computer per agent, its browser on it. In a group, each member's that is running.
+                  // Keyed by agent: switching conversations must not show the previous Agent's screen for a moment.
                   const Divider(height: 22),
-                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('wb.browser'))),
-                  // Keyed by agent: switching conversations must not show the
-                  // previous Agent's page for a moment.
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('dk.heading'))),
                   for (final id in ids)
                     BrowserThumb(
-                      key: ValueKey('browser-$id'),
+                      key: ValueKey('desktop-$id'),
                       api: bench.api,
                       agentId: id,
                       name: bench.agentById(id)?.name ?? id,
+                      kind: 'desktop',
                       hideWhenOff: c.isGroup,
                     ),
                 ],
                 if (c != null && !c.isGroup) ...[
-                  const Divider(height: 22),
-                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('dk.heading'))),
-                  BrowserThumb(key: ValueKey('desktop-${c.id}'), api: bench.api, agentId: c.id, name: c.name, kind: 'desktop'),
                   InkWell(
                     key: const ValueKey('open-files'),
                     onTap: () => Navigator.of(context).push(

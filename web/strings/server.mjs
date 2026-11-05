@@ -56,6 +56,7 @@ export const serverStrings = {
   'teach.step.clickHref': ['Clicked {what} → {href}', '点击了{what} → {href}', '點擊了{what} → {href}'],
   'teach.step.type': ['Typed "{text}" into {what}', '在{what}里输入了「{text}」', '在{what}裡輸入了「{text}」'],
   'teach.step.typePassword': ['Typed a password into {what} (not recorded)', '在{what}里输入了密码（没有记录）', '在{what}裡輸入了密碼（沒有記錄）'],
+  'teach.step.select': ['Chose "{text}" in {what}', '在{what}里选了「{text}」', '在{what}裡選了「{text}」'],
   'teach.step.key': ['Pressed {key}', '按了 {key}', '按了 {key}'],
   'teach.step.scroll': ['Scrolled', '滚动了页面', '捲動了頁面'],
   'teach.step.back': ['Went back', '返回了上一页', '返回了上一頁'],

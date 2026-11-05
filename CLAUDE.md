@@ -2754,6 +2754,50 @@ From the November comparison (2.6.2: Grok, Devin, Muse, Manus give each machine 
 - **Not verified**: podman with these runtimes; Kata with Firecracker / Cloud Hypervisor (only QEMU); idle sleep's
   timing under Kata end to end (stop/start and stats were checked separately).
 
+## 2.42 One computer per agent: XFCE, LibreOffice, and its browser on the desktop (2026-11-06)
+
+The boss: 「XFCE可以 合并成一个电脑视图 加LibreOffice 还有默认的浏览器」.
+
+- **Image `multi-agent-worker:5`** (1.78 GB, +0.47 GB; `:1`–`:4` in an old .env are taken as `:5`): XFCE (session, xfwm4,
+  panel, desktop, settings, Thunar, Mousepad, xfce4-terminal, exo), dbus, xdg-utils, two icon themes, LibreOffice Writer /
+  Calc / Impress (gtk3); openbox is gone, xterm stays as the fallback terminal. The server builds it from the Dockerfile
+  on stdin — **no build context, so nothing can be COPY'd**: desktopd.py writes the desktop's settings into the agent's
+  home instead, on every start (ours) or once (XFCE's): `~/.local/bin/agent-browser`, its `.desktop` entry, a hidden
+  `chromium.desktop`, `mimeapps.list` and the XFCE "preferred web browser" helper → the agent's browser; the panel config
+  seeded from `/etc/xdg/xfce4/panel/default.xml` (or XFCE asks "use default config?" on first start); compositing and the
+  screensaver off.
+- **The desktop's browser is the agent's**: `agent-browser` asks browserd for a tab (`open_tab`), starting browserd from
+  `/tmp/browserd.py` if needed (desktopUp leaves the file there when it's missing); without it, a plain Chromium on a
+  separate profile. Links from LibreOffice, Thunar, the panel all land in the window the agent drives.
+- **browserd runs Chromium on the desktop** whenever `:1` exists (`no_viewport`, maximised; headless otherwise — the Mac
+  test harness and an image without a desktop). Started again by `page()` when the person closes its last window.
+  ⚠️ Three things only a person looking at the screen sees, all fixed: the "controlled by automated test software" bar
+  (`ignore_default_args=['--enable-automation']`), then "unsupported command-line flag: --no-sandbox" (`--test-type`), and
+  **Chromium offering to save a password typed into the agent's browser** — into the profile on the agent's own machine;
+  `no_password_saving()` sets `credentials_enable_service` / `profile.password_manager_enabled` false before each start.
+- Server: `browserUp(c)` = `desktopUp` then `BROWSERD_UP` (the agent's browser tool and a person's actions); a desktop
+  that won't start leaves the browser headless. `POST /api/desktop/:id/act {action:'browser'}` brings the browser up.
+  Waking a stopped machine also removes `/tmp/.X1-lock` and `/tmp/.X11-unix/X1`; desktopd checks the X server answers
+  (`x_alive`) rather than trusting those files — ⚠️ **before this, a machine that slept never got its desktop back**.
+- **Teaching (2.40.9) records inside the page now**: `REC_JS` (an init script on every page) reports clicks, the whole
+  value of a field as it's typed in, dropdown choices (`select` steps, `teach.step.select`), Enter/Tab/Esc and scrolling
+  to the `__maRec` binding; navigations come from `framenavigated`. Ignored while the agent's own browser action runs
+  (`agent_acts`). Enter in a form makes the browser itself click the submit button (`detail === 0`) — dropped, it is the
+  Enter. A password field's value goes only to `scrub()`. The old recording from the input socket and from HTTP actions
+  is gone (it would have doubled every step). ⚠️ The agent's **computer** tool clicking in the browser during a person's
+  recording would be recorded as the person's (only the browser tool is counted).
+- **One "Computer" view** on both clients: the right panel's Browser and Desktop sections are one (`s2.computer` /
+  `dk.heading`; in a group, each member's that is running), the full view has New terminal, **Browser** and **Record**,
+  no address bar of ours (Chromium has one). The `dk.*` strings say computer.
+- CI `agent-image.yml`: XFCE comes up, the default-browser hookup is written, the browser is not headless, LibreOffice is
+  there.
+- Verified on the box, through the real server, Kata VM: XFCE with panel and dock; the dock's Web Browser starts the
+  agent's Chromium; the agent's browser tool reading example.com in that window; `xdg-open` from the desktop opening a
+  tab there; LibreOffice Writer; a recorded login in zh-Hans with `pw=[hidden]`; no save-password bubble afterwards;
+  the web page's single 电脑 section and its buttons over HTTPS. Under gVisor: XFCE + the on-screen browser.
+  ⚠️ Headless Playwright doesn't paint the MJPEG `<img>` in its screenshots (the full view looked white) — the stream
+  itself was checked by pulling its JPEG out. **Not verified**: the Flutter app against it (only widget tests), the phone.
+
 ## 3. What runs now
 
 ```bash

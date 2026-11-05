@@ -15,7 +15,7 @@ final _png = base64Decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQ
 void main() {
   // The agent's desktop uses the same view: no address bar, back or reload — a "New terminal" instead —
   // and the same touch handling, at the narrowest phone width.
-  testWidgets('the desktop view at 360x640 ×1.3: a terminal button, no address bar, taps click', (tester) async {
+  testWidgets('the computer view at 360x640 ×1.3: browser, record and terminal buttons, no address bar, taps click', (tester) async {
     tester.view.physicalSize = const Size(360, 640);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -35,6 +35,8 @@ void main() {
     ));
     await tester.pump();
     expect(find.byIcon(Icons.terminal), findsOneWidget);
+    expect(find.byKey(const ValueKey('desk-browser')), findsOneWidget, reason: 'the browser lives on the computer now');
+    expect(find.byKey(const ValueKey('teach-record')), findsOneWidget, reason: 'and demonstrations are recorded there');
     expect(find.byType(TextField), findsOneWidget, reason: 'only the hidden typing field: no address bar');
     expect(find.byIcon(Icons.refresh), findsNothing);
     final page = find.ancestor(of: find.byType(Image), matching: find.byType(Listener)).first;

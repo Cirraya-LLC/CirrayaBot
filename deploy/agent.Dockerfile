@@ -28,10 +28,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 ENV CHROMIUM=/usr/bin/chromium
 
-# A desktop of its own: a screen for GUI programs and a terminal, which the person can watch and use
-# (desktopd.py, pushed in and started on demand like browserd.py — nothing runs until it is opened).
+# A computer of its own: an XFCE desktop (panel, file manager, text editor, terminal) with LibreOffice,
+# and Chromium on it as the agent's own browser — the person watches and uses the same screen the agent
+# does. desktopd.py, pushed in and started on demand like browserd.py, starts it and writes its settings
+# (the default browser, the panel) into /work, so they can change without rebuilding this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      xvfb openbox xterm x11-xserver-utils fonts-dejavu-core python3-xlib python3-pil \
+      xvfb x11-xserver-utils dbus dbus-x11 at-spi2-core xdg-utils \
+      xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar mousepad xfce4-terminal exo-utils \
+      adwaita-icon-theme elementary-xfce-icon-theme xterm fonts-dejavu-core python3-xlib python3-pil \
+ && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-gtk3 \
  && rm -rf /var/lib/apt/lists/*
 
 # The Agent's account. Its home is its desk, so what it installs for itself (pip --user, npm -g)

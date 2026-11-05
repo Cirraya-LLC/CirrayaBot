@@ -301,7 +301,7 @@ async function openConv(c) {
   loadRoutines()
   loadBotSkills()
   loadBotSecrets()
-  loadBrowsers(); loadDesktop()
+  loadDesktop()
   TASKS = []; taskSig = ''; openTask = null; renderTasks()
 
   await loadSessions(c)
@@ -2100,58 +2100,38 @@ function browserLabel(a) {
 // The view is MJPEG from Chromium's screencast, which <img> plays natively. With no browser open the
 // server answers 204 and the image fails; retry every few seconds (it shows up once they open one).
 const screenStream = (kind, id) => withLang(api(`/api/${kind}/${id}/stream`)) + `&t=${Date.now()}`
-const bwStream = id => screenStream('browser', id)
 let bwTimers = []
-function loadBrowsers() {
+// ═══ The agent's computer and files ═══
+// One computer per agent (desktopd.py): an XFCE desktop with its browser, LibreOffice and a terminal on it, the same
+// screen the agent uses. In a DM its own; in a group, each member's that is running. Nothing runs until someone
+// opens it — or the agent uses its browser or computer tool. Files: in a DM only.
+function loadDesktop() {
   bwTimers.forEach(clearTimeout); bwTimers = []
-  const box = $('#bws'); box.innerHTML = ''
-  const c = cur; if (!c) return
+  const c = cur, solo = c?.kind === 'agent'
+  $('#s2files').hidden = !solo
+  const box = $('#dks'); box.innerHTML = ''
   // cur is only {kind,id}; members live on the conversation-list entry
-  const ids = c.kind === 'group' ? (CONVS.find(x => x.kind === 'group' && x.id === c.id)?.members ?? []) : [c.id]
+  const ids = !c ? [] : solo ? [c.id] : (CONVS.find(x => x.kind === 'group' && x.id === c.id)?.members ?? [])
+  $('#s2desk').hidden = !ids.length
   for (const id of ids) {
     const b = bot(id); if (!b) continue
     const el = document.createElement('div')
     const show = () => {
       el.className = 'bw'
-      el.innerHTML = `<img alt="${esc(t('bw.altNamed', { name: b.name }))}"><small>${c.kind === 'group' ? esc(b.name) + ' · ' : ''}${esc(t('bw.takeOver'))}</small>`
+      el.innerHTML = `<img alt="${esc(t('dk.altNamed', { name: b.name }))}"><small>${solo ? '' : esc(b.name) + ' · '}${esc(t('dk.use'))}</small>`
       const img = el.querySelector('img')
-      img.onerror = () => { if (cur !== c) return; off(); bwTimers.push(setTimeout(show, 5000)) }
-      img.src = bwStream(id)
-      el.onclick = () => openBrowser(b)
+      img.onerror = () => { if (cur !== c) return; off(); bwTimers.push(setTimeout(show, 8000)) }
+      img.src = screenStream('desktop', b.id)
+      el.onclick = () => openScreen(b, 'desktop')
     }
     const off = () => {
-      if (c.kind === 'group') { el.className = ''; el.innerHTML = ''; return }   // in groups, only list open browsers
-      el.className = 'bwoff'; el.innerHTML = `${esc(t('bw.notOpen'))} <button class="btn">${esc(t('bw.open'))}</button>`
-      el.querySelector('button').onclick = e => { e.stopPropagation(); openBrowser(b) }
+      if (!solo) { el.className = ''; el.innerHTML = ''; return }   // in groups, only computers that are running
+      el.className = 'bwoff'; el.innerHTML = `${esc(t('dk.notOn'))} <button class="btn">${esc(t('dk.open'))}</button>`
+      el.querySelector('button').onclick = e => { e.stopPropagation(); openScreen(b, 'desktop') }
     }
     show(); box.appendChild(el)
   }
-}
-
-// ═══ The agent's desktop and files (one agent: shown in its DM) ═══
-// The desktop is a screen of its own (desktopd.py): watched and used through the same viewer as the
-// browser. Nothing runs until someone opens it — or the agent uses its computer tool.
-function loadDesktop() {
-  const solo = cur?.kind === 'agent'
-  $('#s2desk').hidden = $('#s2files').hidden = !solo
-  const box = $('#dks'); box.innerHTML = ''
-  if (!solo) return
-  const c = cur, b = bot(c.id); if (!b) return
-  const el = document.createElement('div')
-  const show = () => {
-    el.className = 'bw'
-    el.innerHTML = `<img alt="${esc(t('dk.altNamed', { name: b.name }))}"><small>${esc(t('dk.use'))}</small>`
-    const img = el.querySelector('img')
-    img.onerror = () => { if (cur !== c) return; off(); bwTimers.push(setTimeout(show, 8000)) }
-    img.src = screenStream('desktop', b.id)
-    el.onclick = () => openScreen(b, 'desktop')
-  }
-  const off = () => {
-    el.className = 'bwoff'; el.innerHTML = `${esc(t('dk.notOn'))} <button class="btn">${esc(t('dk.open'))}</button>`
-    el.querySelector('button').onclick = e => { e.stopPropagation(); openScreen(b, 'desktop') }
-  }
-  show(); box.appendChild(el)
-  loadFiles('/work')
+  if (solo) loadFiles('/work')
 }
 
 /** A file on the agent's machine, shaped for the preview. */
@@ -2225,16 +2205,15 @@ $('#dfpick').onchange = async e => {
 // and committed text is taken from it and sent; non-text keys (Enter, arrows, Backspace, Ctrl/⌘ combos) go as key events.
 let bwBot = null, bwOff = false, bwWs = null, bwComposing = false, bwKind = 'browser'
 const bwNoteDefault = () => bwBot ? t(bwKind === 'desktop' ? 'dk.note' : 'bw.note', { name: bwBot.name }) : ''
-const openBrowser = b => openScreen(b, 'browser')
 /** The full view of one of an agent's screens: its browser, or its desktop (which is started first). */
 async function openScreen(b, kind = 'browser') {
   bwBot = b; bwOff = false; bwKind = kind
   const desk = kind === 'desktop'
   $('#bwurl').hidden = $('#bwnav').hidden = $('#bwreload').hidden = desk
-  $('#bwterm').hidden = !desk
-  $('#bwrec').hidden = desk
+  $('#bwterm').hidden = $('#bwbrowse').hidden = !desk
+  $('#bwrec').hidden = false
   paintRec(null)
-  if (!desk) fetch(api(`/api/browser/${b.id}/record`)).then(r => r.ok ? r.json() : null)
+  fetch(api(`/api/browser/${b.id}/record`)).then(r => r.ok ? r.json() : null)
     .then(j => { if (bwBot === b) paintRec(j?.recording ? j.since : null) }).catch(() => {})
   $('#bwname').textContent = t(desk ? 'dk.altNamed' : 'bw.altNamed', { name: b.name })
   $('#bwnote').textContent = desk ? t('dk.starting') : bwNoteDefault()
@@ -2262,7 +2241,7 @@ function closeBrowser() {
   if (recSince && bwBot) stopRecording(bwBot)     // a recording nobody can see is not left running
   $('#bwfull').hidden = true; $('#bwimg').removeAttribute('src')   // stop the stream so frames don't keep arriving in the background
   bwWs?.close(); bwWs = null
-  bwBot = null; loadBrowsers(); loadDesktop()
+  bwBot = null; loadDesktop()
 }
 function bwSend(e) {
   if (bwWs?.readyState === 1) bwWs.send(JSON.stringify(e))
@@ -2282,6 +2261,7 @@ $('#bwback').onclick = closeBrowser
 $('#bwnav').onclick = () => bwAct({ action:'back' })
 $('#bwreload').onclick = () => bwAct({ action:'reload' })
 $('#bwterm').onclick = () => bwAct({ action:'terminal' })
+$('#bwbrowse').onclick = () => bwAct({ action:'browser' })
 $('#bwurl').onkeydown = e => { if (e.key === 'Enter' && e.target.value.trim()) bwAct({ action:'open', url:e.target.value.trim() }) }
 
 // Mouse

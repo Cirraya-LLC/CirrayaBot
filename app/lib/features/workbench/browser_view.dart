@@ -328,6 +328,7 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
       _act({'action': 'start'}).then((_) {
         if (mounted) startPolling();
       });
+      _loadRecording();
     } else {
       startPolling();
       if (widget.debugInput == null) _connectInput();
@@ -692,33 +693,40 @@ class _BrowserPageState extends State<BrowserPage> with _ShotPoller {
             ],
           ),
           actions: [
-            if (_desk)
+            // Recording a demonstration works on the computer too: it listens in its browser's pages.
+            if (_recSince == null)
+              IconButton(
+                key: const ValueKey('teach-record'),
+                tooltip: tr('teach.record'),
+                onPressed: _busy ? null : _toggleRecording,
+                icon: Icon(Icons.fiber_manual_record, size: 18, color: C.bad),
+              )
+            else
+              Tooltip(
+                message: tr('teach.stop'),
+                child: TextButton.icon(
+                  key: const ValueKey('teach-stop'),
+                  onPressed: _toggleRecording,
+                  icon: Icon(Icons.stop_rounded, size: 18, color: C.bad),
+                  label: Text(
+                    _elapsed,
+                    style: TextStyle(color: C.bad, fontSize: 13, fontFeatures: const [FontFeature.tabularFigures()]),
+                  ),
+                ),
+              ),
+            if (_desk) ...[
+              IconButton(
+                key: const ValueKey('desk-browser'),
+                tooltip: tr('dk.browser'),
+                onPressed: _busy ? null : () => _act({'action': 'browser'}),
+                icon: const Icon(Icons.public, size: 18),
+              ),
               IconButton(
                 tooltip: tr('dk.terminal'),
                 onPressed: _busy ? null : () => _act({'action': 'terminal'}),
                 icon: const Icon(Icons.terminal, size: 18),
-              )
-            else ...[
-              if (_recSince == null)
-                IconButton(
-                  key: const ValueKey('teach-record'),
-                  tooltip: tr('teach.record'),
-                  onPressed: _busy ? null : _toggleRecording,
-                  icon: Icon(Icons.fiber_manual_record, size: 18, color: C.bad),
-                )
-              else
-                Tooltip(
-                  message: tr('teach.stop'),
-                  child: TextButton.icon(
-                    key: const ValueKey('teach-stop'),
-                    onPressed: _toggleRecording,
-                    icon: Icon(Icons.stop_rounded, size: 18, color: C.bad),
-                    label: Text(
-                      _elapsed,
-                      style: TextStyle(color: C.bad, fontSize: 13, fontFeatures: const [FontFeature.tabularFigures()]),
-                    ),
-                  ),
-                ),
+              ),
+            ] else ...[
               IconButton(
                 tooltip: tr('br.back'),
                 onPressed: _busy || s == null ? null : () => _act({'action': 'back'}),

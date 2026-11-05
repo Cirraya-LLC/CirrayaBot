@@ -144,7 +144,6 @@ const Map<String, List<String>> workbenchStrings = {
   'wb.editGroup': ['Edit group', '编辑群', '編輯群組'],
   'wb.editAgent': ['Edit Agent', '编辑 Agent', '編輯 Agent'],
   'wb.lead': ['Lead', '负责人', '負責人'],
-  'wb.browser': ['Browser', '浏览器', '瀏覽器'],
   'wb.skills': ['Skills', '技能', '技能'],
   'wb.savedBySelf': ['{name} · saved by the Agent', '{name} · 他自己存的', '{name} · 他自己存的'],
   'wb.addSkill': ['Install / write a skill', '装技能 / 写技能', '安裝技能 / 撰寫技能'],

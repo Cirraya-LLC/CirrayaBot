@@ -400,7 +400,7 @@ ${recall.trim()}`)
 const CLI = env.CONTAINER_CLI || 'docker'
 // The agent image. :1 and :2 (agents ran as root) and :3 (no desktop) are named in older .env files;
 // they are taken as the current one, since the container rules and tools assume what it has.
-const IMAGE = !env.AGENT_IMAGE || /^multi-agent-worker:[123]$/.test(env.AGENT_IMAGE) ? 'multi-agent-worker:4' : env.AGENT_IMAGE
+const IMAGE = !env.AGENT_IMAGE || /^multi-agent-worker:[1234]$/.test(env.AGENT_IMAGE) ? 'multi-agent-worker:5' : env.AGENT_IMAGE
 const EXEC_TIMEOUT = Number(env.AGENT_EXEC_TIMEOUT || 120) * 1000
 const OUT_MAX = 12_000
 // Container names are global on the whole host. Two deployments on the same machine that don't change the prefix
@@ -719,8 +719,10 @@ async function ensureContainerNow(botId, groupId, { setup = true } = {}) {
     }
     if (d.action === 'start') {
       await cliRun(['start', name], null, 60_000)
-      // Asleep (or the host restarted): the daemons are gone and their pids may now be someone else's.
-      await cliRun(['exec', '-u', '0', name, 'rm', '-f', '/tmp/browserd.pid'], null, 15_000)
+      // Asleep (or the host restarted): the daemons are gone and their pids may now be someone else's, and the
+      // X server's lock and socket would tell the desktop daemon a screen is running when none is.
+      await cliRun(['exec', '-u', '0', name, 'rm', '-f', '/tmp/browserd.pid', '/tmp/desktopd.pid', '/tmp/.X1-lock',
+        '/tmp/.X11-unix/X1'], null, 15_000)
     }
     if (d.action === 'create' || d.action === 'recreate') {
       const used = await startMachine(name, runtime => runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups,
@@ -1268,6 +1270,21 @@ async function desktopPost(c, args, lang = 'en') {
 /** Start the desktop if it isn't running (and swap in a changed daemon). '' when it is up, else why not. */
 async function desktopUp(c) {
   const up = await execIn(c, ['-i', c, 'bash', '-c', DESKTOPD_UP], DESKTOPD)
+  if (up.code !== 0) return (up.out + up.err).trim().slice(-600) || `exit ${up.code}`
+  // The desktop's "Web Browser" (desktopd.py, agent-browser) starts the agent's own browser daemon itself when
+  // nobody has yet: it needs the file there. Only when missing — replacing a running daemon's code is BROWSERD_UP's job.
+  await execIn(c, ['-i', c, 'bash', '-c', '[ -f /tmp/browserd.py ] && cat >/dev/null || cat > /tmp/browserd.py'], BROWSERD)
+  return ''
+}
+
+/**
+ * The agent's browser runs on its desktop (the person sees and uses the same windows), so the desktop comes up
+ * first. A desktop that won't start leaves the browser headless rather than not at all. Returns '' or why not.
+ */
+async function browserUp(c) {
+  const why = await desktopUp(c)
+  if (why) console.warn(`[desktop] ${c}: ${why.slice(-200)}; its browser runs headless`)
+  const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
   return up.code === 0 ? '' : (up.out + up.err).trim().slice(-600) || `exit ${up.code}`
 }
 
@@ -1347,9 +1364,9 @@ async function humanBrowserPost(botId, args, lang) {
   const c = cname(botId)
   if ((await cliRun(['inspect', '-f', '{{.State.Running}}', c], null, 10_000)).out.trim() !== 'true')
     await ensureContainer(botId, null)
-  // Always go through BROWSERD_UP: start it if it isn't running, swap in new daemon code if it changed (the human actions were added later)
-  const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
-  if (up.code !== 0) return { ok: false, error: tr(lang, 'browser.cantStart', { detail: (up.out + up.err).trim().slice(-300) }) }
+  // Always through browserUp: start it if it isn't running, swap in new daemon code if it changed
+  const down = await browserUp(c)
+  if (down) return { ok: false, error: tr(lang, 'browser.cantStart', { detail: down.slice(-300) }) }
   return browserPost(c, args, lang)
 }
 
@@ -1391,8 +1408,8 @@ async function draftSkill(bot, goal, steps) {
 
 /** Run one browser action. Screenshots return {text, image}; everything else returns text. */
 async function runBrowser(c, args, ctx) {
-  const up = await execIn(c, ['-i', c, 'bash', '-c', BROWSERD_UP], BROWSERD)
-  if (up.code !== 0) return `The browser would not start: ${(up.out + up.err).trim().slice(-600)}`
+  const down = await browserUp(c)
+  if (down) return `The browser would not start: ${down}`
   const r = await execIn(c, ['-i', c, 'curl', '-s', '--max-time', '90', '-X', 'POST',
     '-H', 'content-type: application/json', '--data-binary', '@-', 'http://127.0.0.1:9230/'], JSON.stringify(args))
   let j
@@ -3492,13 +3509,17 @@ const server = createServer(async (req, res) => {
         return res.end(Buffer.from(j.image, 'base64'))
       }
       if (dk[2] === 'act' && req.method === 'POST') {
-        // A person opening the desktop, or another terminal on it. Everything else is the input socket.
+        // A person opening the computer, another terminal on it, or its browser. Everything else is the input socket.
         const action = str((await readBody(req)).action)
-        if (!['start', 'terminal'].includes(action)) return send(400, { error: t('browser.badAction', { action }) })
+        if (!['start', 'terminal', 'browser'].includes(action)) return send(400, { error: t('browser.badAction', { action }) })
         await ensureContainer(dk[1], null)       // running, and on the current image (an old one has no desktop)
         const why = await desktopUp(c)
         if (why) return send(502, { error: t('desktop.cantStart', { detail: why }) })
         if (action === 'terminal') await desktopPost(c, { action: 'terminal' }, lang)
+        if (action === 'browser') {
+          const j = await humanBrowserPost(dk[1], { action: 'open_tab', url: '', human: true }, lang)
+          if (!j.ok) return send(502, { error: j.error })
+        }
         return send(200, { ok: true })
       }
     }

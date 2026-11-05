@@ -14,6 +14,7 @@ export const EN = {
   'step.start': 'Started on {title} ({url})', 'step.open': 'Opened {url}', 'step.page': 'The page became {title} ({url})',
   'step.untitled': 'an untitled page', 'step.click': 'Clicked {what}', 'step.clickHref': 'Clicked {what} → {href}',
   'step.type': 'Typed "{text}" into {what}', 'step.typePassword': 'Typed a password into {what} (not recorded)',
+  'step.select': 'Chose "{text}" in {what}',
   'step.key': 'Pressed {key}', 'step.scroll': 'Scrolled', 'step.back': 'Went back', 'step.reload': 'Reloaded the page',
   'step.limit': '(The recording stopped here: it reached its time limit.)',
   'what.named': 'the "{name}" {kind}', 'what.unnamed': 'a {kind}', 'what.page': 'the page',
@@ -48,6 +49,7 @@ export function describeSteps(steps, say = english) {
         : say('step.click', { what: what(s.what, say) }))
       : s.kind === 'type' ? (s.secret || s.what?.password ? say('step.typePassword', { what: what(s.what, say) })
         : say('step.type', { text: CUT(s.text, 200), what: what(s.what, say) }))
+      : s.kind === 'select' ? say('step.select', { text: CUT(s.text, 120), what: what(s.what, say) })
       : s.kind === 'key' ? say('step.key', { key: CUT(s.key, 20) })
       : ['scroll', 'back', 'reload', 'limit'].includes(s.kind) ? say(`step.${s.kind}`)
       : null
@@ -113,6 +115,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     { kind: 'click', what: { tag: 'button', type: 'submit', text: 'Sign in' } },
     { kind: 'scroll' }, { kind: 'nonsense' }, 'junk', null,
   ]
+  a.equal(describeSteps([{ kind: 'select', what: { tag: 'select', label: 'Size' }, text: 'Large' }])[0], '1. Chose "Large" in the "Size" list')
   const lines = describeSteps(steps)
   a.equal(lines.length, 9, 'unknown steps are skipped')
   a.equal(lines[2], '3. Typed "blue mug" into the "Search" field')
