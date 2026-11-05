@@ -2,6 +2,7 @@
 /// does, over the same endpoints.
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -100,6 +101,17 @@ class _AgentEditorState extends State<_AgentEditor> {
     for (final f in widget.agent?.fallbacks ?? const <Fallback>[]) _FallbackPick(f.providerId, f.model),
   ];
 
+  /// What its background tasks run on. [_taskSame] = the model above.
+  late bool _taskSame = widget.agent?.taskModel == null;
+  late final _taskPick = _FallbackPick(widget.agent?.taskModel?.providerId ?? '', widget.agent?.taskModel?.model ?? '');
+
+  /// The machine's setup script, and how it last went (polled while it runs).
+  late final _setup = TextEditingController(text: widget.agent?.setup ?? '');
+  late SetupState? _setupState = widget.agent?.setupState;
+  late bool _setupRunning = widget.agent?.setupRunning ?? false;
+  Timer? _setupPoll;
+  bool get _hasMachine => widget.agent?.machine ?? widget.bench.agents.firstOrNull?.machine ?? false;
+
   @override
   void initState() {
     super.initState();
@@ -110,7 +122,7 @@ class _AgentEditorState extends State<_AgentEditor> {
         // An upstream deleted elsewhere: fall back to the default rather than
         // a dropdown with a value it cannot show.
         if (!list.any((p) => p.id == _providerId)) _providerId = '';
-        for (final f in _fallbacks) {
+        for (final f in [..._fallbacks, _taskPick]) {
           if (!list.any((p) => p.id == f.providerId)) f.providerId = '';
         }
       });
@@ -122,7 +134,9 @@ class _AgentEditorState extends State<_AgentEditor> {
       for (final f in _fallbacks) {
         _loadFallback(f, f.model);
       }
+      if (!_taskSame) _loadFallback(_taskPick, _taskPick.model);
     });
+    if (_setupRunning) _pollSetup();
   }
 
   /// A backup row's model list. Unlike the main pick, nothing is preselected for a new row: the
@@ -137,7 +151,7 @@ class _AgentEditorState extends State<_AgentEditor> {
     } on ApiException {
       // falls through to typing the name
     }
-    if (!mounted || seq != f.seq || !_fallbacks.contains(f)) return;
+    if (!mounted || seq != f.seq || (!_fallbacks.contains(f) && f != _taskPick)) return;
     setState(() {
       f.loading = false;
       f.models = current.isNotEmpty && models.isNotEmpty && !models.contains(current) ? [current, ...models] : models;
@@ -203,6 +217,108 @@ class _AgentEditorState extends State<_AgentEditor> {
     ),
   );
 
+  static const _same = '__same__';
+
+  /// The background model: "the same as above", or an upstream and a model like a backup row.
+  Widget _taskModelRow() => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Expanded(
+        child: DropdownButtonFormField<String>(
+          key: ValueKey('task/${_providers.length}'),
+          initialValue: _taskSame || _providers.isEmpty ? (_taskSame ? _same : '') : _taskPick.providerId,
+          isExpanded: true,
+          decoration: InputDecoration(labelText: tr('ed.provider')),
+          items: [
+            DropdownMenuItem(value: _same, child: Text(tr('ed.taskModelSame'), overflow: TextOverflow.ellipsis)),
+            ..._providerItems(),
+          ],
+          onChanged: (v) {
+            if (v == _same) return setState(() => _taskSame = true);
+            setState(() {
+              _taskSame = false;
+              _taskPick.providerId = v ?? '';
+            });
+            final old = widget.agent?.taskModel;
+            _loadFallback(_taskPick, old != null && old.providerId == _taskPick.providerId ? old.model : '');
+          },
+        ),
+      ),
+      if (!_taskSame) ...[
+        const SizedBox(width: 10),
+        Expanded(
+          child: _taskPick.loading
+              ? InputDecorator(
+                  decoration: InputDecoration(labelText: tr('ed.model')),
+                  child: Text(tr('ed.askingProvider'), style: TextStyle(fontSize: 13, color: C.dim)),
+                )
+              : _taskPick.models.isEmpty
+              ? TextField(
+                  controller: _taskPick.manual,
+                  decoration: InputDecoration(labelText: tr('ed.model'), hintText: tr('ed.manualModelHint')),
+                )
+              : DropdownButtonFormField<String>(
+                  key: ValueKey('task/${_taskPick.providerId}/${_taskPick.models.length}'),
+                  initialValue: _taskPick.models.contains(_taskPick.model) ? _taskPick.model : null,
+                  isExpanded: true,
+                  hint: Text(tr('ed.fallbackPick'), overflow: TextOverflow.ellipsis),
+                  decoration: InputDecoration(labelText: tr('ed.model')),
+                  items: [
+                    for (final m in _taskPick.models)
+                      DropdownMenuItem(value: m, child: Text(m, overflow: TextOverflow.ellipsis)),
+                  ],
+                  onChanged: (v) => setState(() => _taskPick.model = v ?? ''),
+                ),
+        ),
+      ],
+    ],
+  );
+
+  String _setupLine() {
+    if (_setupRunning) return tr('ed.setupRunning');
+    final st = _setupState;
+    if (st == null) return tr('ed.setupNever');
+    final at = DateTime.fromMillisecondsSinceEpoch(st.at).toLocal().toString().substring(0, 16);
+    final line = st.code == 0
+        ? tr('ed.setupOk', {'when': at, 'sec': (st.ms / 1000).round()})
+        : tr('ed.setupFail', {'when': at, 'code': st.code});
+    return st.stale ? '$line · ${tr('ed.setupStale')}' : line;
+  }
+
+  void _pollSetup() {
+    _setupPoll?.cancel();
+    _setupPoll = Timer(const Duration(seconds: 3), () async {
+      final id = widget.agent?.id;
+      if (!mounted || id == null) return;
+      try {
+        final a = (await widget.bench.api.agents()).where((x) => x.id == id).firstOrNull;
+        if (!mounted || a == null) return;
+        setState(() {
+          _setupState = a.setupState;
+          _setupRunning = a.setupRunning;
+        });
+      } on ApiException {
+        // try again
+      }
+      if (mounted && _setupRunning) _pollSetup();
+    });
+  }
+
+  Future<void> _runSetup() async {
+    final a = widget.agent;
+    if (a == null) return;
+    setState(() => _error = '');
+    try {
+      // What runs is what is on screen: save an edit first.
+      if (_setup.text != a.setup) await widget.bench.api.updateAgent(a.id, {'setup': _setup.text});
+      await widget.bench.api.runSetup(a.id);
+      setState(() => _setupRunning = true);
+      _pollSetup();
+    } on ApiException catch (e) {
+      setState(() => _error = e.message);
+    }
+  }
+
   List<DropdownMenuItem<String>> _providerItems() => [
     DropdownMenuItem(
       value: '',
@@ -265,6 +381,9 @@ class _AgentEditorState extends State<_AgentEditor> {
     for (final f in _fallbacks) {
       f.manual.dispose();
     }
+    _taskPick.manual.dispose();
+    _setup.dispose();
+    _setupPoll?.cancel();
     super.dispose();
   }
 
@@ -316,6 +435,8 @@ class _AgentEditorState extends State<_AgentEditor> {
         for (final f in _fallbacks)
           if (f.chosen.isNotEmpty) {'provider_id': f.providerId, 'model': f.chosen},
       ],
+      'task_model': _taskSame || _taskPick.chosen.isEmpty ? null : {'provider_id': _taskPick.providerId, 'model': _taskPick.chosen},
+      if (_hasMachine) 'setup': _setup.text,
     };
     await _run(() async {
       if (a == null) return widget.bench.api.createAgent(body);
@@ -450,6 +571,14 @@ class _AgentEditorState extends State<_AgentEditor> {
             ),
             for (final f in _fallbacks) _fallbackRow(f),
             Text(tr('ed.fallbackHint'), style: TextStyle(fontSize: 11, color: C.dim)),
+            const SizedBox(height: 14),
+            Text(tr('ed.taskModel'), style: TextStyle(fontSize: 13, color: C.dim)),
+            const SizedBox(height: 6),
+            _taskModelRow(),
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(tr('ed.taskModelHint'), style: TextStyle(fontSize: 11, color: C.dim)),
+            ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
               initialValue: _approval,
@@ -494,6 +623,53 @@ class _AgentEditorState extends State<_AgentEditor> {
               padding: const EdgeInsets.only(top: 6),
               child: Text(tr('vo.agentVoiceHint'), style: TextStyle(fontSize: 11, color: C.dim2)),
             ),
+            if (_hasMachine)
+              Theme(
+                data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  key: const ValueKey('ed-setup'),
+                  tilePadding: EdgeInsets.zero,
+                  childrenPadding: EdgeInsets.zero,
+                  initiallyExpanded: (widget.agent?.setup ?? '').isNotEmpty,
+                  title: Text(tr('ed.setup'), style: TextStyle(fontSize: 13, color: C.dim)),
+                  expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    TextField(
+                      controller: _setup,
+                      minLines: 3,
+                      maxLines: 10,
+                      autocorrect: false,
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                      decoration: InputDecoration(hintText: tr('ed.setupHintBox')),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(tr('ed.setupHint'), style: TextStyle(fontSize: 11, color: C.dim)),
+                    ),
+                    if (widget.agent != null && widget.agent!.setup.isNotEmpty)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _setupLine(),
+                              style: TextStyle(fontSize: 11.5, color: (_setupState?.code ?? 0) != 0 && !_setupRunning ? C.code : C.dim),
+                            ),
+                          ),
+                          TextButton(onPressed: _setupRunning ? null : _runSetup, child: Text(tr('ed.setupRun'))),
+                        ],
+                      ),
+                    if ((_setupState?.tail ?? '').isNotEmpty && !_setupRunning)
+                      Container(
+                        constraints: const BoxConstraints(maxHeight: 140),
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(color: C.field, borderRadius: BorderRadius.circular(8)),
+                        child: SingleChildScrollView(
+                          child: SelectableText(_setupState!.tail, style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             if (_error.isNotEmpty) ...[
               const SizedBox(height: 10),
               Text(_error, style: TextStyle(fontSize: 12, color: C.code)),

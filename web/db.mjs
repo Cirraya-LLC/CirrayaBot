@@ -291,6 +291,10 @@ alter table agents add column if not exists fallbacks jsonb not null default '[]
 -- again when the script changes; setup_state is how its last run went ({hash, at, code, ms, tail}).
 alter table agents add column if not exists setup text not null default '';
 alter table agents add column if not exists setup_state jsonb;
+-- The model its background tasks run on ({provider_id, model}); null = the same as its own.
+alter table agents add column if not exists task_model jsonb;
+-- A task that asked for the agent's own (main) model instead of its background one.
+alter table tasks add column if not exists main_model boolean not null default false;
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -341,20 +345,20 @@ export async function getAgent(id) {
 export async function upsertAgent(a) {
   const { rows } = await q(`
     insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy,
-                        fallbacks, voice, setup)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                        fallbacks, voice, setup, task_model)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
       approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks, voice = excluded.voice,
-      setup = excluded.setup
+      setup = excluded.setup, task_model = excluded.task_model
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
      a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? '',
-     JSON.stringify(a.fallbacks ?? []), a.voice ?? '', a.setup ?? ''])
+     JSON.stringify(a.fallbacks ?? []), a.voice ?? '', a.setup ?? '', a.task_model ? JSON.stringify(a.task_model) : null])
   return rows[0]
 }
 
@@ -945,12 +949,12 @@ export async function seedProviderFromEnv(env) {
 
 // ---------- tasks ----------
 const TASK_COLS = `id, scope, scope_id, session_id, agent_id, by_agent, title, brief, status, question, approval,
-  result, created_at, updated_at, finished_at`
+  result, created_at, updated_at, finished_at, main_model`
 
 export async function createTask(t) {
-  const { rows } = await q(`insert into tasks (scope, scope_id, session_id, agent_id, by_agent, title, brief)
-    values ($1,$2,$3,$4,$5,$6,$7) returning ${TASK_COLS}`,
-    [t.scope, t.scope_id, t.session_id, t.agent_id, t.by_agent ?? '', t.title, t.brief ?? ''])
+  const { rows } = await q(`insert into tasks (scope, scope_id, session_id, agent_id, by_agent, title, brief, main_model)
+    values ($1,$2,$3,$4,$5,$6,$7,$8) returning ${TASK_COLS}`,
+    [t.scope, t.scope_id, t.session_id, t.agent_id, t.by_agent ?? '', t.title, t.brief ?? '', !!t.main_model])
   return rows[0]
 }
 

@@ -63,6 +63,32 @@ const Map<String, List<String>> editorStrings = {
     '上面的模型一直失败（挂了、过载、拒绝密钥）时，按顺序换用。最多 3 个，从你自己添加的上游里选。',
     '上面的模型一直失敗（掛了、過載、拒絕金鑰）時，依序換用。最多 3 個，從你自己加入的上游裡選。',
   ],
+  'ed.taskModel': ['Background tasks run on', '后台任务用的模型', '背景任務用的模型'],
+  'ed.taskModelSame': ['The same model as above', '和上面同一个模型', '和上面同一個模型'],
+  'ed.taskModelHint': [
+    'A lighter model here saves money on long background work. A task the Agent marks as needing its full reasoning '
+        'still runs on the model above, and if this one fails the model above takes over.',
+    '这里选一个便宜些的模型，长时间的后台活能省不少钱。Agent 标明需要全力思考的任务仍然用上面的模型；这个模型出错时也会换回上面的模型接着做。',
+    '這裡選一個便宜些的模型，長時間的背景工作能省不少錢。Agent 標明需要全力思考的任務仍然用上面的模型；這個模型出錯時也會換回上面的模型接著做。',
+  ],
+  'ed.setup': ['Setup script', '初始化脚本', '初始化腳本'],
+  'ed.setupHintBox': [
+    'e.g. apt-get install -y ffmpeg && pip install pandas',
+    '例如 apt-get install -y ffmpeg && pip install pandas',
+    '例如 apt-get install -y ffmpeg && pip install pandas',
+  ],
+  'ed.setupHint': [
+    'Runs as root on this Agent\u2019s machine whenever the machine is created or rebuilt (after an upgrade, for '
+        'instance), and again when you change it. Put here what it should always have installed.',
+    '每当这个 Agent 的机器新建或重建（比如升级之后）就以 root 身份跑一遍，改了脚本也会再跑。把它一直要用的东西写在这里装好。',
+    '每當這個 Agent 的機器新建或重建（例如升級之後）就以 root 身分跑一遍，改了腳本也會再跑。把它一直要用的東西寫在這裡裝好。',
+  ],
+  'ed.setupRun': ['Run now', '现在运行', '立即執行'],
+  'ed.setupRunning': ['Running\u2026', '运行中\u2026', '執行中\u2026'],
+  'ed.setupNever': ['Not run yet \u2014 it runs the next time the machine is used', '还没跑过，下次用到这台机器时会跑', '還沒跑過，下次用到這台機器時會跑'],
+  'ed.setupOk': ['Last run {when}: done in {sec}s', '上次运行 {when}：完成，用时 {sec} 秒', '上次執行 {when}：完成，耗時 {sec} 秒'],
+  'ed.setupFail': ['Last run {when}: failed (exit {code})', '上次运行 {when}：失败（退出码 {code}）', '上次執行 {when}：失敗（結束代碼 {code}）'],
+  'ed.setupStale': ['changed since \u2014 runs again the next time the machine is used', '之后改过，下次用到机器时会重新跑', '之後改過，下次用到機器時會重新跑'],
   // Group editor
   'ed.groupNeeds': ['A group needs a name and at least two members', '群要有名字，而且至少两个成员', '群組要有名稱，而且至少兩位成員'],
   'ed.disbandQ': ['Disband "{name}"?', '解散「{name}」？', '解散「{name}」？'],

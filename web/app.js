@@ -1499,6 +1499,7 @@ function editBot(b) {
   $('#bsetup').value = b?.setup ?? ''
   $('#bsetupsec').open = !!b?.setup
   paintSetup(b)
+  paintTaskModel(b?.task_model)
   $('#bfb').innerHTML = ''
   for (const f of b?.fallbacks ?? []) addFallbackRow(f)
   paintFallbackAdd()
@@ -1543,6 +1544,31 @@ $('#bsetuprun').onclick = async () => {
   const r = await fetch(api(`/api/bots/${bEditing.id}/setup`), { method:'POST' })
   if (!r.ok && r.status !== 409) { alert(await errText(r)); return }
   paintSetup({ ...bEditing, setup_running: true })
+}
+
+// What its background tasks run on. "Same" = no upstream picked here, no model list shown.
+const SAME = '__same__'
+function paintTaskModel(tm) {
+  const def = PROVS.find(p => p.is_default)
+  const prov = $('#btmprov'), sel = $('#btmsel'), box = $('#btmx')
+  prov.title = t('b.provTitle'); sel.title = t('b.modelTitle'); box.placeholder = t('b.modelPh')
+  prov.innerHTML = `<option value="${SAME}">${esc(t('b.taskModelSame'))}</option>` +
+    `<option value="">${esc(def ? t('b.defaultProvNamed', { name: def.name }) : t('b.defaultProv'))}</option>` +
+    PROVS.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
+  prov.value = !tm ? SAME : PROVS.some(p => p.id === tm.provider_id) ? tm.provider_id : ''
+  const show = () => {
+    const same = prov.value === SAME
+    sel.hidden = same; box.hidden = true
+    if (!same) fillModels(sel, box, prov.value, prov.value === (tm?.provider_id ?? '') ? tm?.model ?? '' : '', { blank: true })
+  }
+  prov.onchange = show
+  show()
+}
+const chosenTaskModel = () => {
+  const prov = $('#btmprov'), sel = $('#btmsel'), box = $('#btmx')
+  if (prov.value === SAME) return null
+  const model = (sel.hidden ? box.value : sel.value).trim()
+  return model ? { provider_id: prov.value, model } : null
 }
 
 // Backup models: one row each, an upstream and a model, like the main pick above.
@@ -1597,7 +1623,7 @@ $('#bsave').onclick = async () => {
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
     provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
-    daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), voice: $('#bvoice').value.trim(),
+    daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), task_model: chosenTaskModel(), voice: $('#bvoice').value.trim(),
     ...$('#bsetupsec').hidden ? {} : { setup: $('#bsetup').value } }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }

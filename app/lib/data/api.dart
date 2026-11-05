@@ -114,6 +114,11 @@ class Agent {
     this.dailyCapMicro,
     this.fallbacks = const [],
     this.voice = '',
+    this.taskModel,
+    this.setup = '',
+    this.setupState,
+    this.setupRunning = false,
+    this.machine = false,
   });
 
   final String id;
@@ -145,6 +150,19 @@ class Agent {
   /// The voice it speaks with when replies are read by an upstream; '' = the default one.
   final String voice;
 
+  /// What its background tasks run on; null = the same model as its own.
+  final Fallback? taskModel;
+
+  /// A shell script run as root on its machine when the machine is new or rebuilt, and when it changes.
+  final String setup;
+
+  /// How that script last went; null = not run yet.
+  final SetupState? setupState;
+  final bool setupRunning;
+
+  /// Whether it has a machine at all (the server runs with tools on).
+  final bool machine;
+
   static Agent fromJson(Map<String, Object?> j) => Agent(
     id: (j['id'] as String?) ?? '',
     name: (j['name'] as String?) ?? '',
@@ -162,6 +180,31 @@ class Agent {
         if (f is Map<String, Object?>) Fallback.fromJson(f),
     ],
     voice: (j['voice'] as String?) ?? '',
+    taskModel: j['task_model'] is Map<String, Object?> ? Fallback.fromJson(j['task_model'] as Map<String, Object?>) : null,
+    setup: (j['setup'] as String?) ?? '',
+    setupState: j['setup_state'] is Map<String, Object?> ? SetupState.fromJson(j['setup_state'] as Map<String, Object?>) : null,
+    setupRunning: j['setup_running'] == true,
+    machine: j['machine'] == true,
+  );
+}
+
+/// How an agent's setup script last went.
+class SetupState {
+  const SetupState({required this.at, required this.code, this.ms = 0, this.tail = '', this.stale = false});
+  final int at;
+  final int code;
+  final int ms;
+  final String tail;
+
+  /// The script changed since this run.
+  final bool stale;
+
+  static SetupState fromJson(Map<String, Object?> j) => SetupState(
+    at: (j['at'] as num?)?.toInt() ?? 0,
+    code: (j['code'] as num?)?.toInt() ?? 0,
+    ms: (j['ms'] as num?)?.toInt() ?? 0,
+    tail: (j['tail'] as String?) ?? '',
+    stale: j['stale'] == true,
   );
 }
 
@@ -959,6 +1002,9 @@ class Api {
   }
 
   Future<void> updateAgent(String id, Map<String, Object?> body) => _json('PATCH', '/api/bots/$id', body);
+
+  /// Run the agent's setup script now. It runs in the background; [agents] says when it is done.
+  Future<void> runSetup(String id) => _json('POST', '/api/bots/$id/setup');
 
   // ---- Sessions & search ----
 

@@ -62,6 +62,8 @@ const toBot = (r, lang = 'en') => ({
   setup: r.setup ?? '',
   setup_state: r.setup_state ? { ...r.setup_state, stale: r.setup_state.hash !== setupHash(r.setup) } : null,
   setup_running: setupRunning.has(r.id),
+  // What its background tasks run on: {provider_id, model}, null = its own model.
+  task_model: r.task_model?.model ? r.task_model : null,
   // Whether it has a machine at all (tools on): no machine, nothing to set up, watch or browse.
   machine: !!CFG.tools,
   // Money is micro-dollars everywhere in the API (1 dollar = 1e6); null = no cap of its own.
@@ -985,6 +987,8 @@ const frontSpecs = group => [
     'Write the brief for someone who has not read this conversation: the goal, what you already know, constraints, what to hand back.',
   { title: { type: 'string', description: 'A few words: what the task is' },
     brief: { type: 'string', description: 'Everything needed to do it without this conversation' },
+    main_model: { type: 'boolean', description: 'Background tasks may run on a lighter model than yours. True = run this one on your own model: ' +
+      'for work that needs your full reasoning. Leave it out for routine work' },
     ...group ? { agent: { type: 'string', description: 'The colleague to give it to, by name. Empty = yourself' } } : {} },
   ['title', 'brief']),
   fn('list_tasks', 'Where this conversation\'s background tasks stand: number, who, status, and what a waiting one is asking.'),
@@ -2125,7 +2129,7 @@ async function runTask(id) {
     const bot = all.find(b => b.id === t.agent_id)
     if (!bot) throw new Say('err.noAgent')
     const groupId = t.scope === 'group' ? t.scope_id : null
-    const p = await providerFor(bot)
+    const { p, fallbacks } = await taskModel(bot, t)
     const byName = t.by_agent && t.by_agent !== bot.id ? all.find(b => b.id === t.by_agent)?.name ?? '' : ''
     const convo = Array.isArray(t.transcript) && t.transcript.length ? t.transcript : [{ role: 'user', content: taskOpening(t, byName) }]
     if (t.pending) convo.push({ role: 'user', content: `[The user's answer] ${t.pending}` })
@@ -2140,7 +2144,7 @@ async function runTask(id) {
     // Always the auto limits: a background task has nobody to push it along by definition.
     const ctx = { container, signal: ac.signal, bot, lang: 'en', scope: t.scope, scopeId: t.scope_id, session: t.session_id,
       task: t, specs: specsFor({ task: true }), autonomy: 'auto', approval: { ...policy, mode: bot.approval || policy.mode },
-      onStep: messages => db.updateTask(id, { transcript: forStorage(messages) }) }
+      onStep: messages => db.updateTask(id, { transcript: forStorage(messages) }), ...fallbacks ? { fallbacks } : {} }
     const text = await runAgent(p, [{ role: 'system', content: system }, ...convo], null, null, ctx)
     if (ctx.question) {
       if (await db.updateTask(id, { status: 'waiting', question: ctx.question }, { from: ['running', 'waiting'] }))
@@ -2250,7 +2254,7 @@ async function startTaskFrom(ctx, args) {
     return `Not started: this session has already started ${MAX_PER_SESSION} tasks, which looks like a loop. Tell the user where things stand instead.`
   const ahead = (await db.tasksWithStatus(['queued', 'running'])).filter(x => x.agent_id === who.id).length
   const t = await db.createTask({ scope: ctx.scope, scope_id: ctx.scopeId, session_id: ctx.session,
-    agent_id: who.id, by_agent: ctx.bot.id, ...input })
+    agent_id: who.id, by_agent: ctx.bot.id, ...input, main_model: args.main_model === true })
   ctx.dispatched = true
   enqueueTask(t)
   const self = who.id === ctx.bot.id
@@ -2515,6 +2519,22 @@ async function providerFor(bot, choice = bot) {
   return { ...base, model: choice.model, effort, context_tokens, ...priceFor(base, await infoFor(base, choice.model)) }
 }
 
+/**
+ * What a background task runs on: the agent's background model when it has one (and the task didn't
+ * ask for the main one), with the agent's own model as its first backup and then the agent's backups.
+ * A background model whose upstream has gone is skipped, with a line in the log.
+ */
+async function taskModel(bot, t) {
+  if (!bot.task_model || t.main_model) return { p: await providerFor(bot), fallbacks: null }
+  try {
+    const p = await providerFor(bot, bot.task_model)
+    return { p, fallbacks: [await providerFor(bot), ...await fallbacksFor(bot)] }
+  } catch (e) {
+    console.warn(`[task] ${bot.name}: background model ${bot.task_model.model} unusable (${errorText(e, 'en')}); using its own`)
+    return { p: await providerFor(bot), fallbacks: null }
+  }
+}
+
 const MAX_FALLBACKS = 3
 // How long to wait before each try of one model call. MODEL_RETRY_WAITS exists for the tests, which
 // can't sit through eight seconds of backoff per failing call.
@@ -2678,6 +2698,15 @@ async function checkAgent(b, selfId = null, cur = null) {
     if (!model) throw new Say('agent.modelRequired')
     if (model.length > 200) throw new Say('agent.modelLong')
     out.model = model
+  }
+  // A cheaper (or simply other) model for its background tasks. null / no model = the same as its own.
+  if (b.task_model !== undefined) {
+    const m = b.task_model
+    const provider_id = str(m?.provider_id).trim(), model = str(m?.model).trim()
+    if (model.length > 200) throw new Say('agent.modelLong')
+    if (provider_id && !await db.getProvider(provider_id)) throw new Say('err.noProvider')
+    const main = `${out.provider_id ?? cur?.provider_id ?? ''}|${out.model ?? cur?.model ?? ''}`
+    out.task_model = model && `${provider_id}|${model}` !== main ? { provider_id, model } : null
   }
   if (b.setup !== undefined) {
     const setup = str(b.setup).replace(/\r\n?/g, '\n')

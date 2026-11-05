@@ -2529,6 +2529,16 @@ when it sleeps (desktop windows too). The chown after (re)creation no longer run
 The test docker (`test/e2e/fake-docker.sh`) now remembers the containers it "ran" so `ps` / `stop` / `rm` answer.
 Tests: `test/e2e/idle.test.mjs`. **Not verified on real containers yet** (the box).
 
+### 2.40.4 A background model
+
+`agents.task_model` (`{provider_id, model}`, null = the agent's own). Background tasks run on it (`taskModel()` in
+server.mjs) with the agent's own model as the first backup and then its backups — so a cheap model failing hands the
+task to the main one instead of failing it. `start_task` takes `main_model: true` for work that needs the agent's full
+reasoning (`tasks.main_model`). The same model as the main one is stored as null. A background model whose upstream
+is gone is skipped with a log line. Front turns, routines and calls stay on the main model. Usage rows record the
+model that ran, so the spend panel shows the saving. UI: "Background tasks run on" under the backups in both editors.
+Tests: `test/e2e/task-model.test.mjs`, `app/test/editor_test.dart` (also the setup section, 2.40.2).
+
 ## 3. What runs now
 
 ```bash

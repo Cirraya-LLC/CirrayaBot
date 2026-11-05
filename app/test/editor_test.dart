@@ -65,4 +65,59 @@ void main() {
       bench.dispose();
     });
   }
+
+  test('the background model and the setup script come through JSON', () {
+    final a = Agent.fromJson({
+      'id': 'op', 'name': 'Op', 'persona': 'p', 'model': 'm', 'machine': true,
+      'task_model': {'provider_id': 'p2', 'model': 'light'},
+      'setup': 'apt-get install -y jq', 'setup_running': false,
+      'setup_state': {'at': 1, 'code': 2, 'ms': 1500, 'tail': 'E: no such package', 'stale': true},
+    });
+    expect(a.taskModel?.toJson(), {'provider_id': 'p2', 'model': 'light'});
+    expect([a.setup, a.machine, a.setupState?.code, a.setupState?.stale], ['apt-get install -y jq', true, 2, true]);
+    final old = Agent.fromJson({'id': 'x'});
+    expect([old.taskModel, old.setupState, old.machine], [null, null, false], reason: 'an older server sends none');
+  });
+
+  for (final size in const [Size(1280, 800), Size(360, 640)]) {
+    testWidgets('background model and setup script at ${size.width.toInt()}x${size.height.toInt()}', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final bench = Workbench(const Settings(baseUrl: 'http://127.0.0.1:1', token: 't'));
+      const agent = Agent(id: 'op', name: 'Op', description: '', persona: 'p', color: '#4f8cff', model: 'm', machine: true,
+          taskModel: Fallback(model: 'light'), setup: 'apt-get install -y jq',
+          setupState: SetupState(at: 1700000000000, code: 100, tail: 'E: Unable to locate package jq'));
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+        builder: (context, child) => UiScale(scale: size.width < 400 ? 1.3 : 1, child: child!),
+        home: Builder(builder: (c) => TextButton(onPressed: () => showAgentEditor(c, bench, agent: agent), child: const Text('open'))),
+      ));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.text(tr('ed.taskModel')), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'light'), findsOneWidget, reason: 'the saved background model is shown');
+      final setup = find.byKey(const ValueKey('ed-setup'));
+      await tester.ensureVisible(setup);
+      expect(find.widgetWithText(TextField, 'apt-get install -y jq'), findsOneWidget, reason: 'open, since there is a script');
+      expect(find.textContaining('exit 100'), findsOneWidget);
+      expect(find.text('E: Unable to locate package jq'), findsOneWidget);
+      expect(find.text(tr('ed.setupRun')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      bench.dispose();
+    });
+  }
+
+  testWidgets('no machine, no setup script', (tester) async {
+    final bench = Workbench(const Settings(baseUrl: 'http://127.0.0.1:1', token: 't'));
+    const agent = Agent(id: 'op', name: 'Op', description: '', persona: 'p', color: '#4f8cff', model: 'm');
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+      home: Builder(builder: (c) => TextButton(onPressed: () => showAgentEditor(c, bench, agent: agent), child: const Text('open'))),
+    ));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('ed-setup')), findsNothing);
+    bench.dispose();
+  });
 }
