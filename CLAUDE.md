@@ -2741,9 +2741,18 @@ built-in web UI, **not part of the product**, kept only for the record.
 
 **Scope (the boss, 2026-10-09): 「我们只准备做我们的客户端 不做外部支持」** — we build our own clients (web,
 desktop, Android, later iOS) and nothing that plugs the product into outside services: **no chat channels**
-(Slack / Telegram / Feishu / WeCom …), **no third-party app integrations** (MCP, Composio, OpenAPI tools), **no
-external event triggers** (webhooks, GitHub). Model upstreams stay — they are how the product works at all. When
-comparing with peers (2.6.1), their integrations are not gaps of ours.
+(Slack / Telegram / Feishu / WeCom …), ~~no third-party app integrations (MCP…)~~, ~~no external event triggers~~.
+Model upstreams stay — they are how the product works at all.
+
+**Changed 2026-11-05** (the boss: 「以及我觉得mcp 还有 外部事件触发 这个是要做的」): **MCP is in** — remote servers
+(token and OAuth) and local ones, which run inside the agent's own machine (「本地和远程都要」) — **and external event
+triggers are in** (generic webhook + GitHub first). **Still out**: chat channels, payments, multiple users / a team
+agent (「不做」), acting on the person's own computer, and for now a template / skill marketplace (「暂时不做」).
+Also decided that day: isolation **auto** by default (Kata VM → gVisor → plain container, the weaker step visible),
+a full XFCE desktop with LibreOffice and Chromium on it, **one "computer" view** instead of separate browser and
+desktop views (「XFCE可以 合并成一个电脑视图 加LibreOffice 还有默认的浏览器」), and an **auto model mode** —
+main / light tiers with failover channels — that stays optional (「auto model模式 但是仍然可以和之前一样自己选择」).
+Not done: a model reviewing risky actions (「不做」). Order: isolation + desktop → auto model → triggers → MCP.
 
 Same day: 「客户端倒是不急 当前就desktop和android就够了」 (no iOS, desktop notifications or packaging for now) and
 **「我们只允许自己添加上游 不内置 也不预设AImodel」** — the person adds every upstream; the product ships no
