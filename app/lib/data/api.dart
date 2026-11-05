@@ -432,10 +432,13 @@ class Run {
 }
 
 class ApprovalPolicy {
-  const ApprovalPolicy({this.mode = 'match', this.patterns = const [], this.allow = const []});
+  const ApprovalPolicy({this.mode = 'match', this.patterns = const [], this.forbid = const [], this.allow = const []});
 
   final String mode;
   final List<String> patterns;
+
+  /// Never allowed, whatever the mode: refused without asking anyone.
+  final List<String> forbid;
 
   /// Everything someone said "always allow" to.
   final List<Allowance> allow;
@@ -443,6 +446,7 @@ class ApprovalPolicy {
   static ApprovalPolicy fromJson(Map<String, Object?> j) => ApprovalPolicy(
     mode: (j['mode'] as String?) ?? 'match',
     patterns: ((j['patterns'] as List?) ?? const []).map((e) => '$e').toList(),
+    forbid: ((j['forbid'] as List?) ?? const []).map((e) => '$e').toList(),
     allow: [
       for (final r in (j['allow'] as List?) ?? const [])
         if (r is Map<String, Object?>) Allowance.fromJson(r),
@@ -1242,8 +1246,8 @@ class Api {
   Future<ApprovalPolicy> approvalPolicy() async =>
       ApprovalPolicy.fromJson((await _json('GET', '/api/approvals/policy')) as Map<String, Object?>);
 
-  Future<void> setApprovalPolicy(String mode, List<String> patterns) =>
-      _json('PUT', '/api/approvals/policy', {'mode': mode, 'patterns': patterns});
+  Future<void> setApprovalPolicy(String mode, List<String> patterns, {List<String>? forbid}) =>
+      _json('PUT', '/api/approvals/policy', {'mode': mode, 'patterns': patterns, 'forbid': ?forbid});
 
   /// Answer one waiting call. The id only exists while the stream that asked is open,
   /// so a late click gets an ApiException rather than a silent yes.

@@ -40,6 +40,9 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   /// The platform-wide approval rule, and the pattern list "match" uses.
   final _patterns = TextEditingController();
+
+  /// Never allowed, whatever the mode.
+  final _forbid = TextEditingController();
   String _approvalMode = 'match';
   List<Allowance> _allow = const [];
 
@@ -62,7 +65,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   @override
   void dispose() {
-    for (final c in [_name, _url, _key, _tokens, _priceIn, _priceOut, _defaultCap, _patterns]) {
+    for (final c in [_name, _url, _key, _tokens, _priceIn, _priceOut, _defaultCap, _patterns, _forbid]) {
       c.dispose();
     }
     super.dispose();
@@ -75,6 +78,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       final policy = await widget.api.approvalPolicy();
       _approvalMode = policy.mode;
       _patterns.text = policy.patterns.join('\n');
+      _forbid.text = policy.forbid.join('\n');
       _allow = policy.allow;
       _effort = await widget.api.defaultEffort();
       _autonomy = await widget.api.defaultAutonomy();
@@ -203,6 +207,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       await widget.api.setApprovalPolicy(
         _approvalMode,
         _patterns.text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList(),
+        forbid: _forbid.text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList(),
       );
       _say(tr('ap.saved'), good: true);
     });
@@ -451,6 +456,17 @@ class _ProvidersPageState extends State<ProvidersPage> {
                     ),
                     const SizedBox(height: 6),
                     Text(tr('ap.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+                    const SizedBox(height: 12),
+                    TextField(
+                      key: const ValueKey('ap-never'),
+                      controller: _forbid,
+                      minLines: 2,
+                      maxLines: 6,
+                      decoration: InputDecoration(labelText: tr('ap.never'), hintText: tr('ap.neverPh')),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(tr('ap.neverHint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
                     // Everything someone said "always allow" to, each one takeable back.
                     if (_allow.isNotEmpty) ...[
                       const SizedBox(height: 12),

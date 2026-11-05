@@ -11,7 +11,7 @@ import { callUpstream, normProtocol, normEffort, EFFORTS, PROTOCOLS } from './pr
 import { checkSchedule, nextRun } from './schedule.mjs'
 import { checkSkill, parseSkillMd, toSkillMd } from './skill.mjs'
 import { addNote, NOTE_MAX_CHARS } from './memory.mjs'
-import { APPROVAL_MODES, RISKY, gate, toolSubject } from './approve.mjs'
+import { APPROVAL_MODES, RISKY, gate, forbidden, toolSubject } from './approve.mjs'
 import { AUTONOMY_MODES, normAutonomy, resolveAutonomy, limitsFor, checkPlan, planText, openSteps, nudgeFor } from './autonomy.mjs'
 import { OPEN, isOpen, MAX_OPEN_PER_CONVERSATION, MAX_PER_SESSION, QUESTION_MAX, RESULT_MAX, checkTaskInput, pickAssignee,
   taskOpening, eventForModel, wakes, taskLine, frontSection, taskSection, clipText } from './tasks.mjs'
@@ -182,6 +182,8 @@ async function approvalPolicy() {
   return {
     mode: APPROVAL_MODES.includes(s?.mode) ? s.mode : 'match',
     patterns: Array.isArray(s?.patterns) ? s.patterns.filter(x => String(x).trim()) : RISKY,
+    // Never allowed, whatever the mode: refused without asking anyone.
+    forbid: Array.isArray(s?.forbid) ? s.forbid.filter(x => String(x).trim()) : [],
   }
 }
 
@@ -1548,8 +1550,10 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       let args = {}
       try { args = JSON.parse(c.args || '{}') } catch { args = {} }
       onTool?.({ phase: 'run', name: c.name, args })
-      const need = gate(c.name, args, ctx.approval ?? { mode: 'off' }, await allowedFor(ctx.bot.id))
-      const allowed = !need || await askApproval(ctx, onTool, c.name, args, need.allow)
+      // A rule the person set wins over everything: never done, nobody asked, in any mode.
+      const never = forbidden(c.name, args, ctx.approval?.forbid)
+      const need = never ? null : gate(c.name, args, ctx.approval ?? { mode: 'off' }, await allowedFor(ctx.bot.id))
+      const allowed = !never && (!need || await askApproval(ctx, onTool, c.name, args, need.allow))
       // Hanging up while a card waits is not a refusal — recording one would leave the transcript
       // saying the user said no to something they never saw an answer for.
       if (ctx.signal?.aborted) throw new Say('chat.aborted')
@@ -1557,6 +1561,8 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       // only thing it will ever see about this call.
       const res = allowed
         ? await runOnce(c.name, args, ctx)
+        : never ? `Refused by a rule the user set (never allowed: ${never}): ${toolSubject(c.name, args)}
+This is never allowed. Don't look for another way to get the same result; if the work needs it, tell the user.`
         : `Refused${ctx.task ? ' by the user' : ctx.unattended ? ' (this ran as a scheduled task, with nobody there to approve it)'
           : ctx.run?.detached ? ' (the user closed the page, so nobody was there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
 Do not try this again. Do it another way, or say why you cannot.`
@@ -3189,7 +3195,10 @@ const server = createServer(async (req, res) => {
       if (!APPROVAL_MODES.includes(mode)) return send(400, { error: t('agent.approval', { list: APPROVAL_MODES.join(' / ') }) })
       const patterns = (Array.isArray(b.patterns) ? b.patterns : String(b.patterns ?? '').split('\n'))
         .map(x => String(x).trim()).filter(Boolean).slice(0, 200)
-      const policy = { mode, patterns }
+      const lines = v => (Array.isArray(v) ? v : String(v ?? '').split('\n')).map(x => String(x).trim()).filter(Boolean).slice(0, 200)
+      // A client that doesn't know about the never list leaves it as it was.
+      const forbid = b.forbid === undefined ? (await approvalPolicy()).forbid : lines(b.forbid)
+      const policy = { mode, patterns, forbid }
       await db.setSetting('approvals', policy)
       return send(200, policy)
     }

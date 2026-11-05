@@ -77,6 +77,16 @@ export function gate(name, args, { mode = 'off', patterns = [] } = {}, allowed =
   return null
 }
 
+/**
+ * A rule the person set: this is never done — in every mode, unattended or not — and nobody is asked.
+ * Matched like the ask list, against what the call is about to do. Returns the rule that matched, or null.
+ */
+export function forbidden(name, args, forbid = []) {
+  if (!ACTING_TOOLS.includes(name) || !forbid?.length) return null
+  const subject = toolSubject(name, args)
+  return forbid.find(p => patternRe(p).test(subject)) ?? null
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { strict: a } = await import('node:assert')
   const risky = { mode: 'match', patterns: RISKY }
@@ -119,5 +129,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.ok(gate('http_request', { method: 'post', url: 'https://api.x.com/issues' }, risky), 'a write over http_request asks')
   a.equal(gate('http_request', { url: 'https://api.x.com/issues' }, risky), null, 'a read does not')
   a.equal(gate('bash', cmd('echo POST https://x'), risky), null, 'the http pattern is anchored to the start')
+
+  // Never allowed: refused whatever the mode, and nothing to ask about.
+  const never = [String.raw`\bterraform\s+destroy\b`, 'paypal.com', '^desktop ']
+  a.equal(forbidden('bash', cmd('terraform destroy -auto-approve'), never), never[0])
+  a.equal(forbidden('bash', cmd('terraform plan'), never), null)
+  a.equal(forbidden('browser', { action: 'open', url: 'https://www.paypal.com/x' }, never), 'paypal.com')
+  a.equal(forbidden('computer', { action: 'click', x: 1, y: 2 }, never), '^desktop ', 'a whole tool can be ruled out')
+  a.equal(forbidden('read_file', { path: 'paypal.com' }, never), null, 'reading is never ruled out')
+  a.equal(forbidden('bash', cmd('terraform destroy'), []), null)
+  a.equal(forbidden('write_file', { path: 'notes.md', content: 'terraform destroy' }, never), null, 'file contents are not the command')
   console.log('approve.mjs: ok')
 }

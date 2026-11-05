@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:multi_agent/data/api.dart';
 import 'package:multi_agent/data/settings.dart';
 import 'package:multi_agent/state/workbench.dart';
 
@@ -64,6 +65,27 @@ void main() {
     expect(card.alwaysAllowed, isTrue);
     expect(card.output, 'pushed');
     bench.dispose();
+    await server.close(force: true);
+  });
+
+  test('the never-allowed list is read, and only sent when the page has it', () async {
+    final sent = <Map<String, Object?>>[];
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      final res = req.response..headers.contentType = ContentType.json;
+      final body = await utf8.decoder.bind(req).join();
+      if (req.method == 'PUT') sent.add(jsonDecode(body) as Map<String, Object?>);
+      res.write(jsonEncode({'mode': 'match', 'patterns': ['x'], 'forbid': [r'\bterraform\s+destroy\b'], 'allow': []}));
+      await res.close();
+    });
+    final api = Api(Settings(baseUrl: 'http://127.0.0.1:${server.port}', token: 't'));
+    final pol = await api.approvalPolicy();
+    expect(pol.forbid, [r'\bterraform\s+destroy\b']);
+    await api.setApprovalPolicy('match', ['x'], forbid: ['paypal.com']);
+    await api.setApprovalPolicy('all', ['x']);
+    expect(sent[0]['forbid'], ['paypal.com']);
+    expect(sent[1].containsKey('forbid'), isFalse, reason: 'a caller without the list leaves it alone');
+    api.close();
     await server.close(force: true);
   });
 }

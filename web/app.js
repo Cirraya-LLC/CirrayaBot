@@ -1676,6 +1676,7 @@ async function loadPolicy() {
     .map(m => `<option value="${m}">${esc(t(`ap.mode${m[0].toUpperCase()}${m.slice(1)}`))}</option>`).join('')
   $('#apmode').value = pol.mode
   $('#appat').value = (pol.patterns ?? []).join('\n')
+  $('#apnever').value = (pol.forbid ?? []).join('\n')
   paintAllowances(pol.allow ?? [])
 }
 // Everything someone said "always allow" to, each one takeable back.
@@ -1700,7 +1701,7 @@ function paintAllowances(list) {
 }
 $('#apsave').onclick = async () => {
   const r = await fetch(api('/api/approvals/policy'), { method:'PUT', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ mode: $('#apmode').value, patterns: $('#appat').value.split('\n') }) })
+    body: JSON.stringify({ mode: $('#apmode').value, patterns: $('#appat').value.split('\n'), forbid: $('#apnever').value.split('\n') }) })
   if (!r.ok) { hint((await r.json()).error, 'bad'); return }
   hint(t('ap.saved'), 'good')
 }

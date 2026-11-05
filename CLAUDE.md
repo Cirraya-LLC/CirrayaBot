@@ -2486,6 +2486,22 @@ would be made again — a second `git push`, a second charge.
 Verified: `test/e2e/effects.test.mjs` (a POST in flight when the server is SIGKILLed is not sent again and, asked
 again, goes out with the same key; a finished bash answers from the log and runs again in a later turn).
 
+## 2.40 After the November comparison (2026-11-05)
+
+The boss, on the list of in-scope gaps from 2.6.2: 「除了最后两个 前面的我都觉得应该要做」 — everything except
+multiple users / a team agent and acting on the person's own computer.
+
+### 2.40.1 Never-allowed rules
+
+`approvals.forbid` (settings key `approvals`, beside `mode` / `patterns`): patterns matched like the ask list —
+against what the call is about to do (`toolSubject`), never file contents — and **refused without asking anyone, in
+every mode, unattended or not** (`forbidden()` in approve.mjs, checked before `gate`). The tool result says it is a
+rule the user set and not to look for another way. `^desktop ` rules out the whole `computer` tool, a domain rules
+out opening it in the browser. **`PUT /api/approvals/policy` without `forbid` keeps the list** — an older client
+saving the mode must not wipe it. UI: a second box under the ask list (web `#apnever`, Flutter providers page).
+Tests: `node web/approve.mjs`, `test/e2e/forbid.test.mjs` (approvals off, an agent on "all", a routine; the older
+client), `app/test/approval_test.dart`.
+
 ## 3. What runs now
 
 ```bash

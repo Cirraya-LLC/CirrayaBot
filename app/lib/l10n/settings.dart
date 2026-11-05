@@ -169,6 +169,16 @@ const Map<String, List<String>> settingsStrings = {
     '規則是正規表示式，只比對命令本身，不比對檔案內容。單個 Agent 可以自己覆寫這個設定。'
         '定時任務沒人可問，所以在那裡會直接拒絕。',
   ],
+  'ap.never': ['Never allowed, one rule per line', '永远不允许，一行一条', '永遠不允許，一行一條'],
+  'ap.neverPh': ['e.g. terraform destroy', '例如 terraform destroy', '例如 terraform destroy'],
+  'ap.neverHint': [
+    'Refused without asking anyone, whatever the mode above — scheduled tasks and check-ins too. '
+        'Matched like the list above: against the command, the page address or the request, never against file contents.',
+    '不管上面选的是哪种模式，命中就直接拒绝，不会来问你；定时任务和主动汇报也一样。'
+        '和上面的清单一样，匹配的是命令、网页地址或请求本身，不看文件内容。',
+    '不管上面選的是哪種模式，命中就直接拒絕，不會來問你；定時任務和主動回報也一樣。'
+        '和上面的清單一樣，比對的是命令、網頁位址或請求本身，不看檔案內容。',
+  ],
   'ap.saved': ['Approval settings saved', '审批设置已保存', '審批設定已儲存'],
   'ap.allowed': ['Always allowed', '已设为总是允许', '已設為總是允許'],
   'ap.allowPattern': ['{tool}, commands matching', '{tool}，匹配', '{tool}，符合'],
