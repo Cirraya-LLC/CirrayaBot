@@ -2934,6 +2934,14 @@ refreshed + sign out, local env masked and not on the command line, never-allowe
 validation, internal address / plain http refused, agent deleted. `node web/mcp.mjs`, `node web/approve.mjs`,
 `app/test/mcp_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/mcp.mjs`, OAuth through a real popup).
 
+**Test box, real servers and a real model** (agent Mia, gpt-5.6-sol, Kata runtime): DeepWiki
+(`https://mcp.deepwiki.com/mcp`, no sign-in) connected with 3 tools — none marked read-only, so all started on "ask";
+Linear (`https://mcp.linear.app/mcp`, OAuth): discovery + dynamic registration gave a correct sign-in URL (PKCE S256,
+`resource`, redirect to the box's HTTPS name) — not signed in, no account; `mcp-server-fetch` installed by the setup
+script (`pip install --no-user mcp-server-fetch`, 27 s) and run as `python3 -m mcp_server_fetch` — uid 1000 inside the
+Kata VM, its `fetch` marked read-only. One turn used both: DeepWiki answered about facebook/react, fetch read
+example.com. **Not verified**: completing a real OAuth sign-in (needs an account), a real server's token refresh.
+
 ## 3. What runs now
 
 ```bash
