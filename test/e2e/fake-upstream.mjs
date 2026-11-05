@@ -9,6 +9,7 @@
 // A reply is one of:
 //   { text }                          a plain answer
 //   { tool: [name, args] }            one tool call;  { tools: [[name, args], ...] } several
+//                                     (with `text` too: that text streams first, as real models often say a line first)
 //   { status, error }                 an HTTP error before any byte (e.g. 500, 503, 429)
 //   { streamError }                   200, then an error frame inside the stream
 //   { empty: true }                   200 and nothing at all
@@ -94,6 +95,7 @@ export async function fakeUpstream({ models = [{ id: 'fake' }], name = 'fake' } 
     else if (reply.empty) frame({ choices: [{ delta: { role: 'assistant' }, finish_reason: 'stop' }] })
     else if (reply.tool || reply.tools) {
       const calls = reply.tools ?? [reply.tool]
+      if (reply.text) frame({ choices: [{ delta: { content: String(reply.text) } }] })
       frame({ choices: [{ delta: { tool_calls: calls.map(([fn, args], index) =>
         ({ index, id: `call_${name}_${++n}`, type: 'function', function: { name: fn, arguments: JSON.stringify(args ?? {}) } })) },
       finish_reason: 'tool_calls' }] })

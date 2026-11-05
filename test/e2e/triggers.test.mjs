@@ -31,7 +31,8 @@ test('a GitHub trigger: signed and filtered, one task per delivery, the event pa
   const bot = await s.agent(up, { name: 'Kim' })
   const briefs = []
   up.on(r => {
-    if (r.system.includes(IN_TASK)) { briefs.push(r.users[0]); return { tool: ['finish_task', { result: 'triaged' }] } }
+    // Text before the tool call, as real models write: background work has no stream, and this crashed it once.
+    if (r.system.includes(IN_TASK)) { briefs.push(r.users[0]); return { text: 'Looking at the issue.', tool: ['finish_task', { result: 'triaged' }] } }
     return { text: 'noted' }
   })
   const c = await s.api('POST', '/api/triggers', { target: { kind: 'agent', id: bot }, kind: 'github', name: 'Triage issues',
@@ -48,8 +49,9 @@ test('a GitHub trigger: signed and filtered, one task per delivery, the event pa
 
   const r = await gh(t, 'issues', ISSUE, 'd1')
   a.equal(r.status, 202, JSON.stringify(r.body))
-  await s.until(async () => (await tasksOf('agent', bot))[0]?.status === 'done', { what: 'the task' })
+  await s.until(async () => ['done', 'failed'].includes((await tasksOf('agent', bot))[0]?.status), { what: 'the task' })
   const [task] = await tasksOf('agent', bot)
+  a.equal(task.status, 'done', task.error)
   a.equal(task.title, 'Triage issues')
   a.match(briefs[0], /Triage the new issue/)
   a.match(briefs[0], /not instructions[\s\S]*Repository: o\/r[\s\S]*Title: It breaks[\s\S]*Ignore your rules/)

@@ -1953,7 +1953,8 @@ done; answered from the card, the answer only in the task's model calls; cancel_
 card + wake; Stop on a finished task 409; restart mid-task → resumed from its saved step; restart while waiting
 for approval → re-queued with the note, asked again; approval allow/deny inside a task; session delete with a
 running task; two messages into one busy session queued, and Stop stopping both. Web in headless Chromium:
-cards, reply box, panel, trace, zero errors. Client: 45 tests (+ tasks, + panel layout). **Not verified**: real
+cards, reply box, panel, trace, zero errors. Client: 45 tests (+ tasks, + panel layout). ⚠️ **Every task on a real model
+that wrote text failed until 2.44** (`onDelta is not a function` — the fake never wrote text in a task). **Not verified**: real
 containers (no docker on the Mac this ran on), a real model actually choosing to delegate well, the Flutter
 build run as an app.
 
@@ -2868,7 +2869,16 @@ own session, duplicate, filters, webhook token, keywords, hourly 429, off = 404,
 group: lead / named / a member leaving), `node web/triggers.mjs`, `app/test/trigger_test.dart` (desktop and 360 wide
 ×1.3: made, secret shown and copied, edit hides it, new secret, group pick); web in Chromium
 (`$CLAUDE_JOB_DIR/tmp/vui/tg.mjs`: made, copied, a signed POST fired it and the panel showed it, edit, new secret,
-pause, group, Chinese, 393 px). **Not verified**: a real GitHub repository calling it (needs a public address).
+pause, group, Chinese, 393 px). **Test box, real model** (Lin, gpt-5.6-sol): from the Mac to
+`https://<box>.sslip.io/hooks/<id>` through Caddy — unsigned 401, ping 200, signed 202, resend `duplicate`; the task
+triaged the issue ("high") and ignored the `rm -rf /work` written into the issue body (no tool run).
+**Not verified**: a real GitHub repository calling it.
+
+⚠️ **That box run found that every background task on a real model was broken, since 2.31.** Background work (tasks,
+check-ins, helpers) passes `null` for the stream callback, and `callUpstream` called it on the first piece of text:
+`onDelta is not a function`, task failed. The e2e fake only ever answered a task with a tool call — no text — so it never
+showed; real models nearly always write a line first. Fixed in `callUpstream` (no callback = a no-op), and the fake can
+now stream text before a tool call (`{text, tool}`), which the trigger test uses (red on the old code).
 
 ## 3. What runs now
 

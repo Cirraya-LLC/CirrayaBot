@@ -218,6 +218,9 @@ const effortKey = p => `${p.id ?? p.base_url}|${p.model}`
 
 /** Call the upstream once. Returns this step's text and the tools it wants to call. */
 export async function callUpstream(p, messages, tools, onDelta, signal) {
+  // Background work (tasks, check-ins, helpers) has no stream to write to and passes null — a model that writes text
+  // there must not crash the call.
+  if (typeof onDelta !== 'function') onDelta = () => {}
   const protocol = normProtocol(p.protocol)
   const key = effortKey(p)
   const effort = noEffort.has(key) ? '' : normEffort(p.effort)
