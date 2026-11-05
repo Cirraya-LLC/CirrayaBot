@@ -66,6 +66,51 @@ DESCRIBE_JS = r"""
            password: type === 'password' }
 }
 """
+PROFILE = '/work/.browser'
+
+
+def free_profile(profile):
+    """Make the profile Chromium's again. A machine that was recreated (new image, new sandbox rules) or stopped while
+    its browser ran leaves Chromium's lock behind, naming a host or a pid that is gone; Chromium then refuses the
+    profile and, headless, dies with "Can't open display" — the agent's browser never opens again. Only this daemon
+    runs Chromium on this profile, and it is starting: whatever still holds the profile is left over, so it goes."""
+    me = os.getpid()
+    try:
+        pids = [p for p in os.listdir('/proc') if p.isdigit()]
+    except OSError:
+        pids = []       # no /proc (not Linux): nothing to look through
+    for pid in pids:
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                args = f.read().split(b'\0')
+        except OSError:
+            continue
+        if int(pid) != me and f'--user-data-dir={profile}'.encode() in args:
+            try:
+                os.kill(int(pid), 9)
+            except OSError:
+                pass
+    for name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+        try:
+            os.unlink(os.path.join(profile, name))
+        except FileNotFoundError:
+            pass
+
+
+async def title_of(p):
+    """The page's title, or '' — read while a click or Enter is still navigating, Playwright throws "Execution context
+    was destroyed", and the action that caused it was reported as failed although it had worked."""
+    for _ in range(2):
+        try:
+            return await p.title()
+        except Exception:
+            try:
+                await p.wait_for_load_state('domcontentloaded', timeout=5000)
+            except Exception:
+                pass
+    return ''
+
+
 REC_MAX_STEPS = 300
 REC_MAX_SECONDS = 600
 # Query parameters whose values are hidden in a recording whatever was typed: a login form sent by GET, a token in a link.
@@ -110,9 +155,10 @@ class Browser:
         self.cdp = None
 
     async def start(self):
+        free_profile(PROFILE)
         pw = await async_playwright().start()
         self.ctx = await pw.chromium.launch_persistent_context(
-            '/work/.browser',
+            PROFILE,
             executable_path=os.environ.get('CHROMIUM', '/usr/bin/chromium'),
             headless=True,
             # We're root in the container and chromium's sandbox won't start as root; the container itself is this Agent's sandbox
@@ -213,7 +259,7 @@ class Browser:
         kind = a.get('action')
         if kind == 'record_start':
             p = await self.page()
-            self.rec = {'at': time.time(), 'url': p.url, 'typed': [], 'started': time.time(), 'steps': [{'kind': 'start', 'url': p.url, 'title': await p.title()}]}
+            self.rec = {'at': time.time(), 'url': p.url, 'typed': [], 'started': time.time(), 'steps': [{'kind': 'start', 'url': p.url, 'title': await title_of(p)}]}
             return {'recording': True}
         if kind == 'record_stop':
             if self.recording():
@@ -253,7 +299,7 @@ class Browser:
     async def note_page(self, p):
         if p.url != self.rec['url']:
             self.rec['url'] = p.url
-            self.note({'kind': 'page', 'url': p.url[:300], 'title': (await p.title())[:120]})
+            self.note({'kind': 'page', 'url': p.url[:300], 'title': (await title_of(p))[:120]})
 
     async def describe(self, p, x=0, y=0, focused=False):
         try:
@@ -294,7 +340,7 @@ class Browser:
         kind = a.get('action')
         if kind == 'open':
             self.rec['url'] = p.url
-            self.note({'kind': 'open', 'url': p.url[:300], 'title': (await p.title())[:120]})
+            self.note({'kind': 'open', 'url': p.url[:300], 'title': (await title_of(p))[:120]})
         elif kind in ('back', 'reload'):
             self.note({'kind': kind})
         elif kind == 'type_raw':
@@ -385,7 +431,7 @@ class Browser:
             raise ValueError(f'unknown action {kind}')
         p = await self.page()        # a new tab opened: later actions and the stream follow it
         out['url'] = p.url
-        out['title'] = await p.title()
+        out['title'] = await title_of(p)
         return out
 
 

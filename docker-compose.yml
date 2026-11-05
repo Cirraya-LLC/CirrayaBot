@@ -45,6 +45,13 @@ services:
       AGENT_MEMORY: ${AGENT_MEMORY:-2g}
       AGENT_CPUS: ${AGENT_CPUS:-2}
       AGENT_EXEC_TIMEOUT: ${AGENT_EXEC_TIMEOUT:-120}
+      # an agent's machine nobody used for this many minutes is stopped (files kept), 0 = never
+      AGENT_IDLE_STOP_MIN: ${AGENT_IDLE_STOP_MIN:-30}
+      # how long an agent's setup script may run, in minutes
+      AGENT_SETUP_TIMEOUT_MIN: ${AGENT_SETUP_TIMEOUT_MIN:-15}
+      # background tasks on machines of their own (helpers): how many per agent at once, and how much /work/out comes back
+      AGENT_HELPERS_MAX: ${AGENT_HELPERS_MAX:-3}
+      AGENT_HELPER_COPY_MB: ${AGENT_HELPER_COPY_MB:-200}
       # largest file a person or an agent can send, in MB
       UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-50}
       # change it when running a second deployment on the same machine, or both fight over the same container names

@@ -561,8 +561,10 @@ function holdWhile(c, child) {
   return child
 }
 // Ports our own daemons listen on (browserd 9230/9231, desktopd 9240/9241), in /proc/net/tcp's hex.
+// ⚠️ Not 127.0.0.11 either (0B00007F): Docker's own DNS for the agents' network listens there, on a random TCP port, in
+// every container — counted, it kept every machine awake forever (seen only with real containers).
 const OWN_PORTS = ['240E', '240F', '2418', '2419']
-const SERVING = `awk 'NR>1 && $4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u |
+const SERVING = `awk 'NR>1 && $4=="0A" && $2 !~ /^0B00007F:/ {split($2,a,":"); print a[2]}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u |
   grep -vxE '${OWN_PORTS.join('|')}' | head -1`
 const inUse = id => [`agent:${id}`, `task:${id}`, `box:${id}`].some(k => locks.has(k)) || setupRunning.has(id) || recording.has(id)
 

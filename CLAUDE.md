@@ -2527,7 +2527,13 @@ inside listens on a port** (our daemons' 9230/9231/9240/9241 don't count) **or u
 a long job the agent started must not be killed because nobody chatted for half an hour. What runs inside stops
 when it sleeps (desktop windows too). The chown after (re)creation no longer runs on a plain start.
 The test docker (`test/e2e/fake-docker.sh`) now remembers the containers it "ran" so `ps` / `stop` / `rm` answer.
-Tests: `test/e2e/idle.test.mjs`. **Not verified on real containers yet** (the box).
+Tests: `test/e2e/idle.test.mjs`. ⚠️ **On real containers it never slept at first**: Docker's own DNS for a
+user-defined network listens on `127.0.0.11` at a random TCP port in *every* container, and that counted as "serving".
+Listeners on 127.0.0.11 (`0B00007F` in /proc/net/tcp) are ignored now. Verified on the box (2026-11-05, 2 min idle):
+slept with the log line, woke on the next turn with its files, stayed awake while `python3 -m http.server` ran in it.
+⚠️ Also: **`AGENT_*` settings only reach the app when `docker-compose.yml` passes them** — `AGENT_IDLE_STOP_MIN`,
+`AGENT_SETUP_TIMEOUT_MIN`, `AGENT_HELPERS_MAX`, `AGENT_HELPER_COPY_MB` weren't, so setting them in `.env` did nothing.
+A new setting goes into the compose `environment:` list too.
 
 ### 2.40.4 A background model
 
@@ -2645,8 +2651,16 @@ so it isn't recorded.
   `.browser-calls`), `node web/teach.mjs`, `app/test/teach_test.dart` (desktop + 360 ×1.3), web in Chromium
   (`$CLAUDE_JOB_DIR/tmp/vui/teach.mjs`). browserd's recording was run against a real Chromium on the Mac (Python
   Playwright in a scratch venv, `/work/.browser` swapped for a temp dir): clicks, typing coalesced, Chinese, scroll,
-  Enter submitting a GET login form, back, `click_xy` / `type_raw` from HTTP. **Not verified**: in a real agent
-  container, and a real model's draft.
+  Enter submitting a GET login form, back, `click_xy` / `type_raw` from HTTP. **On the box** (2026-11-05, real
+  container, a GET login form served inside the agent's machine): every step in zh-Hans and en, `pw=[hidden]` in the
+  next page's URL, the password nowhere in the recording; gpt-5.6-sol drafted a sensible skill that says to use
+  `fill_secret` or let the person log in.
+- ⚠️ Found there, older than this feature: **an agent whose machine was recreated could never open its browser
+  again.** The profile in `/work/.browser` keeps Chromium's `SingletonLock` naming the old container's hostname;
+  Chromium refuses a profile "in use on another computer" and, headless, dies with `Can't open display` (exit 21).
+  `free_profile()` in browserd kills any leftover Chromium on that profile and removes the `Singleton*` links before
+  launching. And `title_of()`: reading the title while Enter / a click is still navigating threw "Execution context
+  was destroyed", so `press` reported failure although the key had worked (the agent's tool too).
 
 ### 2.40.10 Helpers: a task on a machine of its own
 
@@ -2672,8 +2686,13 @@ Same image and sandbox rules, the agent's setup script runs in it, name `<prefix
   `helpers` (running now), and an agent with helpers but no machine of its own is listed.
 - Tests: `test/e2e/helpers.test.mjs` (2 at once under a limit of 2, mounts, removal, plain tasks still one at a time,
   copy-back through the agent's container, waiting keeps the folder and stop clears it), sandbox self-test (Linux),
-  `app/test/activity_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/helpers.mjs`). **Not verified with real
-  containers yet.**
+  `app/test/activity_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/helpers.mjs`). **On the box** (real
+  containers): two and then three helpers at once, mounts as above (`/desk` rw=false, `touch` → "Read-only file
+  system"), uid 1000, `/work/out` copied back owned by the agent, finished helpers' containers and folders gone,
+  stopping queued/running ones cleaned up too.
+- ⚠️ A scripted fake model that replays the newest script it finds *anywhere* in the history replays it again when
+  the front thread is woken with a task's news — it started tasks in a loop until the 8-open-tasks limit stopped it.
+  A fake must only act on the newest user message.
 
 ## 3. What runs now
 
