@@ -29,6 +29,8 @@ case "$1" in
     body=$(cat 2>/dev/null)    # the server always closes stdin; reading it avoids a broken pipe on big inputs
     # What listens inside: nothing, in here.
     case "${@: -1}" in *"/proc/net/tcp"*) exit 0 ;; esac
+    # A command a test wants to fail.
+    case "${@: -1}" in *FAIL_EXIT*) echo "boom" >&2; exit 1 ;; esac
     # A helper's /work/out: as big as <log>.helper-out says (absent: empty, nothing to copy back).
     case "${@: -1}" in *"du -sb /work/out"*) [ -f "$STATE.helper-out" ] && cat "$STATE.helper-out"; exit 0 ;; esac
     # The browser daemon: a test that wrote <log>.browser gets that as every answer, and the requests are kept.

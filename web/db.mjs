@@ -162,6 +162,11 @@ alter table agents add column if not exists approval text not null default '';
 
 -- How far this agent goes on its own: '' (follow the platform setting), 'auto' or 'manual'.
 alter table agents add column if not exists autonomy text not null default '';
+-- How the model is chosen: '' = the platform's, 'auto' = start on the light model (task_model) and move up to the main one
+-- when the work needs it, 'manual' = the main model for conversations, the light one only for background tasks.
+alter table agents add column if not exists model_mode text not null default '';
+-- Which model wrote a reply (auto mode moves between them): shown under it.
+alter table messages add column if not exists model text not null default '';
 
 -- A tool call is a message too, so reopening a conversation still shows which commands ran.
 -- Its content is JSON {name, args, output}; only the model's own history filters them out.
@@ -355,21 +360,22 @@ export async function getAgent(id) {
 export async function upsertAgent(a) {
   const { rows } = await q(`
     insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy,
-                        fallbacks, voice, setup, task_model, goals, checkin_every)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                        fallbacks, voice, setup, task_model, goals, checkin_every, model_mode)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
       approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks, voice = excluded.voice,
-      setup = excluded.setup, task_model = excluded.task_model, goals = excluded.goals, checkin_every = excluded.checkin_every
+      setup = excluded.setup, task_model = excluded.task_model, goals = excluded.goals, checkin_every = excluded.checkin_every,
+      model_mode = excluded.model_mode
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
      a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? '',
      JSON.stringify(a.fallbacks ?? []), a.voice ?? '', a.setup ?? '', a.task_model ? JSON.stringify(a.task_model) : null,
-     a.goals ?? '', a.checkin_every ?? 0])
+     a.goals ?? '', a.checkin_every ?? 0, a.model_mode ?? ''])
   return rows[0]
 }
 
@@ -498,9 +504,9 @@ export async function deleteSession(id) {
 }
 
 // ---------- messages ----------
-export async function addMessage(scope, scopeId, session, { role, speaker = '', content, files = [] }) {
-  await q('insert into messages (scope, scope_id, session_id, role, speaker, content, files) values ($1,$2,$3,$4,$5,$6,$7)',
-    [scope, scopeId, session, role, speaker, content, JSON.stringify(files ?? [])])
+export async function addMessage(scope, scopeId, session, { role, speaker = '', content, files = [], model = '' }) {
+  await q('insert into messages (scope, scope_id, session_id, role, speaker, content, files, model) values ($1,$2,$3,$4,$5,$6,$7,$8)',
+    [scope, scopeId, session, role, speaker, content, JSON.stringify(files ?? []), model ?? ''])
   await q('update sessions set updated_at = now() where id = $1', [session])
 }
 
@@ -563,7 +569,7 @@ export async function recent(scope, scopeId, limit = 200, { tools = false, event
   if (session) { params.push(session); where.push(`and session_id = $${params.length}`) }
   if (upto != null) { params.push(upto); where.push(`and id <= $${params.length}`) }
   const { rows } = await q(
-    `select id, role, speaker, content, files, at from messages
+    `select id, role, speaker, content, files, model, at from messages
      where scope = $1 and scope_id = $2 ${skip.length ? `and role not in (${skip.join(',')})` : ''} ${where.join(' ')}
      order by id desc limit $3`, params)
   return rows.reverse()
@@ -877,6 +883,9 @@ export const setDefaultEffort = e => setSetting(EFFORT_KEY, e)
 
 // The platform-wide autonomy ('auto' / 'manual'); never set means auto.
 const AUTONOMY_KEY = 'autonomy'
+// The platform-wide model mode ('auto' / 'manual'); never set means auto.
+export const defaultModelMode = async () => (await getSetting('model.mode', '')) || 'auto'
+export const setDefaultModelMode = m => setSetting('model.mode', m)
 export const defaultAutonomy = () => getSetting(AUTONOMY_KEY, '')
 export const setDefaultAutonomy = m => setSetting(AUTONOMY_KEY, m)
 

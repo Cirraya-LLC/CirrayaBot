@@ -71,6 +71,8 @@ const toBot = (r, lang = 'en') => ({
   checkin_next_at: r.checkin_next_at ?? null, checkin_last: r.checkin_last ?? null, checkin_session: r.checkin_session ?? null,
   // What its background tasks run on: {provider_id, model}, null = its own model.
   task_model: r.task_model?.model ? r.task_model : null,
+  // How its model is chosen: '' = the platform's, 'auto' (light first, main when needed), 'manual'.
+  model_mode: r.model_mode ?? '',
   // Whether it has a machine at all (tools on): no machine, nothing to set up, watch or browse.
   machine: !!CFG.tools,
   // Money is micro-dollars everywhere in the API (1 dollar = 1e6); null = no cap of its own.
@@ -128,7 +130,8 @@ function transcriptRow(m, text) {
     catch { return { id: Number(m.id), role: 'assistant', at: m.at, ...text } }
   }
   const files = (m.files ?? []).map(fileView)
-  if (m.role !== 'tool') return { id: Number(m.id), role: m.role, at: m.at, ...text, files }
+  // model: which one wrote a reply (auto mode moves between them); '' for older rows and people.
+  if (m.role !== 'tool') return { id: Number(m.id), role: m.role, at: m.at, ...text, files, ...m.model ? { model: m.model } : {} }
   try {
     const { name, args, output, file } = JSON.parse(m.content)
     return { id: Number(m.id), role: 'tool', speaker: m.speaker, at: m.at, name, args: args ?? {}, output: output ?? '',
@@ -1204,6 +1207,16 @@ const REQUEST_SECRET = fn('request_secret', 'Ask the user for a credential you n
 ['name', 'purpose', 'origin'])
 
 // Offered only in a turn that came from a voice call (POST /api/chat with `call`).
+// ── Auto model mode: start on the light model (the agent's task_model), move up to its main one when the work needs it ──
+const MODEL_MODES = ['auto', 'manual']
+const autoFor = async bot => ((bot?.model_mode || await db.defaultModelMode()) === 'auto') && !!bot?.task_model
+const STRONGER = fn('use_stronger_model', 'You are working on the lighter, cheaper of your two models. Call this when the work needs ' +
+  'more than it gives — a hard bug, a subtle judgement, a plan that keeps going wrong. The rest of this turn continues on your ' +
+  'main model. Say why in one sentence.', { reason: { type: 'string', description: 'Why, in one sentence' } }, ['reason'])
+// A tool call that plainly failed: three in a row on the light model and the main one takes over.
+const failedResult = out => /--- exit [1-9]\d* ---/.test(out ?? '') || /^Tool error:/.test(out ?? '')
+const STUCK_AFTER = 3
+
 const END_CALL = fn('end_call', 'End the voice call. Use it when the person asks to hang up, or the conversation has clearly ' +
   'come to an end. Your farewell is spoken as the call ends, so don\'t also say goodbye in your reply. Anything still to do ' +
   'carries on in the chat afterwards.',
@@ -1805,6 +1818,28 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
   const limits = limitsFor(ctx.autonomy)
   const lang = ctx.lang ?? 'en'
   let text = '', nudged = 0
+  // Auto model mode, a conversation's own turn: the light model first, the main one and its backups behind it.
+  // (A background task arrives here already on its light model — runTask — with onLight set.)
+  if (ctx.front && !ctx.onLight && await autoFor(ctx.bot)) {
+    try {
+      const light = await providerFor(ctx.bot, ctx.bot.task_model)
+      ctx.fallbacks = [p, ...await fallbacksFor(ctx.bot)]
+      p = light
+      ctx.onLight = true
+    } catch (e) { console.warn(`[auto] ${ctx.bot.name}: light model unusable (${errorText(e, 'en')}); on the main one`) }
+  }
+  // Up to the main model for the rest of the turn. `why`: asked / stuck / images — said in the stream like a fallback.
+  const moveUp = async why => {
+    ctx.fallbacks ??= await fallbacksFor(ctx.bot)
+    const next = ctx.fallbacks.shift()
+    if (!next) return false
+    console.log(`[auto] ${ctx.bot.name}: ${p.model} → ${next.model} (${why})`)
+    onTool?.({ phase: 'retry', reason: tr(lang, `auto.${why}`, { from: p.model, model: next.model }) })
+    p = next
+    ctx.onLight = false
+    return true
+  }
+  ctx.usedModel = p.model
   for (let step = 0; step < limits.steps; step++) {
     // The person said something while this turn was working: it reaches the model now, before the
     // next call — not after the whole turn has finished. Already stored when it arrived.
@@ -1815,6 +1850,9 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
         messages.push({ role: 'user', ...await withAttachments(ctx.peers ? `[User] ${m.text}` : m.text, m.files, true, budget) })
       onTool?.({ phase: 'interject', n: said.length })
     }
+    if (ctx.onLight && ctx.wantStronger) { ctx.wantStronger = null; await moveUp('asked') }
+    if (ctx.onLight && (ctx.failStreak ?? 0) >= STUCK_AFTER) { ctx.failStreak = 0; await moveUp('stuck') }
+    ctx.usedModel = p.model
     await checkCap(ctx.bot, p)
     const fit = fitContext(messages, p.context_tokens)
     if (fit.dropped) onTool?.({ phase: 'trim', dropped: fit.dropped })
@@ -1826,12 +1864,16 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     let r
     for (const [i, wait] of RETRY_WAITS.entries()) {
       if (wait) await new Promise(t => setTimeout(t, wait))
-      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal, specs: ctx.specs }); break }
+      const specs = ctx.onLight ? [...ctx.specs ?? (CFG.tools ? TOOL_SPECS : []), STRONGER] : ctx.specs
+      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal, specs }); break }
       catch (e) {
         if (ctx.signal?.aborted) throw new Say('chat.aborted')
         // Rejected with a 4xx while carrying a screenshot: most likely this model doesn't accept images. Drop them and carry on,
         // and stop sending screenshots afterwards — otherwise a model that can't see images fails the whole turn on the browser
-        if (isUpstreamError(e) && upstreamStatus(e) >= 400 && upstreamStatus(e) < 500 && dropImages(messages)) {
+        // In auto mode the light model not taking images is a reason to move up, not to throw them away.
+        const images = isUpstreamError(e) && upstreamStatus(e) >= 400 && upstreamStatus(e) < 500 && messages.some(m => m.images)
+        if (images && ctx.onLight && await moveUp('images')) { r = null; break }
+        if (images && dropImages(messages)) {
           ctx.noImages = true
           onTool?.({ phase: 'retry', reason: tr(lang, 'chat.noImages') })
           r = null; break
@@ -1845,12 +1887,14 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
           console.warn(`[fallback] ${ctx.bot.name}: ${p.model} failed (${errorText(e, 'en').slice(0, 160)}); trying ${next.model}`)
           onTool?.({ phase: 'retry', reason: tr(lang, 'chat.fallback', { from: p.model, model: next.model }) })
           p = next
+          ctx.onLight = false
           r = null; break
         }
         onTool?.({ phase: 'retry', reason: errorText(e, lang).slice(0, 120) })
       }
     }
     if (!r) { step--; continue }
+    ctx.usedModel = p.model
     const { content, calls, usage } = r
     noteUsage(ctx, p, usage)
     if (content) text = content
@@ -1897,7 +1941,9 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       if (ctx.signal?.aborted) throw new Say('chat.aborted')
       // The refusal goes back as the tool result so the agent adapts instead of retrying: it is the
       // only thing it will ever see about this call.
-      const res = allowed
+      const res = c.name === 'use_stronger_model' && ctx.onLight
+        ? (ctx.wantStronger = String(args.reason ?? '').slice(0, 200) || 'asked', 'Moving to your main model for the rest of this turn.')
+        : allowed
         ? await runOnce(c.name, args, ctx)
         : never ? `Refused by a rule the user set (never allowed: ${never}): ${toolSubject(c.name, args)}
 This is never allowed. Don't look for another way to get the same result; if the work needs it, tell the user.`
@@ -1918,6 +1964,7 @@ Do not try this again. Do it another way, or say why you cannot.`
       if (ctx.task) await db.traceTask(ctx.task.id, { ...step, at: Date.now() })
       else if (ctx.scope) await db.addTool(ctx.scope, ctx.scopeId, ctx.session, ctx.bot?.name ?? '', step)
       messages.push({ role: 'tool', tool_call_id: c.id, content: out })
+      ctx.failStreak = failedResult(out) ? (ctx.failStreak ?? 0) + 1 : 0
     }
     // A screenshot can't go into a tool result (Chat protocol tool messages only take text), so it follows as a user message.
     // Keep only the newest one: ten screenshots in a turn would each be paid for at every step, and the old ones are useless
@@ -2080,14 +2127,16 @@ function askSolo(p, bot, memory, onDelta, onTool, signal, lang, gate, session, r
     const system = systemFor(bot, memory, { box: CFG.tools ? '/work' : null, recall: await groupRecallFor(bot),
       skills: await db.skillsFor(bot.id), auto: gate.autonomy === 'auto', open, nameOf, secrets: await db.listSecrets(bot.id),
       call: !!gate.call })
-    const write = content => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content })
+    const ctx = { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, front: true,
+      specs: [...specsFor({ dispatch: CFG.tools }), ...gate.call ? [END_CALL] : []], ...gate }
+    // Which model wrote it is kept with it (auto mode moves between models).
+    const write = content => db.addMessage('dm', bot.id, session, { role: 'assistant', speaker: bot.name, content, model: ctx.usedModel })
     const later = resume ? await forModel((await db.recent('dm', bot.id, FETCH_MAX, { session }))
       .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto))) : []
     const turn = frontTurn(system, history, rows, { session, scope: 'dm', scopeId: bot.id, speaker: bot.id, resume, later })
     await turn.save(turn.messages)
-    const full = await stopNoted(write, signal, () => runAgent(p, turn.messages,
-      onDelta, onTool, { container, signal, bot, lang, scope: 'dm', scopeId: bot.id, session, front: true,
-        specs: [...specsFor({ dispatch: CFG.tools }), ...gate.call ? [END_CALL] : []], saveReply: write, onStep: turn.save, ...gate }))
+    Object.assign(ctx, { saveReply: write, onStep: turn.save })
+    const full = await stopNoted(write, signal, () => runAgent(p, turn.messages, onDelta, onTool, ctx))
     const said = withFarewell(full, gate.call, onDelta)
     await write(said)
     return said
@@ -2106,10 +2155,11 @@ function askInGroup(p, bot, peers, lead, memory, onDelta, onTool, groupId, signa
       .filter(m => m.role === 'user' && Number(m.id) > Number(resume.read_upto)), bot) : []
     const turn = frontTurn(system, await forModel(rows, bot), rows, { session, scope: 'group', scopeId: groupId, speaker: bot.id, resume, later })
     await turn.save(turn.messages)
-    const write = content => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content })
-    const reply = await stopNoted(write, signal, () => runAgent(p, turn.messages, onDelta, onTool,
-      { container, signal, bot, peers, lang, scope: 'group', scopeId: groupId, session, front: true,
-        specs: [...specsFor({ group: true }), ...gate.call ? [END_CALL] : []], saveReply: write, onStep: turn.save, ...gate }))
+    const ctx = { container, signal, bot, peers, lang, scope: 'group', scopeId: groupId, session, front: true,
+      specs: [...specsFor({ group: true }), ...gate.call ? [END_CALL] : []], ...gate }
+    const write = content => db.addMessage('group', groupId, session, { role: 'assistant', speaker: bot.name, content, model: ctx.usedModel })
+    Object.assign(ctx, { saveReply: write, onStep: turn.save })
+    const reply = await stopNoted(write, signal, () => runAgent(p, turn.messages, onDelta, onTool, ctx))
     const said = withFarewell(reply, gate.call, onDelta)
     await write(said)
     return said
@@ -2399,7 +2449,9 @@ async function runTask(id) {
     const ctx = { container, signal: ac.signal, bot, lang: 'en', scope: t.scope, scopeId: t.scope_id, session: t.session_id,
       task: t, specs: specsFor({ task: true }).filter(s => !t.checkin || s.function.name !== 'ask_user'), checkin: !!t.checkin,
       autonomy: 'auto', approval: { ...policy, mode: bot.approval || policy.mode },
-      onStep: messages => db.updateTask(id, { transcript: forStorage(messages) }), ...fallbacks ? { fallbacks } : {} }
+      onStep: messages => db.updateTask(id, { transcript: forStorage(messages) }),
+      // On its light model (taskModel gave it the main one as a backup): in auto mode it may also move up when stuck or asked.
+      ...fallbacks ? { fallbacks, onLight: await autoFor(bot) } : {} }
     const text = await runAgent(p, [{ role: 'system', content: system }, ...convo], null, null, ctx)
     if (ctx.question) {
       if (await db.updateTask(id, { status: 'waiting', question: ctx.question }, { from: ['running', 'waiting'] }))
@@ -3148,6 +3200,11 @@ async function checkAgent(b, selfId = null, cur = null) {
     out.model = model
   }
   // A cheaper (or simply other) model for its background tasks. null / no model = the same as its own.
+  if (b.model_mode !== undefined) {
+    const m = str(b.model_mode).trim()
+    if (m && !MODEL_MODES.includes(m)) throw new Say('agent.modelMode', { list: MODEL_MODES.join(' / ') })
+    out.model_mode = m
+  }
   if (b.task_model !== undefined) {
     const m = b.task_model
     const provider_id = str(m?.provider_id).trim(), model = str(m?.model).trim()
@@ -3687,6 +3744,16 @@ const server = createServer(async (req, res) => {
       if (!normAutonomy(m)) return send(400, { error: t('agent.autonomy', { list: AUTONOMY_MODES.join(' / ') }) })
       await db.setDefaultAutonomy(m)
       return send(200, { autonomy: m })
+    }
+
+    // The platform-wide model mode, for every agent that has none of its own. Never set = auto.
+    if (url.pathname === '/api/settings/model-mode' && req.method === 'GET')
+      return send(200, { mode: await db.defaultModelMode(), modes: MODEL_MODES })
+    if (url.pathname === '/api/settings/model-mode' && req.method === 'PUT') {
+      const m = str((await readBody(req)).mode).trim()
+      if (!MODEL_MODES.includes(m)) return send(400, { error: t('agent.modelMode', { list: MODEL_MODES.join(' / ') }) })
+      await db.setDefaultModelMode(m)
+      return send(200, { mode: m })
     }
 
     // ---- Runs: what is still being worked on, and stopping it ----

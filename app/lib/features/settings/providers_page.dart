@@ -51,6 +51,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
 
   /// The platform-wide autonomy: auto (the default) or manual.
   String _autonomy = 'auto';
+  String _modelMode = 'auto';
 
   /// Every Agent's own notes tidied each night.
   bool _tidyNightly = false;
@@ -86,6 +87,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
       _allow = policy.allow;
       _effort = await widget.api.defaultEffort();
       _autonomy = await widget.api.defaultAutonomy();
+      _modelMode = await widget.api.modelMode().catchError((_) => 'auto');
       _tidyNightly = await widget.api.tidyNightly();
       _isolation = await widget.api.isolation().catchError((_) => const Isolation());
       _fill(_rows.where((p) => p.isDefault).firstOrNull ?? _rows.firstOrNull);
@@ -219,6 +221,13 @@ class _ProvidersPageState extends State<ProvidersPage> {
   Future<void> _saveAutonomy() async {
     await _act(tr('prov.saving'), () async {
       await widget.api.setDefaultAutonomy(_autonomy);
+      _say(tr('au.saved'), good: true);
+    });
+  }
+
+  Future<void> _saveModelMode() async {
+    await _act(tr('prov.saving'), () async {
+      await widget.api.setModelMode(_modelMode);
       _say(tr('au.saved'), good: true);
     });
   }
@@ -425,6 +434,29 @@ class _ProvidersPageState extends State<ProvidersPage> {
                     ),
                     const SizedBox(height: 6),
                     Text(tr('au.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+                    const SizedBox(height: 10),
+                    // How Agents choose between their main and light model.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            key: const ValueKey('model-mode'),
+                            initialValue: _modelMode,
+                            isExpanded: true,
+                            decoration: InputDecoration(labelText: tr('mm.title')),
+                            items: [
+                              for (final m in const ['auto', 'manual'])
+                                DropdownMenuItem(value: m, child: Text(tr('mm.$m'), overflow: TextOverflow.ellipsis)),
+                            ],
+                            onChanged: (v) => setState(() => _modelMode = v ?? 'auto'),
+                          ),
+                        ),
+                        const SizedBox(width: 9),
+                        TextButton(onPressed: _busy ? null : _saveModelMode, child: Text(tr('common.save'))),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(tr('mm.hint'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
                     const SizedBox(height: 14),
                     const Divider(height: 1),
                     const SizedBox(height: 12),

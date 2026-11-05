@@ -27,7 +27,7 @@ sealed class Entry {
 }
 
 class Said extends Entry {
-  Said({required this.mine, required this.speaker, required this.color, this.text = '', this.files = const []});
+  Said({required this.mine, required this.speaker, required this.color, this.text = '', this.files = const [], this.model = ''});
 
   final bool mine;
   final String speaker;
@@ -37,6 +37,9 @@ class Said extends Entry {
 
   /// What was attached to it (the person's message carries them).
   final List<Attachment> files;
+
+  /// Which model wrote it (auto mode moves between models); '' when not known.
+  final String model;
 }
 
 /// A file an agent sent with send_file. It stands where the call was made —
@@ -1028,7 +1031,7 @@ class Workbench extends ChangeNotifier {
     if (m.event != null) return News(m.event!)..id = m.id;
     final colour = m.mine ? '' : (agentByName(m.speaker)?.color ?? c.color);
     if (m.tool == null) {
-      return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text, files: m.files)..id = m.id;
+      return Said(mine: m.mine, speaker: m.speaker, color: colour, text: m.text, files: m.files, model: m.model)..id = m.id;
     }
     if (m.tool == 'send_file' && m.file != null) {
       return SentFile(speaker: m.speaker, color: colour, file: m.file!)..id = m.id;

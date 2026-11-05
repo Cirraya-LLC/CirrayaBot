@@ -98,6 +98,7 @@ void main() {
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
       expect(find.text(tr('ed.taskModel')), findsOneWidget);
+      expect(find.byKey(const ValueKey('ed-model-mode')), findsOneWidget, reason: 'how the model is chosen, under the light model');
       expect(find.widgetWithText(TextField, 'light'), findsOneWidget, reason: 'the saved background model is shown');
       final setup = find.byKey(const ValueKey('ed-setup'));
       await tester.ensureVisible(setup);

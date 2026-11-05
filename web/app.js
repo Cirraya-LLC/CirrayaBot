@@ -345,6 +345,9 @@ async function drawHistory(c, ticket) {
       (el = bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User')).innerHTML = fmt(e.text)
       addAtts(el, e.files)
     } else { (el = bubble(c.id, e.role === 'user')).innerHTML = fmt(e.content); addAtts(el, e.files) }
+    // Which model wrote it: auto mode moves between the light and the main one, and this is where that shows.
+    if (e.role === 'assistant' && e.model) el.closest('.mwrap')?.insertAdjacentHTML('beforeend',
+      `<small class="mmodel">${esc(t('msg.model', { model: e.model }))}</small>`)
     // A search hit jumps to its message by this id
     ;(el.closest('.msg') ?? el).dataset.mid = e.id
     if (box) box.add(el.closest('.msg') ?? el, e)
@@ -1546,6 +1549,8 @@ function editBot(b, tpl = null) {
   $('#bauto').innerHTML = ['', 'auto', 'manual']
     .map(m => `<option value="${m}">${esc(t(m ? `b.auto${m[0].toUpperCase()}${m.slice(1)}` : 'b.autoDefault'))}</option>`).join('')
   $('#bauto').value = ['auto', 'manual'].includes(b?.autonomy) ? b.autonomy : ''
+  $('#bmm').innerHTML = ['', 'auto', 'manual'].map(m => `<option value="${m}">${esc(t(`mm.${m || 'default'}`))}</option>`).join('')
+  $('#bmm').value = ['auto', 'manual'].includes(b?.model_mode) ? b.model_mode : ''
   $('#bcap').value = dollars(b?.daily_cap_micro)
   $('#bvoice').value = b?.voice ?? ''
   // A cap only means something when the upstream has prices; say so rather than let it look guarded.
@@ -1712,7 +1717,7 @@ $('#bsave').onclick = async () => {
   const cap = toMicro($('#bcap').value)
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
-    provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
+    provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value, model_mode:$('#bmm').value,
     daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), task_model: chosenTaskModel(), voice: $('#bvoice').value.trim(),
     ...$('#bsetupsec').hidden ? {} : { setup: $('#bsetup').value },
     ...$('#bcksec').hidden ? {} : { goals: $('#bgoals').value, checkin_every: Number($('#bckevery').value) },
@@ -1804,7 +1809,7 @@ async function loadProvs() {
 }
 
 $('#prov').onclick = async () => { await loadProvs(); fillProv(PROVS.find(p => p.is_default) ?? null)
-  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); await loadAutonomy(); await loadMemorySettings(); await loadIsolation(); $('#pdlg').showModal() }
+  $('#pdefcap').value = dollars(USAGE.default_cap_micro); await loadPolicy(); await loadEffort(); await loadAutonomy(); await loadModelMode(); await loadMemorySettings(); await loadIsolation(); $('#pdlg').showModal() }
 // Isolation (server: isolationView): read-only here — it is set by AGENT_RUNTIME on the server.
 async function loadIsolation() {
   const r = await fetch(api('/api/isolation')).then(x => x.ok ? x.json() : null).catch(() => null)
@@ -1836,6 +1841,19 @@ async function loadAutonomy() {
 $('#pautosave').onclick = async () => {
   const r = await fetch(api('/api/settings/autonomy'), { method:'PUT', headers:{'content-type':'application/json'},
     body: JSON.stringify({ autonomy: $('#pdefauto').value }) })
+  if (!r.ok) { hint((await r.json()).error, 'bad'); return }
+  hint(t('au.saved'), 'good')
+}
+
+async function loadModelMode() {
+  const r = await fetch(api('/api/settings/model-mode')).then(x => x.ok ? x.json() : null).catch(() => null)
+  if (!r) return
+  $('#pdefmm').innerHTML = (r.modes ?? ['auto', 'manual']).map(m => `<option value="${m}">${esc(t(`mm.${m}`))}</option>`).join('')
+  $('#pdefmm').value = r.mode ?? 'auto'
+}
+$('#pmmsave').onclick = async () => {
+  const r = await fetch(api('/api/settings/model-mode'), { method:'PUT', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ mode: $('#pdefmm').value }) })
   if (!r.ok) { hint((await r.json()).error, 'bad'); return }
   hint(t('au.saved'), 'good')
 }

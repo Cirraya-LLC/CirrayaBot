@@ -63,14 +63,26 @@ const Map<String, List<String>> editorStrings = {
     '上面的模型一直失败（挂了、过载、拒绝密钥）时，按顺序换用。最多 3 个，从你自己添加的上游里选。',
     '上面的模型一直失敗（掛了、過載、拒絕金鑰）時，依序換用。最多 3 個，從你自己加入的上游裡選。',
   ],
-  'ed.taskModel': ['Background tasks run on', '后台任务用的模型', '背景任務用的模型'],
+  'ed.taskModel': ['Light model', '省钱模型', '省錢模型'],
   'ed.taskModelSame': ['The same model as above', '和上面同一个模型', '和上面同一個模型'],
   'ed.taskModelHint': [
-    'A lighter model here saves money on long background work. A task the Agent marks as needing its full reasoning '
-        'still runs on the model above, and if this one fails the model above takes over.',
-    '这里选一个便宜些的模型，长时间的后台活能省不少钱。Agent 标明需要全力思考的任务仍然用上面的模型；这个模型出错时也会换回上面的模型接着做。',
-    '這裡選一個便宜些的模型，長時間的背景工作能省不少錢。Agent 標明需要全力思考的任務仍然用上面的模型；這個模型出錯時也會換回上面的模型接著做。',
+    'A cheaper model. In auto mode every turn starts on it and moves up to the model above when the work needs it '
+        '(the Agent asks, keeps hitting failures, or can\u2019t read an image). In manual mode it only runs background tasks. '
+        'If it fails, the model above takes over.',
+    '便宜一些的模型。自动模式下每一轮都先用它，需要时（Agent 自己申请、接连出错、看不了图片）换到上面的模型；手动模式下只用于后台任务。它出错时由上面的模型接着做。',
+    '便宜一些的模型。自動模式下每一輪都先用它，需要時（Agent 自己申請、接連出錯、看不了圖片）換到上面的模型；手動模式下只用於背景任務。它出錯時由上面的模型接著做。',
   ],
+  'mm.title': ['How the model is chosen', '模型选择方式', '模型選擇方式'],
+  'mm.default': ['Follow the platform', '跟随平台设置', '跟隨平台設定'],
+  'mm.auto': ['Auto: light first, main when needed', '自动：先用省钱模型，需要时换主力', '自動：先用省錢模型，需要時換主力'],
+  'mm.manual': ['Manual: main model for conversations', '手动：对话用主力模型', '手動：對話用主力模型'],
+  'mm.hint': [
+    'How Agents choose between their main and light model, unless an Agent says otherwise. Auto needs a light model set '
+        'on the Agent; without one it is just the main model.',
+    'Agent 在主力模型和省钱模型之间怎么选（某个 Agent 自己设了就按它的）。自动模式需要 Agent 设了省钱模型；没设就只用主力模型。',
+    'Agent 在主力模型和省錢模型之間怎麼選（某個 Agent 自己設了就按它的）。自動模式需要 Agent 設了省錢模型；沒設就只用主力模型。',
+  ],
+  'msg.model': ['written by {model}', '由 {model} 回答', '由 {model} 回答'],
   'ed.tplPickModel': ['Pick its upstream and model above, then save.', '在上面选好上游和模型，然后保存。', '在上面選好上游和模型，然後儲存。'],
   'ed.tplComesWith': ['It comes with these skills: {list}.', '会一起装上这些技能：{list}。', '會一起裝上這些技能：{list}。'],
   'ed.tplExport': ['Export', '导出', '匯出'],

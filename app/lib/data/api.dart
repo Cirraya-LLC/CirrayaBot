@@ -115,6 +115,7 @@ class Agent {
     this.fallbacks = const [],
     this.voice = '',
     this.taskModel,
+    this.modelMode = '',
     this.setup = '',
     this.setupState,
     this.setupRunning = false,
@@ -157,6 +158,9 @@ class Agent {
   /// What its background tasks run on; null = the same model as its own.
   final Fallback? taskModel;
 
+  /// How its model is chosen: '' = the platform's, 'auto' (light first, main when needed), 'manual'.
+  final String modelMode;
+
   /// A shell script run as root on its machine when the machine is new or rebuilt, and when it changes.
   final String setup;
 
@@ -192,6 +196,7 @@ class Agent {
     ],
     voice: (j['voice'] as String?) ?? '',
     taskModel: j['task_model'] is Map<String, Object?> ? Fallback.fromJson(j['task_model'] as Map<String, Object?>) : null,
+    modelMode: (j['model_mode'] as String?) ?? '',
     setup: (j['setup'] as String?) ?? '',
     setupState: j['setup_state'] is Map<String, Object?> ? SetupState.fromJson(j['setup_state'] as Map<String, Object?>) : null,
     setupRunning: j['setup_running'] == true,
@@ -320,7 +325,11 @@ class Message {
     this.event,
     this.files = const [],
     this.file,
+    this.model = '',
   });
+
+  /// Which model wrote a reply ('' for the person, and for replies from before this was kept).
+  final String model;
 
   /// The server's row id — a search hit names the message it found by this.
   final int? id;
@@ -1084,6 +1093,7 @@ class Api {
           text: (m['text'] as String?) ?? '',
           at: (m['at'] as num?)?.toInt() ?? 0,
           files: Attachment.listOf(m['files']),
+          model: (m['model'] as String?) ?? '',
         );
       }).toList();
     }
@@ -1099,6 +1109,7 @@ class Api {
         text: (m['content'] as String?) ?? '',
         at: (m['at'] as num?)?.toInt() ?? 0,
         files: Attachment.listOf(m['files']),
+        model: (m['model'] as String?) ?? '',
       );
     }).toList();
   }
@@ -1489,6 +1500,10 @@ class Api {
   /// Everything every agent is doing, what waits for a person, what is coming up, what was run.
   /// Kept as maps: the page only shows it.
   Future<Map<String, Object?>> activity() => _map('GET', '/api/activity');
+
+  /// The platform's model mode, 'auto' or 'manual' (agents that don't choose their own follow it).
+  Future<String> modelMode() async => ((await _map('GET', '/api/settings/model-mode'))['mode'] as String?) ?? 'auto';
+  Future<void> setModelMode(String mode) => _map('PUT', '/api/settings/model-mode', {'mode': mode});
 
   /// What agents' machines run under (set on the server): `using` kata / gvisor / runc, `weaker`, and why not stronger.
   Future<Isolation> isolation() async => Isolation.fromJson(await _map('GET', '/api/isolation'));

@@ -270,6 +270,12 @@ class _Bubble extends StatelessWidget {
             padding: EdgeInsets.only(top: said.text.isEmpty ? 0 : 6),
             child: files!(said.files, said.mine),
           ),
+        // Which model wrote it: in auto mode a turn may have moved from the light model to the main one.
+        if (!said.mine && said.model.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text(tr('msg.model', {'model': said.model}), style: TextStyle(fontSize: 11, color: C.dim2)),
+          ),
       ],
     );
 

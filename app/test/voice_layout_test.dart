@@ -67,6 +67,24 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a reply says which model wrote it; the person\'s message does not', (tester) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+      builder: (context, child) => UiScale(scale: 1.3, child: child!),
+      home: Scaffold(body: ListView(children: [
+        EntryView(entry: Said(mine: true, speaker: 'User', color: '', text: 'hi', model: 'x'), names: const ['Operator'], colorOf: (_) => Colors.orange),
+        EntryView(entry: Said(mine: false, speaker: 'Operator', color: '#f0a040', text: 'hello', model: 'some-light-model'),
+          names: const ['Operator'], colorOf: (_) => Colors.orange),
+      ])),
+    ));
+    expect(find.text(tr('msg.model', {'model': 'some-light-model'})), findsOneWidget);
+    expect(find.text(tr('msg.model', {'model': 'x'})), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   // The narrowest phone layouts (360 wide at 130% is 277 logical pixels): the composer gains a
   // microphone and, while nothing is typed, a call button in place of Send.
   for (final (size, scale) in const [(Size(393, 851), 1.15), (Size(360, 640), 1.3)]) {

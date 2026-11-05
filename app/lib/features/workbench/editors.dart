@@ -104,6 +104,7 @@ class _AgentEditorState extends State<_AgentEditor> {
     final v = widget.agent?.autonomy ?? widget.template?.autonomy;
     return const ['auto', 'manual'].contains(v) ? v! : '';
   })();
+  late String _modelMode = const ['auto', 'manual'].contains(widget.agent?.modelMode) ? widget.agent!.modelMode : '';
   List<Provider> _providers = const [];
   List<String> _models = const [];
   String _model = '';
@@ -477,6 +478,7 @@ class _AgentEditorState extends State<_AgentEditor> {
       'effort': _effort,
       'approval': _approval,
       'autonomy': _autonomy,
+      'model_mode': _modelMode,
       'daily_cap_micro': cap.value,
       'voice': _voiceName.text.trim(),
       // A row left without a model is not a backup; it is dropped rather than refused.
@@ -653,6 +655,18 @@ class _AgentEditorState extends State<_AgentEditor> {
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(tr('ed.taskModelHint'), style: TextStyle(fontSize: 11, color: C.dim)),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              key: const ValueKey('ed-model-mode'),
+              initialValue: _modelMode,
+              isExpanded: true,
+              decoration: InputDecoration(labelText: tr('mm.title')),
+              items: [
+                for (final m in const ['', 'auto', 'manual'])
+                  DropdownMenuItem(value: m, child: Text(tr('mm.${m.isEmpty ? 'default' : m}'), overflow: TextOverflow.ellipsis)),
+              ],
+              onChanged: (v) => setState(() => _modelMode = v ?? ''),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(

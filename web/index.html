@@ -607,6 +607,8 @@
   .actmach span{font-size:11.5px;padding:3px 9px;border-radius:999px;background:var(--chip);color:var(--dim)}
   .actmach span.awake{color:var(--good,#3ecf8e)}
   .actmach span.weak{box-shadow:inset 0 0 0 1px var(--bad)}
+  .mmodel{display:block;font-size:11px;color:var(--dim2);margin-top:3px}
+  .fbhead select{margin-left:auto;max-width:60%}
   .isoweak{display:block;color:var(--bad);font-size:12px;margin:-2px 0 8px}
   .isonow{font-size:13.5px;margin-bottom:4px}
   .isonow.weak{color:var(--bad)}
@@ -899,7 +901,7 @@
   <div class="fbhead"><span data-i18n="b.fallbacks"></span><button class="btn" id="bfbadd" data-i18n="b.fallbackAdd"></button></div>
   <div id="bfb"></div>
   <small class="rhint" data-i18n="b.fallbackHint"></small>
-  <div class="fbhead"><span data-i18n="b.taskModel"></span></div>
+  <div class="fbhead"><span data-i18n="b.taskModel"></span><select id="bmm" data-i18n-title="mm.title"></select></div>
   <div class="fbrow" id="btm"><select id="btmprov"></select><select id="btmsel"></select><input type="text" id="btmx" autocomplete="off" hidden></div>
   <small class="rhint" data-i18n="b.taskModelHint"></small>
   <input type="text" id="bvoice" data-i18n-placeholder="b.voicePh" autocomplete="off" spellcheck="false">
@@ -1054,6 +1056,11 @@
     <button class="btn" id="pautosave" data-i18n="common.save"></button>
   </div>
   <small class="rhint" data-i18n="au.hint"></small>
+  <div class="prow">
+    <select id="pdefmm" data-i18n-title="mm.title"></select>
+    <button class="btn" id="pmmsave" data-i18n="common.save"></button>
+  </div>
+  <small class="rhint" data-i18n="mm.hint"></small>
   <div class="psplit"></div>
   <div class="prow">
     <select id="pdefeff" data-i18n-title="ef.title"></select>

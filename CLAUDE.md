@@ -2547,6 +2547,9 @@ A new setting goes into the compose `environment:` list too.
 
 ### 2.40.4 A background model
 
+**Since 2.43 it is the "light model"**: in auto mode (the default) conversations start on it too; in manual mode it is
+only what this section describes.
+
 `agents.task_model` (`{provider_id, model}`, null = the agent's own). Background tasks run on it (`taskModel()` in
 server.mjs) with the agent's own model as the first backup and then its backups — so a cheap model failing hands the
 task to the main one instead of failing it. `start_task` takes `main_model: true` for work that needs the agent's full
@@ -2797,6 +2800,29 @@ The boss: 「XFCE可以 合并成一个电脑视图 加LibreOffice 还有默认�
   the web page's single 电脑 section and its buttons over HTTPS. Under gVisor: XFCE + the on-screen browser.
   ⚠️ Headless Playwright doesn't paint the MJPEG `<img>` in its screenshots (the full view looked white) — the stream
   itself was checked by pulling its JPEG out. **Not verified**: the Flutter app against it (only widget tests), the phone.
+
+## 2.43 Auto model mode: the light model first, the main one when needed (2026-11-06)
+
+The boss: 「auto model模式 但是仍然可以和之前一样自己选择」, and 「默认auto 比如多渠道的故障转移」 (the auto meant
+the model). `agents.model_mode` ('' = the platform's; settings key `model.mode`, never set = `auto`) and the light model
+= `agents.task_model` (2.40.4). **Auto with no light model set is just the main model**, so nothing changed for agents
+without one. Manual = before: conversations on the main model, the light one only for background tasks.
+
+- In auto **every turn starts on the light model** (`runAgent`, `ctx.front` — conversations, wake-ups, follow-ups,
+  routines, calls; background tasks already started on it, `runTask` sets `onLight`), with the main model and its backups
+  as its failover chain, and moves up (`moveUp`) for the **rest of that turn** when: it calls `use_stronger_model
+  {reason}` (offered only while on the light model, handled in the loop, never logged as a side effect); **3 tool calls
+  in a row fail** (`--- exit N ---` with N ≠ 0, or `Tool error:`); **it rejects an image** (instead of dropping the image,
+  which is still what happens on the main model); or **it fails** after its retries (the old fallback path). Each switch
+  is a `retry` note in the stream (`auto.asked` / `auto.stuck` / `auto.images`).
+- **Which model wrote each reply** is stored (`messages.model`, `ctx.usedModel`) and returned with the history; both
+  clients show "由 X 回答" under it. Live replies get it on the next refresh (web within 15 s) — no stream event for it.
+- UI: "Light model" (省钱模型) in both editors, with "How the model is chosen" under it (follow the platform / auto /
+  manual); the platform default in the settings (`GET/PUT /api/settings/model-mode`).
+- Tests: `test/e2e/automodel.test.mjs` (starts light with the way up offered, asked, stuck, images, failing, manual,
+  the platform default, no light model, a background task moving up), `app/test/voice_layout_test.dart` (the label),
+  `app/test/editor_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/mm.mjs`). **Not verified with real models**:
+  whether a given light model asks for more when it should is up to the model; "stuck" and failures don't depend on it.
 
 ## 3. What runs now
 
