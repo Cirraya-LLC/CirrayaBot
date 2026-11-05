@@ -389,6 +389,33 @@ class Workbench extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Something waits for the person somewhere (an approval card, a task's question): the dot on the
+  /// activity icon. Updated by [poll].
+  bool waitingForYou = false;
+
+  Future<void> checkWaiting() async {
+    try {
+      final a = await api.activity();
+      final asks = (a['asks'] as List?) ?? const [];
+      final tasks = (a['tasks'] as List?) ?? const [];
+      final now = asks.isNotEmpty || tasks.any((t) => t is Map && t['status'] == 'waiting');
+      if (now != waitingForYou) {
+        waitingForYou = now;
+        notifyListeners();
+      }
+    } on ApiException catch (_) {
+      // best effort
+    }
+  }
+
+  /// Open a conversation by kind and id, on [session] if given — from the activity page.
+  Future<void> openAt(String kind, String id, [String? session]) async {
+    final c = conversations.where((x) => x.kind == kind && x.id == id).firstOrNull;
+    if (c == null) return;
+    if (session != null) _lastSession[_key(c)] = session;
+    await open(c);
+  }
+
   /// Show another session of the open conversation, optionally landing on one message.
   Future<void> openSession(String? id, {int? jumpTo}) async {
     final c = current;
@@ -573,6 +600,7 @@ class Workbench extends ChangeNotifier {
   /// One look at the server. Skipped while a reply is streaming — that
   /// transcript is being drawn live and a redraw would wipe the tool cards.
   Future<void> poll() async {
+    unawaited(checkWaiting());
     if (busy || loading) return;
     final before = current?.at;
     final ticket = _shown;

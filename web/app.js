@@ -2816,3 +2816,98 @@ async function reload() {
       hint(t('p.first')) }
   } catch (e) { note(t('err.backend', { msg: e.message ?? e })) }
 })()
+
+// ═══ Activity: what every Agent is doing, what waits for you, what is coming up, what was run ═══
+let actPoll = null, actBadge = null
+const actOpen = (kind, id, session) => {
+  const c = CONVS.find(x => x.kind === kind && x.id === id)
+  if (!c) return
+  if (session) lastSession.set(convKey(c), session)
+  $('#actdlg').close(); openConv(c)
+}
+const actRow = (cls, html, buttons = []) => {
+  const row = document.createElement('div'); row.className = `actrow ${cls}`
+  row.innerHTML = `<div class="m">${html}</div>`
+  for (const [label, fn, pri] of buttons) {
+    const b = document.createElement('button'); b.className = `btn${pri ? ' pri' : ''}`; b.textContent = label
+    b.onclick = async () => { b.disabled = true; try { await fn() } finally { b.disabled = false } }
+    row.append(b)
+  }
+  return row
+}
+const actEmpty = (box, key) => { if (!box.children.length) box.innerHTML = `<div class="actempty">${esc(t(key))}</div>` }
+const ago = ms => { const m = Math.round((Date.now() - ms) / 60000); return m < 1 ? t('act.justNow') : m < 60 ? t('act.minAgo', { n: m }) : when(ms) }
+async function loadActivity() {
+  const r = await fetch(api('/api/activity')).catch(() => null)
+  if (!r?.ok) return null
+  const a = await r.json()
+  $('#actdot').hidden = !(a.asks.length || a.tasks.some(x => x.status === 'waiting'))
+  return a
+}
+async function paintActivity() {
+  const a = await loadActivity()
+  if (!a || !$('#actdlg').open) return
+  $('#actwhen').textContent = t('act.updated', { time: hm(new Date(a.now)) })
+  const post = (path, body) => fetch(api(path), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}) }).then(async x => { if (!x.ok && x.status !== 404) alert(await errText(x)) })
+  // Waiting for you: approval cards (from any conversation) and questions from background tasks.
+  const asks = $('#actasks'); asks.innerHTML = ''
+  for (const x of a.asks) asks.append(actRow('ask',
+    `<b>${esc(x.who)}</b> <span class="d">· ${esc(x.conv_name)}${x.task ? ` · #${x.task}` : ''} · ${esc(ago(x.at))}</span><br><code>${esc(x.subject)}</code>`,
+    [[t('ap.deny'), () => post(`/api/approvals/${x.id}`, { ok: false }).then(paintActivity)],
+     [t('ap.approve'), () => post(`/api/approvals/${x.id}`, { ok: true }).then(paintActivity), true],
+     [t('act.open'), async () => actOpen(x.kind, x.conv, x.session)]]))
+  for (const x of a.tasks.filter(x => x.status === 'waiting' && x.question && !x.approval)) {
+    const row = actRow('ask', `<b>${esc(x.who)}</b> <span class="d">· ${esc(x.conv_name)} · #${x.id} ${esc(x.title)}</span><br>${esc(x.question)}` +
+      `<textarea data-i18n-placeholder="tk.replyPh"></textarea>`,
+      [[t('tk.send'), async () => {
+        const text = row.querySelector('textarea').value.trim(); if (!text) return
+        await post(`/api/tasks/${x.id}/answer`, { text }); paintActivity()
+      }, true], [t('act.open'), async () => actOpen(x.kind, x.conv, x.session)]])
+    row.querySelector('textarea').placeholder = t('tk.replyPh')
+    asks.append(row)
+  }
+  actEmpty(asks, 'act.noAsks')
+  // Working now: turns in progress and open background tasks.
+  const work = $('#actwork'); work.innerHTML = ''
+  const where = (who, conv) => who && who !== conv ? ` · ${esc(conv)}` : ''
+  for (const x of a.runs) work.append(actRow('', `<b>${esc(x.who || x.conv_name)}</b> <span class="d">${where(x.who, x.conv_name)} · ${esc(t('act.since', { ago: ago(x.started_at) }))}${x.detached ? ` · ${esc(t('act.background'))}` : ''}</span>`,
+    [[t('act.stop'), () => post('/api/runs/stop', { session: x.session }).then(paintActivity)], [t('act.open'), async () => actOpen(x.kind, x.id, x.session)]]))
+  for (const x of a.tasks.filter(x => x.status === 'queued' || x.status === 'running'))
+    work.append(actRow('', `<b>${esc(x.who)}</b> <span class="d">${where(x.who, x.conv_name)} · #${x.id} · ${esc(t(`tk.st.${x.status}`))}</span><br>${esc(x.title)}`,
+      [[t('act.stop'), () => post(`/api/tasks/${x.id}/stop`).then(paintActivity)], [t('act.open'), async () => actOpen(x.kind, x.conv, x.session)]]))
+  actEmpty(work, 'act.noWork')
+  // Coming up: scheduled tasks by when they next run.
+  const coming = $('#actcoming'); coming.innerHTML = ''
+  for (const x of a.routines.slice(0, 12)) coming.append(actRow('', `<b>${esc(x.name)}</b> <span class="d">· ${esc(x.conv_name)} · ${
+    esc(x.running ? t('act.runningNow') : new Date(x.next_run_at).toLocaleString(lang, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</span>`,
+    [[t('act.open'), async () => actOpen(x.kind, x.conv)]]))
+  for (const x of a.checkins ?? []) coming.append(actRow('', `<b>${esc(x.who)}</b> <span class="d">· ${esc(t('act.checkin'))} · ${
+    esc(new Date(x.next_at).toLocaleString(lang, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</span>`,
+    [[t('act.open'), async () => actOpen('agent', x.agent_id)]]))
+  actEmpty(coming, 'act.noComing')
+  // Machines: awake or asleep (only where Agents have machines).
+  const machines = a.machines.filter(m => m.state !== 'none')
+  $('#actmachsec').hidden = !machines.length
+  $('#actmach').innerHTML = machines.map(m => `<span class="${m.state}" title="${esc(m.last_use ? t('act.lastUse', { ago: ago(m.last_use) }) : '')}">${
+    esc(bot(m.agent_id)?.name ?? m.agent_id)} · ${esc(t(`act.m.${m.state}`))}</span>`).join('')
+  // What was run lately, newest first; a click opens where it happened.
+  const rec = $('#actrecent'); rec.innerHTML = ''
+  for (const x of a.actions.slice(0, 60)) {
+    const row = document.createElement('div'); row.className = 'actrec'
+    row.title = x.output || ''
+    row.innerHTML = `<span class="t">${esc(hm(new Date(x.at)))}</span><span class="w">${esc(x.who)}${x.task ? ` #${x.task}` : ''}</span><code></code>`
+    row.querySelector('code').textContent = x.subject || x.name
+    row.onclick = () => actOpen(x.kind, x.conv, x.session)
+    rec.append(row)
+  }
+  actEmpty(rec, 'act.noRecent')
+}
+$('#actbtn').onclick = async () => {
+  $('#actdlg').showModal(); await paintActivity()
+  clearInterval(actPoll); actPoll = setInterval(paintActivity, 4000)
+}
+$('#actclose').onclick = () => $('#actdlg').close()
+$('#actdlg').addEventListener('close', () => clearInterval(actPoll))
+// The dot on the icon: something waits for you. Checked now and then, not only while the page is open.
+loadActivity(); actBadge = setInterval(loadActivity, 20_000)

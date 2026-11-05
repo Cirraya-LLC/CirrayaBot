@@ -198,6 +198,8 @@ async function approvalPolicy() {
 // id -> the function that answers it: (ok, always) => Promise. A pending approval only exists while
 // its stream is open (or, for a background task, while the process lives).
 const pendingApprovals = new Map()
+// The same cards, described — for the activity page, which answers them from outside their conversation.
+const liveAsks = new Map()
 
 // "Always allow": standing allowances, per agent. [{id, agent, tool, pattern, example, at}] in settings;
 // pattern null = the whole tool (made from an "all"-mode card). Listed in the approval settings, where
@@ -231,10 +233,14 @@ function askApproval(ctx, onTool, name, args, allow = []) {
   // `always`: what an "always allow" answer would cover, so the card can say it before anyone clicks.
   const always = allow.map(r => r.pattern ?? '')
   onTool?.({ phase: 'ask', id, name, args, always })
+  liveAsks.set(id, { id, agent_id: ctx.bot.id, name, subject: toolSubject(name, args), always, at: Date.now(),
+    kind: ctx.scope === 'group' ? 'group' : 'agent', conv: ctx.scopeId ?? ctx.bot.id, session: ctx.session ?? null,
+    task: ctx.task ? Number(ctx.task.id) : null })
   if (ctx.task) taskWaitsForApproval(ctx.task, { id, name, args, always }).catch(e => console.error('[task] approval card:', e.message))
   return new Promise(resolve => {
     const answer = async (ok, forever = false) => {
       if (!pendingApprovals.delete(id)) return
+      liveAsks.delete(id)
       ctx.run?.asking.delete(id)
       ctx.signal?.removeEventListener('abort', onAbort)
       // Written before the turn carries on: the next call in this very turn must already see it.
@@ -2326,6 +2332,57 @@ function detachRun(run) {
   for (const id of [...run.asking]) { pendingApprovals.get(id)?.(false); pendingSecrets.get(id)?.resolve('declined') }
 }
 
+// ---------- Activity: everything every agent is doing, has to ask, will do, and did ----------
+// `docker ps` once per few seconds at most, however many pages poll.
+let psCache = { at: 0, state: new Map() }
+async function machinesNow(bots) {
+  if (!CFG.tools) return []
+  if (Date.now() - psCache.at > 5000) {
+    const { out } = await cliRun(['ps', '-a', '--filter', `name=^${PREFIX}-agent-`, '--format', '{{.Names}}|{{.State}}'], null, 15_000)
+    psCache = { at: Date.now(), state: new Map(out.split('\n').filter(Boolean).map(l => { const [n, st = 'running'] = l.trim().split('|'); return [n, st] })) }
+  }
+  return bots.map(b => {
+    const c = cname(b.id), st = psCache.state.get(c)
+    return { agent_id: b.id, state: !st ? 'none' : st === 'running' ? 'awake' : 'asleep', last_use: lastUse.get(c) ?? null,
+      busy: holding.has(c) || inUse(b.id) }
+  })
+}
+
+async function activityView(lang) {
+  const bots = await loadBots(lang), groups = await db.listGroups()
+  const convName = (kind, id) => kind === 'group' ? groups.find(g => g.id === id)?.name ?? id : bots.find(b => b.id === id)?.name ?? id
+  const kindOf = scope => scope === 'group' ? 'group' : 'agent'
+  const open = await db.tasksWithStatus(OPEN)
+  const recent = await db.recentActivity(80)
+  const actions = []
+  for (const m of recent.tools) {
+    let c = {}
+    try { c = JSON.parse(m.content) } catch {}
+    actions.push({ at: new Date(m.at).getTime(), who: m.speaker, kind: kindOf(m.scope), conv: m.scope_id, conv_name: convName(kindOf(m.scope), m.scope_id),
+      session: m.session_id, name: c.name ?? '', subject: toolSubject(c.name ?? '', c.args ?? {}), output: String(c.output ?? '').slice(0, 200) })
+  }
+  for (const t of recent.tasks) for (const e of (Array.isArray(t.trace) ? t.trace : []).slice(-10)) {
+    actions.push({ at: Number(e.at) || 0, who: bots.find(b => b.id === t.agent_id)?.name ?? t.agent_id, kind: kindOf(t.scope), conv: t.scope_id,
+      conv_name: convName(kindOf(t.scope), t.scope_id), session: t.session_id, task: Number(t.id), task_title: t.title,
+      name: e.name ?? '', subject: toolSubject(e.name ?? '', e.args ?? {}), output: String(e.output ?? '').slice(0, 200) })
+  }
+  actions.sort((a, b) => b.at - a.at)
+  return {
+    now: Date.now(),
+    runs: [...runs.values()].map(r => ({ ...runView(r), conv_name: convName(r.scope === 'dm' ? 'agent' : 'group', r.scopeId),
+      who: bots.find(b => b.id === r.speaker)?.name ?? '' })),
+    tasks: open.map(t => ({ ...taskView(t), kind: kindOf(t.scope), conv: t.scope_id, conv_name: convName(kindOf(t.scope), t.scope_id),
+      who: bots.find(b => b.id === t.agent_id)?.name ?? t.agent_id })),
+    asks: [...liveAsks.values()].map(a => ({ ...a, who: bots.find(b => b.id === a.agent_id)?.name ?? a.agent_id,
+      conv_name: convName(a.kind, a.conv) })),
+    routines: (await db.listRoutines()).filter(r => r.enabled).map(r => ({ id: r.id, name: r.name, kind: r.target_kind, conv: r.target_id,
+      conv_name: convName(r.target_kind, r.target_id), next_run_at: r.next_run_at, running: routineRunning.has(r.id),
+      last_status: r.last_status ?? '' })).sort((a, b) => new Date(a.next_run_at) - new Date(b.next_run_at)),
+    machines: await machinesNow(bots),
+    actions: actions.slice(0, 80),
+  }
+}
+
 /** What a client needs to show "still working" and a Stop button. */
 const runView = r => ({ session: r.session, kind: r.scope === 'dm' ? 'agent' : 'group', id: r.scopeId,
   speaker: r.speaker ?? '', started_at: r.startedAt, detached: r.detached })
@@ -3219,6 +3276,7 @@ const server = createServer(async (req, res) => {
 
     // ---- Runs: what is still being worked on, and stopping it ----
     if (url.pathname === '/api/runs' && req.method === 'GET') return send(200, [...runs.values()].map(runView))
+    if (url.pathname === '/api/activity' && req.method === 'GET') return send(200, await activityView(lang))
 
     if (url.pathname === '/api/runs/stop' && req.method === 'POST') {
       // By session, or every run in one conversation ({kind, id}) — the Stop button knows the conversation for sure.

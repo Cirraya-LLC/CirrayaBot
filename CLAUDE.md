@@ -2556,6 +2556,21 @@ Tests: `test/e2e/task-model.test.mjs`, `app/test/editor_test.dart` (also the set
   writes for this agent** under a dated heading — it came from the person, so it doesn't go into the agent's own notes.
 Tests: `node web/memory.mjs`, `test/e2e/memory.test.mjs`, `app/test/memory_test.dart`.
 
+### 2.40.6 The activity page
+
+`GET /api/activity` (`activityView`): **asks** (approval cards that can be answered right now, from any conversation
+or task — `liveAsks`, filled in `askApproval` beside `pendingApprovals`, removed when answered), **runs** (turns at
+work), **tasks** (open ones: queued / running / waiting, with questions), **routines** (enabled, by next run),
+**machines** (`docker ps -a`, cached 5 s, + `lastUse`; awake / asleep / none), **actions** (the last 80 tool calls:
+`role = 'tool'` rows plus the traces of tasks touched in the last day, newest first), and later **checkins** (2.40.7).
+Answering goes through the usual endpoints (`/api/approvals/:id`, `/api/tasks/:id/answer|stop`, `/api/runs/stop
+{session}`). Web: a pulse icon at the left of the sidebar footer opens a panel polled every 4 s; the icon gets a dot
+when something waits for the person (checked every 20 s). Client: `ActivityPage` (`features/workbench/activity_page.dart`)
+from the same footer icon, with the dot from `Workbench.checkWaiting` (in `poll`); "Open" goes to the conversation
+and session (`Workbench.openAt`). Tests: `test/e2e/activity.test.mjs` (a card answered from outside its
+conversation; task traces; routines; machines), `app/test/activity_test.dart` (desktop and 277 logical px, empty).
+Web checked in headless Chromium (`$CLAUDE_JOB_DIR/tmp/vui/nov.mjs`, also 2.40.1–2.40.5).
+
 ## 3. What runs now
 
 ```bash

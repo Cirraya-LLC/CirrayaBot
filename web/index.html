@@ -571,6 +571,31 @@
   dialog textarea{resize:vertical;min-height:120px;line-height:1.7}
   dialog textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;min-height:90px}
   .bsec{margin:8px 0 2px}
+  .actdlg{width:760px}
+  .acthead{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  .acthead h4{margin:0}
+  .acthead small{flex:1;color:var(--dim2);font-size:11.5px}
+  .actdlg section{margin-top:14px}
+  .actdlg h5{margin:0 0 6px;font-size:12px;font-weight:600;color:var(--dim);text-transform:none}
+  .actrow{display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid var(--line);border-radius:9px;margin-bottom:6px;font-size:12.5px}
+  .actrow .m{flex:1;min-width:0}
+  .actrow .m b{font-weight:600}
+  .actrow .m .d{color:var(--dim2);font-size:11.5px}
+  .actrow .m code{font-size:11.5px;word-break:break-all}
+  .actrow .btn{padding:3px 10px;font-size:11.5px}
+  .actrow textarea{width:100%;min-height:54px;margin:6px 0 0}
+  .actrow.ask{border-color:var(--warn,#d9a441)}
+  .actempty{color:var(--dim2);font-size:12px;padding:2px 0 4px}
+  .actmach{display:flex;flex-wrap:wrap;gap:6px}
+  .actmach span{font-size:11.5px;padding:3px 9px;border-radius:999px;background:var(--chip);color:var(--dim)}
+  .actmach span.awake{color:var(--good,#3ecf8e)}
+  .actrec{font-size:12px;padding:4px 2px;border-bottom:1px solid var(--line);display:flex;gap:8px;cursor:pointer}
+  .actrec:hover{background:var(--hover)}
+  .actrec .t{color:var(--dim2);flex:none;white-space:nowrap;min-width:44px}
+  .actrec .w{flex:none;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+  .actrec code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
+  .ficon{position:relative}
+  .actdot{position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:var(--warn,#d9a441)}
   .bsec>summary{cursor:pointer;font-size:12.5px;color:var(--dim);padding:4px 0;user-select:none}
   .strow{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim);margin-top:6px}
   .strow>span{flex:1;min-width:0}
@@ -639,6 +664,7 @@
   <div class="foot">
     <button class="ficon" id="collapse"><span id="collapseicon">«</span></button>
     <div class="frest">
+      <button class="ficon" id="actbtn" data-tip-key="act.title" data-i18n-aria-label="act.title"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5h3l2-5 3 9 2-4h3"/></svg><i class="actdot" id="actdot" hidden></i></button>
       <button class="ficon" id="prov" data-tip-key="side.providers" data-i18n-aria-label="side.providers">⚙</button>
       <button class="ficon" id="skills" data-tip-key="side.skills" data-i18n-aria-label="side.skills">✦</button>
       <button class="ficon" id="themebtn" data-tip-key="common.theme" data-i18n-aria-label="common.theme" aria-haspopup="menu"><b class="half"></b></button>
@@ -858,6 +884,15 @@
     <button class="btn" id="bcancel" data-i18n="common.cancel"></button>
     <button class="btn pri" id="bsave" data-i18n="common.save"></button>
   </div>
+</dialog>
+
+<dialog id="actdlg" class="actdlg">
+  <div class="acthead"><h4 data-i18n="act.title"></h4><small id="actwhen"></small><button class="btn" id="actclose" data-i18n="common.close"></button></div>
+  <section><h5 data-i18n="act.asks"></h5><div id="actasks"></div></section>
+  <section><h5 data-i18n="act.working"></h5><div id="actwork"></div></section>
+  <section><h5 data-i18n="act.coming"></h5><div id="actcoming"></div></section>
+  <section id="actmachsec"><h5 data-i18n="act.machines"></h5><div id="actmach" class="actmach"></div></section>
+  <section><h5 data-i18n="act.recent"></h5><div id="actrecent"></div></section>
 </dialog>
 
 <dialog id="impdlg">

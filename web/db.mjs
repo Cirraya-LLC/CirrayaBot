@@ -969,6 +969,15 @@ export async function listTasks(scope, scopeId, limit = 50) {
     [scope, scopeId, limit])).rows
 }
 
+/** What agents ran lately, across every conversation: tool rows, and the traces of recent tasks. */
+export async function recentActivity(limit = 80) {
+  const tools = (await q(`select id, scope, scope_id, session_id, speaker, content, at from messages
+    where role = 'tool' order by id desc limit $1`, [limit])).rows
+  const tasks = (await q(`select id, scope, scope_id, session_id, agent_id, title, trace from tasks
+    where updated_at > now() - interval '1 day' order by updated_at desc limit 30`)).rows
+  return { tools, tasks }
+}
+
 export async function tasksWithStatus(statuses) {
   return (await q(`select ${TASK_COLS} from tasks where status = any($1) order by id`, [statuses])).rows
 }

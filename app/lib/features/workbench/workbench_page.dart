@@ -17,6 +17,7 @@ import '../../data/api.dart';
 import '../../data/settings.dart';
 import '../../l10n.dart';
 import '../../platform.dart';
+import 'activity_page.dart';
 import 'browser_view.dart';
 import 'editors.dart';
 import '../../data/speech.dart';
@@ -1031,6 +1032,28 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                 excluding: railed,
                 child: Row(
                   children: [
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        _footIcon(Icons.monitor_heart_outlined, tr('act.title'), () async {
+                          await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ActivityPage(bench: bench)));
+                          await bench.checkWaiting();
+                        }),
+                        if (bench.waitingForYou)
+                          Positioned(
+                            right: 5,
+                            top: 5,
+                            child: IgnorePointer(
+                              child: Container(
+                                key: const ValueKey('act-dot'),
+                                width: 7,
+                                height: 7,
+                                decoration: BoxDecoration(color: C.warn, shape: BoxShape.circle),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                     _footIcon(Icons.tune, tr('wb.providers'), () async {
                       await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ProvidersPage(api: bench.api)));
                     }),

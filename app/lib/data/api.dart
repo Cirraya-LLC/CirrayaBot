@@ -1302,6 +1302,17 @@ class Api {
     } on ApiException catch (_) {}
   }
 
+  /// Everything every agent is doing, what waits for a person, what is coming up, what was run.
+  /// Kept as maps: the page only shows it.
+  Future<Map<String, Object?>> activity() => _map('GET', '/api/activity');
+
+  /// Stop one run by its session (the activity page knows the session, not always the conversation).
+  Future<void> stopSession(String session) async {
+    try {
+      await _json('POST', '/api/runs/stop', {'session': session});
+    } on ApiException catch (_) {}
+  }
+
   // ---- Approvals ----
   Future<ApprovalPolicy> approvalPolicy() async =>
       ApprovalPolicy.fromJson((await _json('GET', '/api/approvals/policy')) as Map<String, Object?>);
