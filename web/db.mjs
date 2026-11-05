@@ -287,6 +287,10 @@ alter table agents add column if not exists voice text not null default '';
 -- Backup models, tried in order when the agent's own model keeps failing: [{provider_id, model}],
 -- provider_id '' = the default upstream. Chosen by the person, like the main model; never shipped.
 alter table agents add column if not exists fallbacks jsonb not null default '[]';
+-- A shell script the person wrote, run as root on the agent's machine when it is created or rebuilt and
+-- again when the script changes; setup_state is how its last run went ({hash, at, code, ms, tail}).
+alter table agents add column if not exists setup text not null default '';
+alter table agents add column if not exists setup_state jsonb;
 `
 
 /** Wait for the database — in compose the app is often ready before postgres. */
@@ -337,20 +341,26 @@ export async function getAgent(id) {
 export async function upsertAgent(a) {
   const { rows } = await q(`
     insert into agents (id, name, description, persona, ord, color, provider_id, model, daily_cap_micro, effort, approval, autonomy,
-                        fallbacks, voice)
-    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                        fallbacks, voice, setup)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
     on conflict (id) do update set
       name = excluded.name, description = excluded.description,
       persona = excluded.persona, ord = excluded.ord, color = excluded.color,
       provider_id = excluded.provider_id, model = excluded.model,
       daily_cap_micro = excluded.daily_cap_micro, effort = excluded.effort,
-      approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks, voice = excluded.voice
+      approval = excluded.approval, autonomy = excluded.autonomy, fallbacks = excluded.fallbacks, voice = excluded.voice,
+      setup = excluded.setup
     returning *`,
     [a.id, a.name, a.description ?? '', a.persona ?? '', a.ord ?? 99,
      a.color ?? COLORS[Math.floor(Math.random() * COLORS.length)],
      a.provider_id || null, a.model ?? '', a.daily_cap_micro ?? null, a.effort ?? '', a.approval ?? '', a.autonomy ?? '',
-     JSON.stringify(a.fallbacks ?? []), a.voice ?? ''])
+     JSON.stringify(a.fallbacks ?? []), a.voice ?? '', a.setup ?? ''])
   return rows[0]
+}
+
+/** How the agent's setup script last went; null forgets it (the script was removed). */
+export async function setSetupState(id, state) {
+  await q('update agents set setup_state = $2 where id = $1', [id, state == null ? null : JSON.stringify(state)])
 }
 
 /** Group logs identify people by name; a rename must follow, or their past words become "someone else's". */

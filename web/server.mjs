@@ -58,6 +58,12 @@ const toBot = (r, lang = 'en') => ({
   fallbacks: Array.isArray(r.fallbacks) ? r.fallbacks : [],
   // The voice it speaks with on an upstream voice; '' = the default one in the voice settings.
   voice: r.voice ?? '',
+  // Its machine's setup script, and how the last run went (stale = the script changed since).
+  setup: r.setup ?? '',
+  setup_state: r.setup_state ? { ...r.setup_state, stale: r.setup_state.hash !== setupHash(r.setup) } : null,
+  setup_running: setupRunning.has(r.id),
+  // Whether it has a machine at all (tools on): no machine, nothing to set up, watch or browse.
+  machine: !!CFG.tools,
   // Money is micro-dollars everywhere in the API (1 dollar = 1e6); null = no cap of its own.
   daily_cap_micro: r.daily_cap_micro == null ? null : Number(r.daily_cap_micro),
   // How hard this agent's model should think. '' = say nothing, which is what it did before.
@@ -397,6 +403,7 @@ const HOSTWORK = env.WORKSPACE_HOST_PATH || WORKROOT
 const LOCALWORK = existsSync(HOSTWORK) ? HOSTWORK : WORKROOT
 
 function cliRun(argv, input, timeout = EXEC_TIMEOUT) {
+  if (argv[0] === 'exec') touch(argv.find(x => x.startsWith(`${PREFIX}-agent-`)))
   return new Promise(done => {
     const p = spawn(CLI, argv, { stdio: ['pipe', 'pipe', 'pipe'] })
     let out = '', err = ''
@@ -520,15 +527,88 @@ async function execIn(c, argv, input) {
 function ensureContainer(botId, groupId) {
   return withLock(`box:${botId}`, () => ensureContainerNow(botId, groupId))
 }
-async function ensureContainerNow(botId, groupId) {
+// ---------- Idle machines sleep ----------
+// A machine nobody has used for AGENT_IDLE_STOP_MIN minutes (default 30, 0 = never) is stopped — not
+// removed: its files, installed packages and browser profile stay, and the next use starts it again
+// (ensureContainer). What runs in it stops, so a machine is left awake while something inside listens
+// on a port (a server the agent started; our own browser/desktop daemons don't count) or uses the CPU.
+// "Used" = any command in it, an open view of its browser or desktop, a turn or task of its agent in
+// progress, its setup script running.
+const IDLE_MS = Math.max(0, Number(env.AGENT_IDLE_STOP_MIN ?? 30)) * 60_000
+const BOOT_AT = Date.now()
+const lastUse = new Map()          // container name -> when it was last used
+const holding = new Map()          // container name -> open streams into it
+const asleep = new Set()           // names this process put to sleep (for the activity page)
+function touch(c) { if (c) { lastUse.set(c, Date.now()); asleep.delete(c) } }
+function holdWhile(c, child) {
+  holding.set(c, (holding.get(c) ?? 0) + 1); touch(c)
+  child.once('close', () => { const n = (holding.get(c) ?? 1) - 1; n > 0 ? holding.set(c, n) : holding.delete(c); touch(c) })
+  return child
+}
+// Ports our own daemons listen on (browserd 9230/9231, desktopd 9240/9241), in /proc/net/tcp's hex.
+const OWN_PORTS = ['240E', '240F', '2418', '2419']
+const SERVING = `awk 'NR>1 && $4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u |
+  grep -vxE '${OWN_PORTS.join('|')}' | head -1`
+const inUse = id => [`agent:${id}`, `task:${id}`, `box:${id}`].some(k => locks.has(k)) || setupRunning.has(id)
+
+async function sleepIdle() {
+  if (!CFG.tools || !IDLE_MS) return
+  const { out } = await cliRun(['ps', '--filter', `name=^${PREFIX}-agent-`, '--format', '{{.Names}}'], null, 30_000)
+  for (const c of out.split('\n').map(x => x.trim()).filter(x => x.startsWith(`${PREFIX}-agent-`))) {
+    const id = c.slice(`${PREFIX}-agent-`.length)
+    if (holding.has(c) || inUse(id) || Date.now() - (lastUse.get(c) ?? BOOT_AT) < IDLE_MS) continue
+    // Something it serves, or something still working: not idle, however long nobody talked to it.
+    const port = (await cliRun(['exec', c, 'sh', '-c', SERVING], null, 15_000)).out.trim()
+    const cpu = parseFloat((await cliRun(['stats', '--no-stream', '--format', '{{.CPUPerc}}', c], null, 30_000)).out) || 0
+    if (port || cpu > 3) { lastUse.set(c, Date.now()); continue }
+    await withLock(`box:${id}`, async () => {
+      if (holding.has(c) || [`agent:${id}`, `task:${id}`].some(k => locks.has(k))) return
+      await cliRun(['stop', '-t', '5', c], null, 60_000)
+      containerReady.delete(c)
+      lastUse.delete(c); asleep.add(c)
+      console.log(`[idle] ${id}'s machine went to sleep after ${Math.round(IDLE_MS / 60_000)} min unused`)
+    })
+  }
+}
+if (IDLE_MS) setInterval(() => sleepIdle().catch(e => console.warn(`[idle] ${e.message}`)),
+  Math.min(60_000, Math.max(1000, IDLE_MS / 3))).unref()
+
+// ---------- Setup scripts ----------
+// What the person wants every machine of this agent to have (packages, a checkout, a config file),
+// written once instead of re-installed by hand each time the machine is rebuilt — an image upgrade
+// recreates it and takes whatever was apt-installed with it. Run as root, once per new machine, and
+// again when the script changes. A failed run is not retried on its own (it would run before every
+// turn); "Run now" in the editor tries again.
+const SETUP_MAX = 20_000
+const SETUP_TIMEOUT = Math.max(1, Number(env.AGENT_SETUP_TIMEOUT_MIN || 15)) * 60_000
+const setupHash = s => s?.trim() ? createHash('sha256').update(s).digest('hex').slice(0, 16) : ''
+const setupRunning = new Set()
+async function runSetup(c, botId, script) {
+  setupRunning.add(botId)
+  const started = Date.now()
+  console.log(`[setup] running ${botId}'s setup script`)
+  try {
+    const r = await cliRun(['exec', '-u', '0', '-e', 'HOME=/root', c, 'bash', '-lc', script], null, SETUP_TIMEOUT)
+    const all = `${r.out}${r.err ? `${r.out ? '\n' : ''}${r.err}` : ''}`
+    const state = { hash: setupHash(script), at: Date.now(), code: r.code, ms: Date.now() - started,
+      tail: all.length > 4000 ? `…${all.slice(-4000)}` : all }
+    await db.setSetupState(botId, state)
+    if (r.code !== 0) console.warn(`[setup] ${botId}'s setup script exited ${r.code}`)
+    return state
+  } finally { setupRunning.delete(botId) }
+}
+
+async function ensureContainerNow(botId, groupId, { setup = true } = {}) {
   await ensureImage()
   const name = cname(botId)
+  const agent = await db.getAgent(botId)
+  const script = agent?.setup?.trim() ? agent.setup : ''
   // Only the groups it is in right now. A group it isn't in has no mount, so it doesn't exist in there.
   const groups = (await db.listGroups()).filter(g => g.members.includes(botId)).map(g => g.id)
   if (groupId && !groups.includes(groupId)) throw new Say('err.noGroup', {}, 404)
   const work = join(HOSTWORK, 'agents', botId)
   const want = { work, image: IMAGE, groups: groupsLabel(groups) }
-  const sig = `${want.work}|${want.image}|${want.groups}`
+  const sig = `${want.work}|${want.image}|${want.groups}|${setupHash(script)}`
   if (containerReady.get(name) !== sig) {
     await ensureNetwork()                  // once per process: the network, and the egress rules on it
     // The host directories have to exist first, or docker makes them itself, owned by root.
@@ -543,7 +623,11 @@ async function ensureContainerNow(botId, groupId) {
       console.log(`${botId}'s container is ${d.why}; recreating it (files in /work and the group drives are kept)`)
       await cliRun(['rm', '-f', name], null, 60_000)
     }
-    if (d.action === 'start') await cliRun(['start', name], null, 60_000)
+    if (d.action === 'start') {
+      await cliRun(['start', name], null, 60_000)
+      // Asleep (or the host restarted): the daemons are gone and their pids may now be someone else's.
+      await cliRun(['exec', '-u', '0', name, 'rm', '-f', '/tmp/browserd.pid'], null, 15_000)
+    }
     if (d.action === 'create' || d.action === 'recreate') {
       const r = await cliRun(runArgs({ name, image: IMAGE, hostWork: HOSTWORK, botId, groups, network: NETWORK,
         memory: env.AGENT_MEMORY || '2g', cpus: env.AGENT_CPUS || '2' }), null, 120_000)
@@ -553,11 +637,17 @@ async function ensureContainerNow(botId, groupId) {
     // made by this server (as root) or by an agent from before it stopped running as root. And containers
     // from before group drives were reached by path still have the old symlink, pointing at whichever
     // group used it last, so it goes.
-    if (d.action !== 'reuse')
+    // A new machine runs the setup script; one that already ran it runs it again only when it changed.
+    const fresh = d.action === 'create' || d.action === 'recreate'
+    const ran = setup && script && (fresh || agent.setup_state?.hash !== setupHash(script))
+    if (ran) await runSetup(name, botId, script)
+    // After setup too: what a root script made in /work must still be the agent's.
+    if (fresh || ran)
       await cliRun(['exec', '-u', '0', name, 'sh', '-c', 'rm -f /work/group; chown -R "$0:$0" /work "$@"', AGENT_UID,
         ...groups.map(g => `/groups/${g}`)], null, 300_000)
     containerReady.set(name, sig)
   }
+  touch(name)
   return name
 }
 
@@ -660,6 +750,7 @@ const uploading = new Set()
 
 /** Run something in a container with a file on its stdin, or with its stdout into a file. */
 function execStream(argv, { from = null, to = null, max = Infinity } = {}) {
+  touch(argv.find(x => x.startsWith(`${PREFIX}-agent-`)))
   return new Promise(done => {
     const p = spawn(CLI, ['exec', ...from ? ['-i'] : [], ...argv], { stdio: ['pipe', 'pipe', 'pipe'] })
     let err = '', out = '', size = 0, over = false
@@ -2588,6 +2679,11 @@ async function checkAgent(b, selfId = null, cur = null) {
     if (model.length > 200) throw new Say('agent.modelLong')
     out.model = model
   }
+  if (b.setup !== undefined) {
+    const setup = str(b.setup).replace(/\r\n?/g, '\n')
+    if (setup.length > SETUP_MAX) throw new Say('setup.long', { max: SETUP_MAX })
+    out.setup = setup.trim() ? setup : ''
+  }
   if (b.voice !== undefined) {
     const v = str(b.voice).trim()
     if (v.length > 100) throw new Say('voice.need.voice')
@@ -2734,6 +2830,7 @@ const server = createServer(async (req, res) => {
       if (!cur) return send(404, { error: t('err.noAgent') })
       const patch = await checkAgent(await readBody(req), cur.id, cur)
       await db.upsertAgent({ ...cur, ...patch })
+      if (patch.setup === '' && cur.setup_state) await db.setSetupState(cur.id, null)
       // Group logs identify people by name. Without syncing a rename, what he said in groups would become "someone else's"
       if (patch.name && patch.name !== cur.name) await db.renameSpeaker(cur.name, patch.name)
       return send(200, { ok: true })
@@ -2748,6 +2845,24 @@ const server = createServer(async (req, res) => {
       // and his work is still in workspace/agents/<id>/ (a directory on the host)
       await removeContainer(bm[1]).catch(() => {})
       return send(200, { ok: true })
+    }
+
+    // Run the setup script now — after it failed, or to check a change without waiting for the next turn.
+    // In the background: it can take minutes; the agent list shows setup_running until it is done.
+    const su = url.pathname.match(/^\/api\/bots\/([a-z0-9-]+)\/setup$/)
+    if (su && req.method === 'POST') {
+      const a = await db.getAgent(su[1])
+      if (!a) return send(404, { error: t('err.noAgent') })
+      if (!CFG.tools) return send(400, { error: t('setup.noTools') })
+      if (!a.setup?.trim()) return send(400, { error: t('setup.empty') })
+      if (setupRunning.has(a.id)) return send(409, { error: t('setup.running') })
+      setupRunning.add(a.id)        // at once, so the answer below already says it is running
+      withLock(`box:${a.id}`, async () => {
+        const c = await ensureContainerNow(a.id, null, { setup: false })
+        const fresh = await db.getAgent(a.id)
+        if (fresh?.setup?.trim()) await runSetup(c, a.id, fresh.setup)
+      }).catch(e => console.warn(`[setup] ${a.id}: ${e.message}`)).finally(() => setupRunning.delete(a.id))
+      return send(202, { ok: true })
     }
 
     // .../self is the second store: the notes the agent writes himself (memory.mjs). Agents only —
@@ -2781,8 +2896,8 @@ const server = createServer(async (req, res) => {
         // ⚠️ Killing the docker exec client does NOT kill the curl inside the container: nobody reads its output any more,
         // the heartbeat fills the pipe and it hangs forever while the daemon keeps encoding frames for it. So record its pid in the container and kill it ourselves on the way out
         const pidFile = `/tmp/stream-${process.pid}-${Date.now().toString(36)}.pid`
-        const child = spawn(CLI, ['exec', c, 'sh', '-c', `echo $$ > ${pidFile}; exec curl -sN http://127.0.0.1:9230/stream`],
-          { stdio: ['ignore', 'pipe', 'ignore'] })
+        const child = holdWhile(c, spawn(CLI, ['exec', c, 'sh', '-c', `echo $$ > ${pidFile}; exec curl -sN http://127.0.0.1:9230/stream`],
+          { stdio: ['ignore', 'pipe', 'ignore'] }))
         res.writeHead(200, { 'content-type': 'multipart/x-mixed-replace; boundary=frame', 'cache-control': 'no-store' })
         child.stdout.pipe(res)
         res.on('close', () => {
@@ -2815,8 +2930,8 @@ const server = createServer(async (req, res) => {
         if (!await alive()) { res.writeHead(204); return res.end() }
         await desktopUp(c)                       // a changed daemon is swapped in (no-op otherwise)
         const pidFile = `/tmp/dstream-${process.pid}-${Date.now().toString(36)}.pid`
-        const child = spawn(CLI, ['exec', c, 'sh', '-c', `echo $$ > ${pidFile}; exec curl -sN http://127.0.0.1:9240/stream`],
-          { stdio: ['ignore', 'pipe', 'ignore'] })
+        const child = holdWhile(c, spawn(CLI, ['exec', c, 'sh', '-c', `echo $$ > ${pidFile}; exec curl -sN http://127.0.0.1:9240/stream`],
+          { stdio: ['ignore', 'pipe', 'ignore'] }))
         res.writeHead(200, { 'content-type': 'multipart/x-mixed-replace; boundary=frame', 'cache-control': 'no-store' })
         child.stdout.pipe(res)
         res.on('close', () => {
@@ -2869,7 +2984,7 @@ const server = createServer(async (req, res) => {
         const name = path.split('/').pop()
         res.writeHead(200, { ...servedHeaders({ name, mime: mimeOf(name) }, url.searchParams.get('download') === '1'),
           'content-length': Number(size) })
-        const child = spawn(CLI, ['exec', c, 'cat', '--', path], { stdio: ['ignore', 'pipe', 'ignore'] })
+        const child = holdWhile(c, spawn(CLI, ['exec', c, 'cat', '--', path], { stdio: ['ignore', 'pipe', 'ignore'] }))
         child.stdout.pipe(res)
         res.on('close', () => child.kill('SIGKILL'))
         return
@@ -3556,8 +3671,8 @@ server.on('upgrade', async (req, socket) => {
     const up = await execIn(c, ['-i', c, 'bash', '-c', screen.up()], screen.daemon())
     if (up.code !== 0 || closed) return close()
     // After exec, cat keeps bash's pid, so $$ is the one to kill
-    child = spawn(CLI, ['exec', '-i', c, 'bash', '-c', `echo $$ > ${pidFile}; exec 3<>/dev/tcp/127.0.0.1/${screen.port + 1}; exec cat >&3`],
-      { stdio: ['pipe', 'ignore', 'ignore'] })
+    child = holdWhile(c, spawn(CLI, ['exec', '-i', c, 'bash', '-c', `echo $$ > ${pidFile}; exec 3<>/dev/tcp/127.0.0.1/${screen.port + 1}; exec cat >&3`],
+      { stdio: ['pipe', 'ignore', 'ignore'] }))
     child.on('close', close)
     child.stdin.on('error', () => {})
     for (const line of pending.splice(0)) child.stdin.write(line + '\n')

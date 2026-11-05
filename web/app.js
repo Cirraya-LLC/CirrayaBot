@@ -1494,10 +1494,55 @@ function editBot(b) {
   $('#bcaphint').textContent = u && !u.priced ? t('sp.unpricedWhy')
     : USAGE.default_cap_micro != null ? t('sp.capDefault', { cap: money(USAGE.default_cap_micro) }) : ''
   $('#bdel').style.display = b ? '' : 'none'
+  // The machine's setup script. Only where there is a machine; "Run now" only for a saved Agent.
+  $('#bsetupsec').hidden = BOTS.length ? !BOTS[0].machine : false
+  $('#bsetup').value = b?.setup ?? ''
+  $('#bsetupsec').open = !!b?.setup
+  paintSetup(b)
   $('#bfb').innerHTML = ''
   for (const f of b?.fallbacks ?? []) addFallbackRow(f)
   paintFallbackAdd()
   $('#bdlg').showModal()
+}
+
+// How the setup script last went, and polling while it runs (it can take minutes).
+let setupPoll = null
+function paintSetup(b) {
+  clearTimeout(setupPoll)
+  const st = b?.setup_state, el = $('#bsetupstate')
+  el.className = ''
+  $('#bsetuprun').hidden = !b?.setup
+  $('#bsetuprun').disabled = !!b?.setup_running
+  $('#bsetupout').hidden = !st?.tail
+  $('#bsetupout').textContent = st?.tail ?? ''
+  if (b?.setup_running) {
+    el.textContent = t('st.running')
+    setupPoll = setTimeout(async () => {
+      if (!$('#bdlg').open || bEditing?.id !== b.id) return
+      const fresh = (await (await fetch(api('/api/bots'))).json().catch(() => [])).find(x => x.id === b.id)
+      if (fresh) paintSetup(fresh)
+    }, 3000)
+  } else if (!b?.setup) el.textContent = ''
+  else if (!st) el.textContent = t('st.never')
+  else {
+    const at = new Date(st.at).toLocaleString(lang)
+    el.textContent = st.code === 0 ? t('st.ok', { when: at, sec: Math.round((st.ms ?? 0) / 1000) }) : t('st.fail', { when: at, code: st.code })
+    if (st.code !== 0) el.className = 'bad'
+    if (st.stale) el.textContent += ` · ${t('st.stale')}`
+  }
+}
+$('#bsetuprun').onclick = async () => {
+  if (!bEditing) return
+  // Save first if it was edited, so what runs is what is on screen.
+  if ($('#bsetup').value !== (bEditing.setup ?? '')) {
+    const r = await fetch(api(`/api/bots/${bEditing.id}`), { method:'PATCH', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ setup: $('#bsetup').value }) })
+    if (!r.ok) { alert(await errText(r)); return }
+    bEditing.setup = $('#bsetup').value
+  }
+  const r = await fetch(api(`/api/bots/${bEditing.id}/setup`), { method:'POST' })
+  if (!r.ok && r.status !== 409) { alert(await errText(r)); return }
+  paintSetup({ ...bEditing, setup_running: true })
 }
 
 // Backup models: one row each, an upstream and a model, like the main pick above.
@@ -1552,7 +1597,8 @@ $('#bsave').onclick = async () => {
   if (cap === false) { alert(t('sp.capBad')); return }
   const body = { name:$('#bname').value.trim(), description:$('#bdesc').value.trim(), persona:$('#bpersona').value.trim(),
     provider_id:$('#bprov').value, model:chosenModel(), effort:$('#beffort').value, approval:$('#bapproval').value, autonomy:$('#bauto').value,
-    daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), voice: $('#bvoice').value.trim() }
+    daily_cap_micro: cap === '' ? null : cap, fallbacks: chosenFallbacks(), voice: $('#bvoice').value.trim(),
+    ...$('#bsetupsec').hidden ? {} : { setup: $('#bsetup').value } }
   if (!body.name || !body.persona) { alert(t('b.needName')); return }
   if (!body.model) { alert(t('b.needModel')); return }
   const r = bEditing

@@ -2502,6 +2502,33 @@ saving the mode must not wipe it. UI: a second box under the ask list (web `#apn
 Tests: `node web/approve.mjs`, `test/e2e/forbid.test.mjs` (approvals off, an agent on "all", a routine; the older
 client), `app/test/approval_test.dart`.
 
+### 2.40.2 A setup script per agent
+
+`agents.setup` (≤ 20 000 characters) + `agents.setup_state` (`{hash, at, code, ms, tail}`). Run as root
+(`docker exec -u 0 -e HOME=/root … bash -lc`) by `ensureContainerNow` **on a new or rebuilt machine, and when the
+script's hash differs from the last run's** — the hash is part of the `containerReady` signature, so an edit is
+noticed on the next turn. A failed run is **not** retried on its own (it would run before every turn); `POST
+/api/bots/:id/setup` (202, runs in the background; the agent row says `setup_running`) tries again. Then `/work` is
+chowned back to uid 1000 — a root script's files there must stay the agent's. Removing the script forgets the state.
+`toBot` adds `setup`, `setup_state.stale` (changed since the last run), `setup_running`, and `machine` (tools on).
+Why it exists: an image upgrade recreates the container and takes whatever the agent apt-installed with it (2.22).
+UI: a "Setup script" section in the agent editor, with the last run's status and output and "Run now".
+`AGENT_SETUP_TIMEOUT_MIN` (default 15). Tests: `test/e2e/setup.test.mjs`.
+
+### 2.40.3 Idle machines sleep
+
+`AGENT_IDLE_STOP_MIN` (default 30, 0 = never): a sweeper (`sleepIdle`) `docker stop`s an agent's container nobody
+has used for that long — **stopped, not removed**: files, installed packages and the browser profile stay, and the
+next `ensureContainer` sees it stopped and starts it (`decide` → `start`, which also deletes our stale
+`/tmp/browserd.pid`: after a stop pids start over). "Used" = any `exec` into it (`cliRun` / `execStream` call
+`touch`), an open stream into it (`holdWhile`: the browser/desktop views, a file download, the input socket), a
+lock of its agent (`agent:` / `task:` / `box:`), its setup script running. **And it stays awake while anything
+inside listens on a port** (our daemons' 9230/9231/9240/9241 don't count) **or uses more than 3 % CPU** — a server or
+a long job the agent started must not be killed because nobody chatted for half an hour. What runs inside stops
+when it sleeps (desktop windows too). The chown after (re)creation no longer runs on a plain start.
+The test docker (`test/e2e/fake-docker.sh`) now remembers the containers it "ran" so `ps` / `stop` / `rm` answer.
+Tests: `test/e2e/idle.test.mjs`. **Not verified on real containers yet** (the box).
+
 ## 3. What runs now
 
 ```bash
