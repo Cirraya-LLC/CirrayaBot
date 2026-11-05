@@ -307,6 +307,27 @@ create table if not exists triggers (
   last_error   text not null default '',
   fired        int not null default 0
 );
+-- MCP servers an agent is given (web/mcp.mjs). remote: url + auth (none / token / oauth); local: a command run in the
+-- agent's machine. secret_enc = the token, or the local server's environment as JSON; oauth_enc = {client, tokens}.
+-- tools = what the server listed, each with the person's mode (auto / ask / off).
+create table if not exists mcp_servers (
+  id          text primary key,
+  agent_id    text not null,
+  name        text not null,
+  kind        text not null check (kind in ('remote', 'local')),
+  url         text not null default '',
+  command     text not null default '',
+  auth        text not null default 'none',
+  header      text not null default 'Authorization',
+  secret_enc  text,
+  oauth_enc   text,
+  tools       jsonb not null default '[]',
+  enabled     boolean not null default true,
+  status      text not null default '',
+  last_error  text not null default '',
+  checked_at  timestamptz,
+  created_at  timestamptz not null default now()
+);
 -- Every delivery seen, so one sent again is not run twice; the ones that ran count against the ceiling per hour.
 create table if not exists trigger_deliveries (
   trigger_id text not null,
@@ -457,6 +478,7 @@ export async function deleteAgent(id) {
   await deleteTriggers(`(scope = 'dm' and scope_id = $1) or agent_id = $1`, [id])
   await q(`update skills set agents = array_remove(agents, $1)`, [id])
   await q('delete from secrets where agent_id = $1', [id])
+  await q('delete from mcp_servers where agent_id = $1', [id])
   await q('delete from front_runs where scope = $1 and scope_id = $2', ['dm', id])
   return dropFiles(`scope = 'dm' and scope_id = $1`, [id])
 }
@@ -1138,6 +1160,32 @@ export async function dropStaleUploads(hours = 24) {
 export async function dropUpload(id) {
   return dropFiles('id = $1 and session_id is null', [id])
 }
+
+// ---------- MCP servers ----------
+const MCP_COLS = `id, agent_id, name, kind, url, command, auth, header, tools, enabled, status, last_error, checked_at, created_at,
+  secret_enc is not null as has_secret, oauth_enc is not null as has_oauth`
+export const listMcp = async agentId =>
+  (await q(`select ${MCP_COLS} from mcp_servers where agent_id = $1 order by created_at`, [agentId])).rows
+/** With the sealed secret and OAuth state: only the server's own calls need them. */
+export const getMcp = async (id, { secrets = false } = {}) =>
+  (await q(`select ${MCP_COLS}${secrets ? ', secret_enc, oauth_enc' : ''} from mcp_servers where id = $1`, [id])).rows[0] ?? null
+export async function createMcp(m) {
+  return (await q(`insert into mcp_servers (id, agent_id, name, kind, url, command, auth, header, secret_enc, oauth_enc, enabled)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning ${MCP_COLS}`,
+    [m.id, m.agent_id, m.name, m.kind, m.url ?? '', m.command ?? '', m.auth ?? 'none', m.header ?? 'Authorization',
+     m.secret_enc ?? null, m.oauth_enc ?? null, m.enabled !== false])).rows[0]
+}
+const MCP_FIELDS = ['name', 'url', 'command', 'auth', 'header', 'secret_enc', 'oauth_enc', 'tools', 'enabled', 'status', 'last_error', 'checked_at']
+export async function updateMcp(id, fields) {
+  const sets = [], params = [id]
+  for (const k of MCP_FIELDS) if (fields[k] !== undefined) {
+    params.push(k === 'tools' ? JSON.stringify(fields[k]) : fields[k])
+    sets.push(`${k} = $${params.length}`)
+  }
+  if (!sets.length) return getMcp(id)
+  return (await q(`update mcp_servers set ${sets.join(', ')} where id = $1 returning ${MCP_COLS}`, params)).rows[0] ?? null
+}
+export const deleteMcp = id => q('delete from mcp_servers where id = $1', [id])
 
 // ---------- triggers ----------
 const TRIGGER_COLS = `id, kind, name, scope, scope_id, agent_id, prompt, filters, max_per_hour, enabled, session_id,

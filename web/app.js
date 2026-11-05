@@ -302,6 +302,7 @@ async function openConv(c) {
   loadTriggers()
   loadBotSkills()
   loadBotSecrets()
+  loadMcp()
   loadDesktop()
   TASKS = []; taskSig = ''; openTask = null; renderTasks()
 
@@ -634,6 +635,11 @@ function toolLabel(name, args = {}) {
   }
   if (name === 'http_request') return `${String(args.method || 'GET').toUpperCase()} ${args.url ?? ''}${args.secret ? `  · ${args.secret}` : ''}`
   if (name === 'request_secret') return t('tool.requestSecret', { name: args.name ?? '' })
+  if (name.startsWith('mcp__')) {
+    const [, server, ...tool] = name.split('__')
+    const a = JSON.stringify(args ?? {})
+    return `${server} · ${tool.join('__')}${a === '{}' ? '' : ` ${a.length > 160 ? a.slice(0, 160) + '…' : a}`}`
+  }
   if (name === 'computer') return t('tool.computer', { what: [args.action, args.keys ?? (args.text != null ? quote(args.text) : ''),
     args.x != null ? `${args.x},${args.y}` : ''].filter(Boolean).join(' ') })
   return name === 'bash' ? args.command
@@ -723,6 +729,146 @@ async function loadBotSecrets() {
     }
     box.appendChild(el)
   }
+}
+// Right column: tool servers (MCP) connected to this Agent — remote, or run on its machine. Secrets never come back.
+let MCPS = [], mcpEditing = null, mcpPoll = null
+const mcpStatus = m => !m.enabled ? ['', t('mcp.st.off')] : m.status === 'ok' ? ['ok', t('mcp.st.ok', { n: m.tools.filter(x => x.mode !== 'off').length })]
+  : m.status === 'signin' ? ['bad', t('mcp.st.signin')] : m.status === 'error' ? ['bad', t('mcp.st.error')] : ['', t('mcp.st.unchecked')]
+async function loadMcp() {
+  const c = cur
+  $('#s2mcp').style.display = c?.kind === 'agent' ? '' : 'none'
+  if (c?.kind !== 'agent') return
+  const list = await fetch(api(`/api/bots/${c.id}/mcp`)).then(r => r.ok ? r.json() : []).catch(() => [])
+  if (cur !== c) return
+  MCPS = list
+  const box = $('#bmcp'); box.innerHTML = ''
+  for (const m of list) {
+    const el = document.createElement('div')
+    el.className = 'rt' + (m.enabled ? '' : ' off')
+    const [cls, label] = mcpStatus(m)
+    el.innerHTML = `<b>${esc(m.name)} <span class="st ${cls}" title="${esc(m.last_error)}">${esc(label)}</span></b><small>${esc(m.kind === 'remote' ? m.url : m.command)}</small>`
+    el.onclick = () => editMcp(m)
+    box.appendChild(el)
+  }
+}
+const mcpShowKind = () => document.querySelectorAll('#mcpdlg [data-mk]').forEach(d => { d.hidden = d.dataset.mk !== $('#mcpkind').value })
+const mcpShowAuth = () => { $('#mcptok').hidden = $('#mcpauth').value !== 'token'; $('#mcpclient').hidden = $('#mcpauth').value !== 'oauth' }
+$('#mcpkind').onchange = mcpShowKind
+$('#mcpauth').onchange = mcpShowAuth
+function mcpFill(m) {
+  mcpEditing = m
+  $('#mcptitle').textContent = m ? t('common.editNamed', { name: m.name }) : t('mcp.new')
+  const [cls, label] = m ? mcpStatus(m) : ['', '']
+  $('#mcpstate').innerHTML = m ? `<span class="${cls}">${esc(label)}</span>${m.last_error ? ` — <span class="bad">${esc(m.last_error)}</span>` : ''}` : ''
+  $('#mcpsignrow').hidden = !(m && m.kind === 'remote' && m.auth === 'oauth')
+  $('#mcpsignout').hidden = !m?.signed_in
+  $('#mcpsignst').textContent = m?.signed_in ? t('mcp.signedIn') : ''
+  $('#mcpredir').textContent = t('mcp.redirect', { url: m?.redirect_uri ?? `${location.origin}/oauth/callback` })
+  $('#mcptoken').placeholder = t(m?.has_secret && m.auth === 'token' ? 'mcp.tokenKeep' : 'mcp.tokenPh')
+  const tools = $('#mcptools'); tools.innerHTML = ''
+  if (m?.tools?.length) {
+    const head = document.createElement('div'); head.className = 'rhint'; head.textContent = t('mcp.toolsHead'); tools.appendChild(head)
+    for (const x of m.tools) {
+      const row = document.createElement('div'); row.className = 'mtool'
+      row.innerHTML = `<div><b></b><small></small></div><select data-tool="">
+        <option value="auto">${esc(t('mcp.mode.auto'))}</option><option value="ask">${esc(t('mcp.mode.ask'))}</option><option value="off">${esc(t('mcp.mode.off'))}</option></select>`
+      row.querySelector('b').textContent = x.title || x.name
+      row.querySelector('small').textContent = [x.read_only ? t('mcp.readOnly') : x.destructive ? t('mcp.destructive') : '', x.description].filter(Boolean).join(' · ')
+      row.querySelector('small').title = x.description
+      const sel = row.querySelector('select'); sel.dataset.tool = x.name; sel.value = x.mode
+      tools.appendChild(row)
+    }
+  }
+  $('#mcpdel').style.display = $('#mcprefresh').style.display = m ? '' : 'none'
+}
+function editMcp(m) {
+  if (cur?.kind !== 'agent') return
+  $('#mcpkind').value = m?.kind ?? 'remote'; $('#mcpkind').disabled = !!m
+  $('#mcpname').value = m?.name ?? ''
+  $('#mcpurl').value = m?.url ?? ''
+  $('#mcpauth').value = m?.auth ?? 'none'
+  $('#mcpheader').value = m?.header && m.header !== 'Authorization' ? m.header : ''
+  $('#mcptoken').value = ''
+  $('#mcpcid').value = m?.client_id ?? ''; $('#mcpcsec').value = ''
+  $('#mcpclient').open = !!m?.client_id
+  $('#mcpcmd').value = m?.command ?? ''
+  $('#mcpenv').value = (m?.env_keys ?? []).map(k => `${k}=`).join('\n')
+  $('#mcpon').checked = m?.enabled ?? true
+  mcpFill(m)
+  mcpShowKind(); mcpShowAuth()
+  if (!$('#mcpdlg').open) $('#mcpdlg').showModal()
+}
+$('#addmcp').onclick = () => editMcp(null)
+$('#mcpdlg').addEventListener('close', () => { clearInterval(mcpPoll); mcpPoll = null; loadMcp() })
+$('#mcpcancel').onclick = () => $('#mcpdlg').close()
+function mcpEnvOf(text) {
+  const env = {}
+  for (const line of text.split('\n')) {
+    const l = line.trim(); if (!l) continue
+    const i = l.indexOf('='); if (i < 1) return null
+    env[l.slice(0, i).trim()] = l.slice(i + 1)
+  }
+  return env
+}
+async function mcpSend(method, path, body) {
+  const r = await fetch(api(path), { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+  if (!r.ok) { alert(await errText(r)); return null }
+  return r.json()
+}
+$('#mcpsave').onclick = async () => {
+  const kind = $('#mcpkind').value, m = mcpEditing
+  const body = { name: $('#mcpname').value.trim(), enabled: $('#mcpon').checked }
+  if (kind === 'remote') {
+    Object.assign(body, { url: $('#mcpurl').value.trim(), auth: $('#mcpauth').value, header: $('#mcpheader').value.trim() || 'Authorization' })
+    if ($('#mcptoken').value) body.token = $('#mcptoken').value
+    if (body.auth === 'oauth' && ($('#mcpcid').value.trim() !== (m?.client_id ?? '') || $('#mcpcsec').value))
+      Object.assign(body, { client_id: $('#mcpcid').value.trim(), client_secret: $('#mcpcsec').value })
+  } else {
+    body.command = $('#mcpcmd').value.trim()
+    const env = mcpEnvOf($('#mcpenv').value)
+    if (!env) { alert(t('mcp.envBad')); return }
+    body.env = env
+  }
+  if (m) body.tools = Object.fromEntries([...document.querySelectorAll('#mcptools select')].map(x => [x.dataset.tool, x.value]))
+  $('#mcpsave').disabled = true
+  try {
+    const x = m ? await mcpSend('PATCH', `/api/mcp/${m.id}`, body) : await mcpSend('POST', `/api/bots/${cur.id}/mcp`, { ...body, kind })
+    $('#mcptoken').value = ''; $('#mcpcsec').value = ''
+    if (!x) return
+    // A new one stays open: its tools to choose for, or a sign-in to do.
+    if (m && x.status !== 'signin' && x.status !== 'error') $('#mcpdlg').close(); else editMcp(x)
+  } finally { $('#mcpsave').disabled = false }
+}
+$('#mcprefresh').onclick = async () => {
+  if (!mcpEditing) return
+  $('#mcpstate').textContent = t('mcp.checking')
+  const x = await mcpSend('POST', `/api/mcp/${mcpEditing.id}/refresh`)
+  if (x) editMcp(x)
+}
+$('#mcpsignin').onclick = async () => {
+  if (!mcpEditing) return
+  const win = window.open('about:blank', '_blank')           // opened now, while the click still counts as one
+  const x = await mcpSend('POST', `/api/mcp/${mcpEditing.id}/signin`)
+  if (!x) { win?.close(); return }
+  if (win) win.location = x.url; else location.assign(x.url)
+  $('#mcpsignst').textContent = t('mcp.waiting')
+  const id = mcpEditing.id, until = Date.now() + 5 * 60_000
+  clearInterval(mcpPoll)
+  mcpPoll = setInterval(async () => {
+    const list = await fetch(api(`/api/bots/${cur.id}/mcp`)).then(r => r.json()).catch(() => [])
+    const now = list.find(y => y.id === id)
+    if (now?.signed_in || Date.now() > until) { clearInterval(mcpPoll); mcpPoll = null; if (now && mcpEditing?.id === id) editMcp(now) }
+  }, 2000)
+}
+$('#mcpsignout').onclick = async () => {
+  if (!mcpEditing) return
+  const x = await mcpSend('POST', `/api/mcp/${mcpEditing.id}/signout`)
+  if (x) editMcp(x)
+}
+$('#mcpdel').onclick = async () => {
+  if (!mcpEditing || !confirm(t('mcp.confirmDelete', { name: mcpEditing.name }))) return
+  await fetch(api(`/api/mcp/${mcpEditing.id}`), { method: 'DELETE' })
+  $('#mcpdlg').close()
 }
 $('#addsec').onclick = () => {
   for (const id of ['#secname', '#secorigin', '#secheader', '#secformat', '#secvalue']) $(id).value = ''

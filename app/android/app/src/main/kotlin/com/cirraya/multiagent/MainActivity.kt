@@ -46,6 +46,12 @@ class MainActivity : FlutterActivity() {
                     if (path == null) { result.success(false); return@setMethodCallHandler }
                     result.success(hand(call.method == "share", File(path), mime))
                 }
+                // A web page in the person's browser (signing in to a tool server). Only http(s).
+                "openUrl" -> {
+                    val url = call.argument<String>("url") ?: ""
+                    if (!url.startsWith("https://") && !url.startsWith("http://")) { result.success(false); return@setMethodCallHandler }
+                    result.success(try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))); true } catch (e: ActivityNotFoundException) { false })
+                }
                 "noticesStart" -> {
                     val texts = call.argument<Map<String, String>>("texts") ?: emptyMap()
                     NoticeService.start(this, call.argument<String>("base") ?: "", call.argument<String>("token") ?: "", texts)

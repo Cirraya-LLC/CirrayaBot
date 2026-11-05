@@ -20,7 +20,10 @@ export function hasEffect(name, args = {}) {
     case 'browser': return !READ_ACTIONS.has(String(args.action ?? ''))
     case 'computer': return !['screenshot', 'move'].includes(String(args.action ?? ''))
     case 'http_request': return !['GET', 'HEAD', 'OPTIONS'].includes(String(args.method || 'GET').toUpperCase())
-    default: return false   // write_file and install_packages give the same result run twice; the rest read or talk
+    default:
+      // An MCP tool is taken to change something; server.mjs (effectOf) knows which ones their server marks read-only.
+      if (name.startsWith('mcp__')) return true
+      return false   // write_file and install_packages give the same result run twice; the rest read or talk
   }
 }
 

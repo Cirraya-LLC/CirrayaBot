@@ -509,6 +509,13 @@
   .tool .secask button{padding:3px 12px;font-size:11.5px}
   .rt .st.run{background:var(--tint);color:var(--tintink)}
   #tgdlg [data-k] input,#tgdlg>input,#tgdlg>select,#tgwho select{width:100%}
+  #mcpdlg{width:600px} #mcpdlg [hidden]{display:none} #mcpdlg input.mono,#mcpdlg textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  #mcpdlg textarea.mono{min-height:70px} #mcpdlg details{margin:0 0 10px;font-size:13px;color:var(--dim)} #mcpdlg summary{cursor:pointer;margin-bottom:6px}
+  #mcpstate{margin:4px 0 8px} #mcpstate .bad{color:var(--bad)} #mcpsignrow{gap:8px;align-items:center;margin-bottom:10px}
+  .mtool{display:flex;gap:10px;align-items:center;padding:6px 0;border-top:1px solid var(--line)} .mtool>div{flex:1;min-width:0}
+  .mtool b{font-size:13px;font-weight:500} .mtool small{display:block;color:var(--dim2);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #mcpdlg .mtool select{width:auto;margin:0;padding:6px 8px;font-size:12.5px}
+  .rt .st.ok{background:var(--tint);color:var(--tintink)}
   #tgdlg{width:560px}
   .tgper{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);margin-bottom:6px} #tgdlg .tgper input{width:90px;margin:0}
   .tgcopy{display:flex;gap:8px;align-items:center;margin:6px 0} .tgcopy[hidden]{display:none} .tgcopy code{flex:1;min-width:0;overflow-wrap:anywhere;font-size:12px;
@@ -785,6 +792,9 @@
   <div id="s2skills"><div class="s2h sub" data-i18n="s2.skills"></div>
   <div id="bskills"></div>
   <button class="addm" id="addsk"><b>＋</b> <span data-i18n="s2.addSkill"></span></button></div>
+  <div id="s2mcp"><div class="s2h sub" data-i18n="s2.mcp"></div>
+  <div id="bmcp"></div>
+  <button class="addm" id="addmcp"><b>＋</b> <span data-i18n="s2.addMcp"></span></button></div>
   <div id="s2secrets"><div class="s2h sub" data-i18n="s2.secrets"></div>
   <div id="bsecrets"></div>
   <button class="addm" id="addsec"><b>＋</b> <span data-i18n="s2.addSecret"></span></button></div>
@@ -1002,6 +1012,49 @@
   <div class="acts">
     <button class="btn" id="impcancel" data-i18n="common.cancel"></button>
     <button class="btn pri" id="impadd" data-i18n="mi.add"></button>
+  </div>
+</dialog>
+
+<dialog id="mcpdlg">
+  <h4 id="mcptitle" data-i18n="mcp.new"></h4>
+  <select id="mcpkind">
+    <option value="remote" data-i18n="mcp.kindRemote"></option>
+    <option value="local" data-i18n="mcp.kindLocal"></option>
+  </select>
+  <input type="text" id="mcpname" data-i18n-placeholder="mcp.namePh" autocomplete="off" maxlength="40">
+  <div data-mk="remote">
+    <input type="text" id="mcpurl" data-i18n-placeholder="mcp.urlPh" autocomplete="off" spellcheck="false">
+    <select id="mcpauth">
+      <option value="none" data-i18n="mcp.authNone"></option>
+      <option value="token" data-i18n="mcp.authToken"></option>
+      <option value="oauth" data-i18n="mcp.authOauth"></option>
+    </select>
+    <div class="brow" id="mcptok">
+      <input type="text" id="mcpheader" data-i18n-placeholder="mcp.headerPh" autocomplete="off" spellcheck="false">
+      <input type="password" id="mcptoken" data-i18n-placeholder="mcp.tokenPh" autocomplete="new-password">
+    </div>
+    <details id="mcpclient"><summary data-i18n="mcp.clientSum"></summary>
+      <small class="rhint" id="mcpredir"></small>
+      <div class="brow"><input type="text" id="mcpcid" data-i18n-placeholder="mcp.clientIdPh" autocomplete="off" spellcheck="false">
+        <input type="password" id="mcpcsec" data-i18n-placeholder="mcp.clientSecretPh" autocomplete="new-password"></div>
+    </details>
+  </div>
+  <div data-mk="local">
+    <input type="text" id="mcpcmd" class="mono" data-i18n-placeholder="mcp.commandPh" autocomplete="off" spellcheck="false">
+    <textarea id="mcpenv" class="mono" data-i18n-placeholder="mcp.envPh" spellcheck="false"></textarea>
+    <small class="rhint" id="mcpenvhint" data-i18n="mcp.envHint"></small>
+  </div>
+  <label class="pick"><input type="checkbox" id="mcpon" checked> <span data-i18n="r.enabled"></span></label>
+  <div id="mcpstate" class="rhint"></div>
+  <div class="row" id="mcpsignrow" hidden><button class="btn pri" id="mcpsignin" data-i18n="mcp.signIn"></button>
+    <button class="btn" id="mcpsignout" data-i18n="mcp.signOut"></button><small id="mcpsignst"></small></div>
+  <div id="mcptools"></div>
+  <small class="rhint" data-i18n="mcp.safety"></small>
+  <div class="acts">
+    <button class="btn" style="margin-right:auto;color:var(--bad)" id="mcpdel" data-i18n="common.delete"></button>
+    <button class="btn" id="mcprefresh" data-i18n="mcp.refresh"></button>
+    <button class="btn" id="mcpcancel" data-i18n="common.cancel"></button>
+    <button class="btn pri" id="mcpsave" data-i18n="common.save"></button>
   </div>
 </dialog>
 

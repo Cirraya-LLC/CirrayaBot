@@ -1739,6 +1739,39 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       ? '${(n / 1000).toStringAsFixed(1)}k'
       : '$n';
 
+  Widget _mcpTile(Conversation c, McpServer m) {
+    final (label, color, bg) = mcpStatus(m);
+    return InkWell(
+      onTap: () => showMcpEditor(context, bench, c.id, server: m),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Flexible(
+                  child: Text(m.name, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, color: m.enabled ? C.ink : C.dim)),
+                ),
+                const SizedBox(width: 6),
+                Tooltip(
+                  message: m.lastError,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(5)),
+                    child: Text(label, style: TextStyle(fontSize: 10.5, color: color)),
+                  ),
+                ),
+              ],
+            ),
+            Text(m.kind == 'remote' ? m.url : m.command, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11.5, color: C.dim2)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _triggerTile(Conversation c, Trigger x) {
     final (label, color, bg) = !x.enabled
         ? (tr('wb.paused'), C.dim, C.selected)
@@ -2142,6 +2175,24 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                         onPressed: () => _openSkills(preselect: [c.id]),
                         icon: const Icon(Icons.add, size: 15),
                         label: Text(tr('wb.addSkill'), style: const TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ),
+                ],
+                // Tool servers (MCP) connected to this agent.
+                if (c != null && !c.isGroup) ...[
+                  const Divider(height: 22),
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 4), child: _heading(tr('mcp.title'))),
+                  for (final m in bench.mcp) _mcpTile(c, m),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 2, 8, 0),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        key: const ValueKey('mcp-new'),
+                        onPressed: () => showMcpEditor(context, bench, c.id),
+                        icon: const Icon(Icons.add, size: 15),
+                        label: Text(tr('mcp.add'), style: const TextStyle(fontSize: 12)),
                       ),
                     ),
                   ),

@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { randomBytes } from 'node:crypto'
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 // The same pg the server uses: it lives with the server (web/package.json), not at the repo root.
 const pg = createRequire(join(ROOT, 'web', 'package.json'))('pg')
 export const FAKE_DOCKER = join(ROOT, 'test', 'e2e', 'fake-docker.sh')

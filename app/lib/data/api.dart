@@ -760,6 +760,93 @@ class Routine {
   );
 }
 
+/// One tool an MCP server listed, and what the person lets it do: `auto` (runs), `ask` (approve each call), `off`.
+class McpTool {
+  const McpTool({required this.name, required this.title, required this.description, required this.readOnly, required this.destructive, required this.mode});
+  final String name;
+  final String title;
+  final String description;
+  final bool readOnly;
+  final bool destructive;
+  final String mode;
+
+  static McpTool fromJson(Map<String, Object?> j) => McpTool(
+    name: (j['name'] as String?) ?? '',
+    title: (j['title'] as String?) ?? '',
+    description: (j['description'] as String?) ?? '',
+    readOnly: (j['read_only'] as bool?) ?? false,
+    destructive: (j['destructive'] as bool?) ?? false,
+    mode: (j['mode'] as String?) ?? 'ask',
+  );
+}
+
+/// A tool server connected to an agent: remote (a URL; no sign-in, a token, or OAuth) or local (a command run on the
+/// agent's machine). Its token, environment values and sign-in never come back from the server.
+class McpServer {
+  const McpServer({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.url,
+    required this.command,
+    required this.auth,
+    required this.header,
+    required this.hasSecret,
+    required this.signedIn,
+    required this.clientId,
+    required this.envKeys,
+    required this.enabled,
+    required this.status,
+    required this.lastError,
+    required this.redirectUri,
+    required this.tools,
+  });
+
+  final String id;
+  final String name;
+
+  /// `remote` / `local`.
+  final String kind;
+  final String url;
+  final String command;
+
+  /// `none` / `token` / `oauth`.
+  final String auth;
+  final String header;
+  final bool hasSecret;
+  final bool signedIn;
+  final String clientId;
+  final List<String> envKeys;
+  final bool enabled;
+
+  /// '' (not checked) / `ok` / `signin` / `error` / `off`.
+  final String status;
+  final String lastError;
+  final String redirectUri;
+  final List<McpTool> tools;
+
+  int get offered => tools.where((t) => t.mode != 'off').length;
+
+  static McpServer fromJson(Map<String, Object?> j) => McpServer(
+    id: (j['id'] as String?) ?? '',
+    name: (j['name'] as String?) ?? '',
+    kind: (j['kind'] as String?) ?? 'remote',
+    url: (j['url'] as String?) ?? '',
+    command: (j['command'] as String?) ?? '',
+    auth: (j['auth'] as String?) ?? 'none',
+    header: (j['header'] as String?) ?? 'Authorization',
+    hasSecret: (j['has_secret'] as bool?) ?? false,
+    signedIn: (j['signed_in'] as bool?) ?? false,
+    clientId: (j['client_id'] as String?) ?? '',
+    envKeys: [for (final k in (j['env_keys'] as List?) ?? const []) if (k is String) k],
+    enabled: (j['enabled'] as bool?) ?? true,
+    status: (j['status'] as String?) ?? '',
+    lastError: (j['last_error'] as String?) ?? '',
+    redirectUri: (j['redirect_uri'] as String?) ?? '',
+    tools: [for (final t in (j['tools'] as List?) ?? const []) if (t is Map) McpTool.fromJson(t.cast<String, Object?>())],
+  );
+}
+
 /// An outside event source: a URL a service calls (GitHub, or any webhook); an event that passes the filters becomes a
 /// background task for [agentId]. The secret is never part of this — the server sends it only when it makes one.
 class Trigger {
@@ -1506,6 +1593,21 @@ class Api {
 
   Future<void> deleteRoutine(String id) => _json('DELETE', '/api/routines/$id');
   Future<void> runRoutine(String id) => _json('POST', '/api/routines/$id/run');
+
+  Future<List<McpServer>> mcpServers(String agentId) async {
+    final j = await _list('/api/bots/${Uri.encodeComponent(agentId)}/mcp');
+    return j.map((e) => McpServer.fromJson(e as Map<String, Object?>)).toList();
+  }
+
+  Future<McpServer> createMcp(String agentId, Map<String, Object?> body) async =>
+      McpServer.fromJson(await _map('POST', '/api/bots/${Uri.encodeComponent(agentId)}/mcp', body));
+  Future<McpServer> updateMcp(String id, Map<String, Object?> body) async => McpServer.fromJson(await _map('PATCH', '/api/mcp/$id', body));
+  Future<McpServer> refreshMcp(String id) async => McpServer.fromJson(await _map('POST', '/api/mcp/$id/refresh'));
+  Future<McpServer> signOutMcp(String id) async => McpServer.fromJson(await _map('POST', '/api/mcp/$id/signout'));
+  Future<void> deleteMcp(String id) => _json('DELETE', '/api/mcp/$id');
+
+  /// Where the person signs in to this server, in their own browser.
+  Future<String> signInMcp(String id) async => ((await _map('POST', '/api/mcp/$id/signin'))['url'] as String?) ?? '';
 
   Future<List<Trigger>> triggers(Conversation c) async {
     final j = await _list('/api/triggers?kind=${c.kind}&id=${Uri.encodeQueryComponent(c.id)}');

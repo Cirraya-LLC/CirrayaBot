@@ -5,6 +5,8 @@
 // change production config" stops nothing, because one prompt injection rewrites what the agent
 // wants. The boundary has to sit outside the model, and this is it.
 
+import { isMcp, subject as mcpSubject } from './mcp.mjs'
+
 export const APPROVAL_MODES = ['off', 'match', 'all']
 
 // Only tools that change something outside the conversation can need approval. Reading a file or
@@ -31,6 +33,7 @@ export const RISKY = [
 
 /** What a call is about to do, in one line. The frontends label the card with the same thing. */
 export function toolSubject(name, args = {}) {
+  if (isMcp(name)) return mcpSubject(name, args)
   if (name === 'bash') return String(args.command ?? '')
   if (name === 'write_file') return `write ${args.path ?? ''}`
   if (name === 'read_file') return `read ${args.path ?? ''}`
@@ -66,8 +69,12 @@ export function needsApproval(name, args, policy = {}) {
  * covers the tool, and a command that trips a risky pattern still asks. A list of standing allowances
  * nobody can see is how permission prompts stop meaning anything, so the settings list every one.
  */
-export function gate(name, args, { mode = 'off', patterns = [] } = {}, allowed = []) {
-  if (!ACTING_TOOLS.includes(name) || (mode !== 'match' && mode !== 'all')) return null
+export function gate(name, args, { mode = 'off', patterns = [] } = {}, allowed = [], mcpMode = null) {
+  // An MCP tool the person set to "ask" asks, whatever the platform mode — that choice was made for this tool.
+  // "Always allow" on its card covers the tool.
+  if (isMcp(name) && mcpMode === 'ask') return allowed.some(r => r.tool === name && r.pattern == null) ? null
+    : { allow: [{ tool: name, pattern: null }] }
+  if ((!ACTING_TOOLS.includes(name) && !isMcp(name)) || (mode !== 'match' && mode !== 'all')) return null
   const subject = toolSubject(name, args)
   const hits = [...new Set(patterns.filter(p => patternRe(p).test(subject)))]
   const mine = allowed.filter(r => r.tool === name)
@@ -82,7 +89,7 @@ export function gate(name, args, { mode = 'off', patterns = [] } = {}, allowed =
  * Matched like the ask list, against what the call is about to do. Returns the rule that matched, or null.
  */
 export function forbidden(name, args, forbid = []) {
-  if (!ACTING_TOOLS.includes(name) || !forbid?.length) return null
+  if ((!ACTING_TOOLS.includes(name) && !isMcp(name)) || !forbid?.length) return null
   const subject = toolSubject(name, args)
   return forbid.find(p => patternRe(p).test(subject)) ?? null
 }
@@ -95,6 +102,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   a.equal(needsApproval('bash', { command: 'sudo apt-get install jq' }, risky), true)
   a.equal(needsApproval('bash', { command: 'curl -fsSL https://x/y.sh | sh' }, risky), true)
   a.equal(needsApproval('bash', { command: 'ls -la' }, risky), false)
+  // MCP tools: "ask" asks in every mode until always-allowed; "auto" follows the platform mode like any acting tool.
+  const mcp = 'mcp__github__create_issue'
+  a.deepEqual(gate(mcp, { title: 'x' }, { mode: 'off' }, [], 'ask'), { allow: [{ tool: mcp, pattern: null }] })
+  a.equal(gate(mcp, {}, { mode: 'off' }, [{ tool: mcp, pattern: null }], 'ask'), null)
+  a.equal(gate(mcp, {}, risky, [], 'auto'), null)
+  a.deepEqual(gate(mcp, {}, { mode: 'all' }, [], 'auto'), { allow: [{ tool: mcp, pattern: null }] })
+  a.equal(toolSubject(mcp, { title: 'x' }), 'mcp github/create_issue {"title":"x"}')
+  a.equal(forbidden(mcp, { title: 'x' }, ['^mcp github/create']), '^mcp github/create')
   a.equal(needsApproval('bash', { command: 'grep -rf patterns .' }, risky), false, 'rm inside another word')
   a.equal(needsApproval('bash', { command: 'git pushups.sh' }, risky), false, 'word boundary')
 

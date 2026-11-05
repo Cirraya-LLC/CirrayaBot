@@ -1341,6 +1341,348 @@ class _RoutineEditorState extends State<_RoutineEditor> {
   }
 }
 
+// ── tool servers (MCP) ───────────────────────────────────────────────────
+
+/// A server's state as a pill: label, text colour, background.
+(String, Color, Color) mcpStatus(McpServer m) => !m.enabled
+    ? (tr('mcp.st.off'), C.dim, C.selected)
+    : m.status == 'ok'
+    ? (tr('mcp.st.ok', {'n': '${m.offered}'}), C.tintInk, C.tint)
+    : m.status == 'signin'
+    ? (tr('mcp.st.signin'), C.warn, C.warnBg)
+    : m.status == 'error'
+    ? (tr('mcp.st.error'), C.bad, C.badBg)
+    : (tr('mcp.st.unchecked'), C.dim, C.selected);
+
+/// Connect or edit a tool server. A new one stays open after saving: its tools to choose for, or a sign-in to do.
+Future<void> showMcpEditor(BuildContext context, Workbench bench, String agentId, {McpServer? server}) async {
+  await showDialog<void>(context: context, builder: (_) => _McpEditor(bench: bench, agentId: agentId, server: server));
+  await bench.loadMcp();
+}
+
+class _McpEditor extends StatefulWidget {
+  const _McpEditor({required this.bench, required this.agentId, this.server});
+  final Workbench bench;
+  final String agentId;
+  final McpServer? server;
+
+  @override
+  State<_McpEditor> createState() => _McpEditorState();
+}
+
+class _McpEditorState extends State<_McpEditor> {
+  late McpServer? _m = widget.server;
+  late String _kind = _m?.kind ?? 'remote';
+  late final _name = TextEditingController(text: _m?.name ?? '');
+  late final _url = TextEditingController(text: _m?.url ?? '');
+  late String _auth = _m?.auth ?? 'none';
+  late final _header = TextEditingController(text: _m != null && _m!.header != 'Authorization' ? _m!.header : '');
+  final _token = TextEditingController();
+  late final _clientId = TextEditingController(text: _m?.clientId ?? '');
+  final _clientSecret = TextEditingController();
+  late final _command = TextEditingController(text: _m?.command ?? '');
+  late final _env = TextEditingController(text: (_m?.envKeys ?? const []).map((k) => '$k=').join('\n'));
+  late bool _enabled = _m?.enabled ?? true;
+  late Map<String, String> _modes = {for (final t in _m?.tools ?? const <McpTool>[]) t.name: t.mode};
+  String _error = '';
+  String _note = '';
+  bool _busy = false;
+  Timer? _poll;
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    for (final c in [_name, _url, _header, _token, _clientId, _clientSecret, _command, _env]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _show(McpServer m) => setState(() {
+    _m = m;
+    _modes = {for (final t in m.tools) t.name: t.mode};
+    _env.text = m.envKeys.map((k) => '$k=').join('\n');
+    _token.clear();
+    _clientSecret.clear();
+  });
+
+  Future<void> _run(Future<void> Function() job) async {
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    try {
+      await job();
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Map<String, String>? _envMap() {
+    final out = <String, String>{};
+    for (final line in _env.text.split('\n')) {
+      final l = line.trim();
+      if (l.isEmpty) continue;
+      final i = l.indexOf('=');
+      if (i < 1) return null;
+      out[l.substring(0, i).trim()] = l.substring(i + 1);
+    }
+    return out;
+  }
+
+  Future<void> _save() async {
+    final m = _m;
+    final body = <String, Object?>{'name': _name.text.trim(), 'enabled': _enabled};
+    if (_kind == 'remote') {
+      body.addAll({'url': _url.text.trim(), 'auth': _auth, 'header': _header.text.trim().isEmpty ? 'Authorization' : _header.text.trim()});
+      if (_token.text.isNotEmpty) body['token'] = _token.text;
+      if (_auth == 'oauth' && (_clientId.text.trim() != (m?.clientId ?? '') || _clientSecret.text.isNotEmpty)) {
+        body.addAll({'client_id': _clientId.text.trim(), 'client_secret': _clientSecret.text});
+      }
+    } else {
+      final env = _envMap();
+      if (env == null) return setState(() => _error = tr('mcp.envBad'));
+      body.addAll({'command': _command.text.trim(), 'env': env});
+    }
+    if (m != null) body['tools'] = _modes;
+    await _run(() async {
+      final x = m == null ? await widget.bench.api.createMcp(widget.agentId, {...body, 'kind': _kind}) : await widget.bench.api.updateMcp(m.id, body);
+      if (!mounted) return;
+      if (m != null && x.status != 'signin' && x.status != 'error') {
+        Navigator.of(context).pop();
+      } else {
+        _show(x);
+      }
+    });
+  }
+
+  Future<void> _signIn() => _run(() async {
+    final m = _m!;
+    final url = await widget.bench.api.signInMcp(m.id);
+    try {
+      await AppPlatform.openUrl(url);
+    } on Object catch (e) {
+      if (mounted) setState(() => _error = '$e');
+      return;
+    }
+    if (mounted) setState(() => _note = tr('mcp.waiting'));
+    final until = DateTime.now().add(const Duration(minutes: 5));
+    _poll?.cancel();
+    _poll = Timer.periodic(const Duration(seconds: 2), (t) async {
+      try {
+        final now = (await widget.bench.api.mcpServers(widget.agentId)).where((x) => x.id == m.id).firstOrNull;
+        if (now != null && (now.signedIn || DateTime.now().isAfter(until))) {
+          t.cancel();
+          if (mounted) {
+            _show(now);
+            setState(() => _note = '');
+          }
+        }
+      } on ApiException catch (_) {}
+    });
+  });
+
+  Future<void> _delete() async {
+    final m = _m!;
+    if (!await _confirm(context, tr('mcp.confirmDelete', {'name': m.name}), tr('mcp.deleteBody'))) return;
+    await _run(() async {
+      await widget.bench.api.deleteMcp(m.id);
+      if (mounted) Navigator.of(context).pop();
+    });
+  }
+
+  Widget _tool(McpTool t) {
+    final text = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(t.title.isNotEmpty ? t.title : t.name, style: const TextStyle(fontSize: 13)),
+        Text(
+          [if (t.readOnly) tr('mcp.readOnly') else if (t.destructive) tr('mcp.destructive'), t.description].where((x) => x.isNotEmpty).join(' · '),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: 11.5, color: C.dim2),
+        ),
+      ],
+    );
+    DropdownButton<String> pick({bool wide = false}) => DropdownButton<String>(
+      key: ValueKey('mcp-mode-${t.name}'),
+      value: _modes[t.name] ?? t.mode,
+      isDense: true,
+      isExpanded: wide,
+      style: TextStyle(fontSize: 12, color: C.ink),
+      items: [
+        for (final v in const ['auto', 'ask', 'off']) DropdownMenuItem(value: v, child: Text(tr('mcp.mode.$v'), overflow: TextOverflow.ellipsis)),
+      ],
+      onChanged: (v) => setState(() => _modes[t.name] = v ?? 'ask'),
+    );
+    // On a phone the choice goes under the name: beside it, it didn't fit (63 px over at 360 wide ×1.3).
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: LayoutBuilder(
+        builder: (context, box) => box.maxWidth < 380
+            ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [text, const SizedBox(height: 2), pick(wide: true)])
+            : Row(children: [Expanded(child: text), const SizedBox(width: 8), pick()]),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = _m;
+    final small = TextStyle(fontSize: 11.5, color: C.dim2);
+    final status = m == null ? null : mcpStatus(m);
+    return AlertDialog(
+      title: Text(m == null ? tr('mcp.new') : tr('ed.editTitle', {'name': m.name}), style: const TextStyle(fontSize: 16)),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (m == null) ...[
+                SegmentedButton<String>(
+                  segments: [
+                    ButtonSegment(value: 'remote', label: Text(tr('mcp.kindRemote'), style: const TextStyle(fontSize: 12))),
+                    ButtonSegment(value: 'local', label: Text(tr('mcp.kindLocal'), style: const TextStyle(fontSize: 12))),
+                  ],
+                  selected: {_kind},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (v) => setState(() => _kind = v.first),
+                ),
+                const SizedBox(height: 12),
+              ],
+              TextField(
+                key: const ValueKey('mcp-name'),
+                controller: _name,
+                maxLength: 40,
+                decoration: InputDecoration(hintText: tr('mcp.namePh'), counterText: ''),
+              ),
+              const SizedBox(height: 10),
+              if (_kind == 'remote') ...[
+                TextField(key: const ValueKey('mcp-url'), controller: _url, decoration: InputDecoration(hintText: tr('mcp.urlPh'))),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  key: const ValueKey('mcp-auth'),
+                  initialValue: _auth,
+                  isExpanded: true,
+                  items: [for (final v in const ['none', 'token', 'oauth']) DropdownMenuItem(value: v, child: Text(tr('mcp.auth.$v')))],
+                  onChanged: (v) => setState(() => _auth = v ?? 'none'),
+                ),
+                if (_auth == 'token') ...[
+                  const SizedBox(height: 10),
+                  TextField(controller: _header, decoration: InputDecoration(hintText: tr('mcp.headerPh'))),
+                  const SizedBox(height: 10),
+                  TextField(
+                    key: const ValueKey('mcp-token'),
+                    controller: _token,
+                    obscureText: true,
+                    decoration: InputDecoration(hintText: tr(m?.hasSecret == true && m?.auth == 'token' ? 'mcp.tokenKeep' : 'mcp.tokenPh')),
+                  ),
+                ],
+                if (_auth == 'oauth')
+                  ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    initiallyExpanded: (m?.clientId ?? '').isNotEmpty,
+                    title: Text(tr('mcp.clientSum'), style: TextStyle(fontSize: 12.5, color: C.dim)),
+                    children: [
+                      Text(tr('mcp.redirect', {'url': m?.redirectUri ?? ''}), style: small),
+                      const SizedBox(height: 6),
+                      TextField(controller: _clientId, decoration: InputDecoration(hintText: tr('mcp.clientIdPh'))),
+                      const SizedBox(height: 6),
+                      TextField(controller: _clientSecret, obscureText: true, decoration: InputDecoration(hintText: tr('mcp.clientSecretPh'))),
+                    ],
+                  ),
+              ] else ...[
+                TextField(
+                  key: const ValueKey('mcp-command'),
+                  controller: _command,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5),
+                  decoration: InputDecoration(hintText: tr('mcp.commandPh')),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  key: const ValueKey('mcp-env'),
+                  controller: _env,
+                  minLines: 2,
+                  maxLines: 6,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5),
+                  decoration: InputDecoration(hintText: tr('mcp.envPh')),
+                ),
+                const SizedBox(height: 4),
+                Text(tr('mcp.envHint'), style: small),
+              ],
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(tr('ed.enabled'), style: const TextStyle(fontSize: 13)),
+                value: _enabled,
+                onChanged: (v) => setState(() => _enabled = v),
+              ),
+              if (status != null)
+                Text(
+                  status.$1 + (m!.lastError.isNotEmpty ? ' — ${m.lastError}' : ''),
+                  key: const ValueKey('mcp-status'),
+                  style: TextStyle(fontSize: 12, color: m.status == 'error' || m.status == 'signin' ? C.bad : C.dim),
+                ),
+              if (m != null && m.kind == 'remote' && m.auth == 'oauth') ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    FilledButton(key: const ValueKey('mcp-signin'), onPressed: _busy ? null : _signIn, child: Text(tr('mcp.signIn'))),
+                    if (m.signedIn)
+                      TextButton(
+                        onPressed: _busy ? null : () => _run(() async => _show(await widget.bench.api.signOutMcp(m.id))),
+                        child: Text(tr('mcp.signOut')),
+                      ),
+                    Text(_note.isNotEmpty ? _note : m.signedIn ? tr('mcp.signedIn') : '', style: small),
+                  ],
+                ),
+              ],
+              if (m != null && m.tools.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(tr('mcp.toolsHead'), style: small),
+                for (final t in m.tools) _tool(t),
+              ],
+              const SizedBox(height: 8),
+              Text(tr('mcp.safety'), style: small),
+              if (_error.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(_error, style: TextStyle(fontSize: 12, color: C.code)),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        if (m != null) ...[
+          TextButton(
+            onPressed: _busy ? null : _delete,
+            style: TextButton.styleFrom(foregroundColor: C.code),
+            child: Text(tr('common.delete')),
+          ),
+          TextButton(
+            key: const ValueKey('mcp-refresh'),
+            onPressed: _busy ? null : () => _run(() async => _show(await widget.bench.api.refreshMcp(m.id))),
+            child: Text(tr('mcp.refresh')),
+          ),
+        ],
+        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: Text(tr(m == null ? 'common.cancel' : 'common.close'))),
+        FilledButton(
+          key: const ValueKey('mcp-save'),
+          onPressed: _busy ? null : _save,
+          child: Text(tr(m == null ? 'ed.create' : 'common.save')),
+        ),
+      ],
+    );
+  }
+}
+
 // ── triggers ─────────────────────────────────────────────────────────────
 
 /// Make or edit a trigger: a URL a service calls (GitHub, or any webhook). A new one stays open after saving, since

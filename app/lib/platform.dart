@@ -138,6 +138,18 @@ abstract final class AppPlatform {
     if (r.exitCode != 0) throw Exception('${r.stderr}'.trim().isEmpty ? 'exit ${r.exitCode}' : '${r.stderr}'.trim());
   }
 
+  /// Open a web page in the person's own browser (signing in to a tool server).
+  static Future<void> openUrl(String url) async {
+    if (Platform.isAndroid) {
+      final ok = await _channel.invokeMethod<bool>('openUrl', {'url': url});
+      if (ok != true) throw Exception('no browser to open it in');
+      return;
+    }
+    final (cmd, args) = openCommand(url);
+    final r = await Process.run(cmd, args);
+    if (r.exitCode != 0) throw Exception('${r.stderr}'.trim().isEmpty ? 'exit ${r.exitCode}' : '${r.stderr}'.trim());
+  }
+
   /// Where there is no save dialog: write [text] to a file named [name] and offer it through the
   /// share sheet, which is how a phone saves (Files, Drive) or sends a file.
   static Future<void> shareText(String name, String text, String mime) async {

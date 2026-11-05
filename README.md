@@ -36,6 +36,11 @@ of each answering on their own.
   conversations still being worked on, and **Stop** is on the conversation. Switch an Agent (or
   the whole platform, in ⚙) to *manual* to go back to a few steps per message. Approvals and the
   daily cap apply either way.
+- **Tools from MCP servers** — connect an Agent to a remote MCP server (a URL, with no sign-in, a token, or
+  OAuth: "Sign in" opens the server's own page in your browser) or run one on the Agent's own machine (a command such as
+  `npx -y …`, with sealed environment values). Each tool the server lists can run on its own, ask you first, or be off;
+  tools the server marks read-only start on their own, everything else asks. The same approvals, never-allowed rules
+  and read-only check-ins apply, and what a server returns is treated as data, never as instructions.
 - **Triggers from outside** — give a conversation a URL that GitHub (or anything that sends a webhook)
   calls; an event that passes its filters (GitHub events, actions, branches, keywords) becomes a background
   task for the Agent. Every delivery must be signed with the trigger's secret, runs once however often it is
@@ -207,8 +212,9 @@ doesn't reach inside a VM or gVisor.
 ## Exposing it to the internet
 
 Set `BIND_ADDR=0.0.0.0` in `.env`, then `docker compose up -d`.
-`/hooks/<id>` (triggers) is the one path that needs no access token: it is checked against the trigger's
-own secret instead, so a service can call it.
+`/hooks/<id>` (triggers) and `/oauth/callback` (signing in to an MCP server, checked by its one-time state) are the paths
+that need no access token: a hook is checked against its
+trigger's own secret instead, so a service can call it.
 From then on `ACCESS_TOKEN` is the only door — don't paste the link with `?k=` anywhere public.
 If it is asked to listen externally without a token, the service **refuses to start** rather than
 printing a warning nobody reads.

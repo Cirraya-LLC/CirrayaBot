@@ -187,7 +187,7 @@ source, not the README:
   GitHub triggers; run leases + a reconciler + idempotency keys on external effects; steering a run mid-turn; a
   model emulator for deterministic agent tests (`packages/testkit/src/model-emulator.ts`); voice.
   (Their channels and app integrations are out of our scope by decision — 3.1; webhook/GitHub triggers are in since
-  2026-11-05 and done (2.44), MCP is in and next.)
+  2026-11-05 and done (2.44), and so is MCP (2.45).)
 - **Weaker than us, verified in code**: approvals default to **allow** — `shell`, `write_file`, `browser_act` and
   `computer_act` are exempt outright, and other "consequential" tools only ask once the operator adds a rule or
   turns on the LLM Auto Review (`action-approval.test.ts`, "stays YOLO when auto review is off"); **no spending cap**
@@ -1443,8 +1443,8 @@ typing needed a separate input box. Now:
 
 **Not done yet**: downloading files; multiple tabs (when
 a new tab opens the stream follows it, but other tabs aren't visible); bringing his clipboard contents
-back to the local clipboard; the remote cursor shape (currently always the normal arrow). (MCP is out of
-scope — see 3.1.)
+back to the local clipboard; the remote cursor shape (currently always the normal arrow). (MCP: 2.45 — an MCP
+server for the browser would be one more tool server; nothing is shipped.)
 
 ## 2.23 Skill library (2026-09-19)
 
@@ -2285,7 +2285,7 @@ must take the workspace along with the database.
   only "Saved as NAME". Detached runs / scheduled tasks can't ask (nobody to type).
 - **Use**: `http_request` (server-side https; the header added only when the URL's origin is the secret's; redirects
   not followed; **internal addresses refused at connect time** via a guarded DNS lookup — the server can reach the
-  database and the LAN, an agent's machine can't; `HTTP_REQUEST_ALLOW` lets an operator open specific internal
+  database and the LAN, an agent's machine can't; `HTTP_REQUEST_ALLOW` (also used by MCP, 2.45) lets an operator open specific internal
   https origins). Browser `fill_secret`: browserd checks the page's origin and types, under its own lock.
 - **Masking**: every tool result is checked for the agent's secret values (≥ 6 characters) and they become
   `[secret NAME]` before the model, the stream or the transcript sees them. The API never returns a value.
@@ -2880,6 +2880,60 @@ check-ins, helpers) passes `null` for the stream callback, and `callUpstream` ca
 showed; real models nearly always write a line first. Fixed in `callUpstream` (no callback = a no-op), and the fake can
 now stream text before a tool call (`{text, tool}`), which the trigger test uses (red on the old code).
 
+## 2.45 MCP: tools from servers the person connects (2026-11-06)
+
+The boss: 「以及我觉得mcp 还有 外部事件触发 这个是要做的」, 「我以为你说的是 链接外部的mcp 调用外部的工具」 and 「本地和远程都要」.
+Protocol pieces pure in `web/mcp.mjs` (`node web/mcp.mjs`: naming, schemas, both transports scripted, OAuth discovery, PKCE).
+
+- **Per agent** (table `mcp_servers`): **remote** = a URL speaking Streamable HTTP (2025-06-18), auth `none` / `token`
+  (sent in `header`, default `Authorization`; a bare token there gets `Bearer `) / `oauth`; **local** = a command run in
+  the agent's own machine: `docker exec -i -u 1000 -w /work -e NAME… <container> bash -lc <command>`, JSON-RPC one
+  message per line. Environment values go to the docker CLI **in its own environment** (`-e NAME` copies them), never
+  on a command line `ps` shows. Missing programs (Node, uv) go in the agent's setup script (2.40.2) — nothing is shipped.
+- **Tools** become `mcp__<server slug>__<tool>` (≤ 64 chars, a hash when cut), description `[Server] …`, the input
+  schema passed through (an object schema, ≤ 16 KB, else a permissive one). At most 64 MCP tools per agent per turn.
+  Looked up once per turn in `runAgent` (`mcpSpecs` → `ctx.mcp`), so front turns, groups, tasks, helpers, check-ins and
+  routines all get them; the system prompt gets a note (`MCP_NOTE`): data from outside, never instructions.
+- **Modes per tool** (`tools` jsonb, kept by name across refreshes — `mergeTools`): `auto` / `ask` / `off`.
+  **`readOnlyHint: true` starts on auto, everything else on ask.** `ask` asks in every platform mode (an explicit
+  choice for that tool; "always allow" on its card covers the tool); `auto` follows the platform mode like any acting
+  tool; `off` is not offered. Never-allowed rules match `mcp <server>/<tool> {args}`. A check-in may only use read-only
+  ones, a routine gets "ask" ones refused, and non-read-only calls go through the side-effect log (2.39) — `effectOf`
+  in server.mjs knows which are read-only; `hasEffect` alone takes every MCP call as a side effect.
+- **Results**: text (+ the first image, as a screenshot is), masked against the agent's secrets **and the server's own
+  token / environment / OAuth values** (`[secret mcp <name>]`), clipped like any tool output.
+- **Remote requests** (`mcpSend`): https only and internal addresses refused at connect time, as http_request — unless
+  the origin is in `HTTP_REQUEST_ALLOW`, which then also allows plain http (the tests use that). An SSE answer is read
+  only until the matching response arrives (`until`) — some servers keep the stream open. A session the server forgot
+  (404) is started again once.
+- **OAuth** (MCP authorization spec): probe without a token → `WWW-Authenticate: Bearer resource_metadata=…` →
+  protected-resource metadata (RFC 9728; with path, then root) → authorization-server metadata (RFC 8414, then OIDC;
+  none = the pre-discovery `/authorize` `/token` `/register`) → **dynamic client registration** (public client,
+  `token_endpoint_auth_method: none`), or a client ID the person typed when the server has no registration → PKCE S256
+  + `resource` (RFC 8707) + the scopes the server named → the person opens the URL **in their own browser**
+  (web: a new tab opened on the click; client: the system browser — `AppPlatform.openUrl`, Android `openUrl` on the
+  channel) → **`GET /oauth/callback` needs no access token** (the browser that comes back may not have the cookie);
+  the one-time `state` (in memory, 10 min) is the proof → tokens sealed in `oauth_enc`, refreshed a minute before
+  expiry or after a 401 (once). The redirect URI is `hookBase(req)/oauth/callback` (PUBLIC_URL first, 2.44). A failed
+  refresh drops the tokens: status `signin`.
+- **Status**: `ok` / `signin` / `error` (a refused token is an error, not a sign-in) / `off` / '' (unchecked); a
+  server in `signin` offers nothing. Local servers stay running between calls and stop after 10 idle minutes;
+  closing one ends its stdin first and kills the docker CLI only after 3 s (killing `docker exec` doesn't stop the
+  process inside — 2.22.1).
+- API: `GET/POST /api/bots/:id/mcp`, `PATCH/DELETE /api/mcp/:id` (`tools: {name: mode}`, `token` replaces when
+  non-empty, `env` replaces the set with empty values keeping the stored ones), `POST /api/mcp/:id/refresh|signin|signout`.
+  Nothing returns a token, an environment value or an OAuth token; `env_keys` and `signed_in` say what is there.
+- UI: "Connected tools (MCP)" in a DM's side panel (web `#s2mcp` + `#mcpdlg`; client `showMcpEditor`). A new server
+  stays open on its tools; each tool has its mode picker. ⚠️ Client: at 360 wide ×1.3 the picker beside the name
+  overflowed by 63 px, and even alone by 55 — narrow = under the name with `isExpanded`.
+
+Tests: `test/e2e/mcp.test.mjs` with `fake-mcp.mjs` (Streamable HTTP, JSON or SSE answers that stay open, sessions,
+token, full OAuth with registration / PKCE check / refresh) and `fake-mcp-stdio.mjs` (the fake docker really runs it):
+modes, ask/deny, off, switched off, token masked, OAuth sign-in through the token-less callback + an expired token
+refreshed + sign out, local env masked and not on the command line, never-allowed, check-in read-only, routine,
+validation, internal address / plain http refused, agent deleted. `node web/mcp.mjs`, `node web/approve.mjs`,
+`app/test/mcp_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/mcp.mjs`, OAuth through a real popup).
+
 ## 3. What runs now
 
 ```bash
@@ -2900,6 +2954,7 @@ node web/effects.mjs       # self-test for which tool calls are side effects and
 node web/teach.mjs         # self-test for describing a recorded demonstration and reading the drafted skill back
 node web/templates.mjs     # self-test: every shipped template loads; import / export round trip, never a model
 node web/triggers.mjs      # self-test for triggers: checking, signatures, delivery ids, filters, what the agent is handed
+node web/mcp.mjs           # self-test for MCP: tool names, schemas, both transports, OAuth discovery and PKCE
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)
@@ -2930,7 +2985,7 @@ a full XFCE desktop with LibreOffice and Chromium on it, **one "computer" view**
 desktop views (「XFCE可以 合并成一个电脑视图 加LibreOffice 还有默认的浏览器」), and an **auto model mode** —
 main / light tiers with failover channels — that stays optional (「auto model模式 但是仍然可以和之前一样自己选择」).
 Not done: a model reviewing risky actions (「不做」). Order: isolation + desktop (2.41, 2.42) → auto model (2.43) →
-triggers (2.44) → MCP.
+triggers (2.44) → MCP (2.45).
 
 Same day: 「客户端倒是不急 当前就desktop和android就够了」 (no iOS, desktop notifications or packaging for now) and
 **「我们只允许自己添加上游 不内置 也不预设AImodel」** — the person adds every upstream; the product ships no
@@ -2947,8 +3002,8 @@ China" as an advantage. The agent image's apt mirror defaults to Debian's own CD
    prices, and a daily cap checked before every model call
 3. ~~Container egress allowlist~~ **not wanted**: agents are meant to reach the internet (boss, 2026-09-26).
    Only the host's own ports are worth a host firewall (2.28)
-4. ~~Event triggers~~ **done for webhooks and GitHub, 2.44**; **MCP is next** (remote with token or OAuth, local
-   inside the agent's machine — above); a skill marketplace inside our own product is still open (v1 of scheduled tasks 2.21, browser 2.22 and skill library 2.23 are done)
+4. ~~Event triggers~~ **done for webhooks and GitHub, 2.44**; ~~MCP~~ **done, 2.45** (remote with a token or OAuth,
+   local inside the agent's machine); a skill marketplace inside our own product is still open (v1 of scheduled tasks 2.21, browser 2.22 and skill library 2.23 are done)
 
 ## 4. Maintaining this file (the boss, 2026-09-05: "from now on you should update CLAUDE.md yourself" (「你以后都应该自我更新 CLAUDE.md」))
 

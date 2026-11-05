@@ -77,7 +77,8 @@ services:
       BOT_LLM_CONTEXT: ${BOT_LLM_CONTEXT:-}
       # agents' secrets are sealed with this; empty = a key generated into the workspace (.secret-key)
       SECRET_KEY: ${SECRET_KEY:-}
-      # https origins http_request may reach although they are internal (a service on your LAN), comma-separated
+      # origins the server may reach although they are internal (a service on your LAN), comma-separated: https ones
+      # for http_request and MCP servers; an http:// origin listed here lets an MCP server be reached over plain http
       HTTP_REQUEST_ALLOW: ${HTTP_REQUEST_ALLOW:-}
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock

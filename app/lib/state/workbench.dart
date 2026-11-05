@@ -166,6 +166,7 @@ class Workbench extends ChangeNotifier {
   late final Timer _poller;
   List<Routine> routines = const [];
   List<Trigger> triggers = const [];
+  List<McpServer> mcp = const [];
 
   /// The open conversation's background tasks, newest first.
   List<Task> tasks = const [];
@@ -358,6 +359,7 @@ class Workbench extends ChangeNotifier {
     selfMemoryFor = null;
     routines = const [];
     triggers = const [];
+    mcp = const [];
     skills = const [];
     secrets = const [];
     tasks = const [];
@@ -371,6 +373,7 @@ class Workbench extends ChangeNotifier {
     unawaited(loadTriggers());
     unawaited(loadSkills());
     unawaited(loadSecrets());
+    unawaited(loadMcp());
     unawaited(loadTasks());
     await _loadSessions(c);
     if (ticket != _shown) return;
@@ -572,6 +575,19 @@ class Workbench extends ChangeNotifier {
       notifyListeners();
     } on ApiException catch (_) {
       // Best effort, like routines.
+    }
+  }
+
+  Future<void> loadMcp() async {
+    final c = current;
+    if (c == null || c.isGroup) return;
+    try {
+      final list = await api.mcpServers(c.id);
+      if (current?.id != c.id) return;
+      mcp = list;
+      notifyListeners();
+    } on ApiException catch (_) {
+      // Best effort, like secrets.
     }
   }
 
@@ -1068,6 +1084,7 @@ class Workbench extends ChangeNotifier {
     'browser' => tr('tool.browser', {'what': _browserLabel(args)}),
     'http_request' => '${'${args['method'] ?? 'GET'}'.toUpperCase()} ${args['url'] ?? ''}${args['secret'] != null ? '  · ${args['secret']}' : ''}',
     'request_secret' => tr('tool.requestSecret', {'name': args['name'] ?? ''}),
+    String t when t.startsWith('mcp__') => _mcpLabel(t, args),
     'computer' => tr('tool.computer', {
       'what': [args['action'], args['keys'] ?? (args['text'] != null ? '"${args['text']}"' : null), args['x'] != null ? '${args['x']},${args['y']}' : null]
           .whereType<Object>()
@@ -1075,6 +1092,13 @@ class Workbench extends ChangeNotifier {
     }),
     _ => '$tool',
   };
+
+  /// "server · tool {args}", like the web.
+  static String _mcpLabel(String name, Map args) {
+    final parts = name.split('__');
+    final a = args.isEmpty ? '' : jsonEncode(args);
+    return '${parts.length > 1 ? parts[1] : ''} · ${parts.skip(2).join('__')}${a.isEmpty ? '' : ' ${a.length > 160 ? '${a.substring(0, 160)}…' : a}'}';
+  }
 
   static Uint8List? _decodeImage(Object? v) {
     if (v is! String || !v.startsWith('data:image/')) return null;

@@ -26,6 +26,8 @@ case "$1" in
   rm) forget "${@: -1}"; exit 0 ;;
   stats) echo "0.00%"; exit 0 ;;
   exec)
+    # A local MCP server in the tests: really run it (here, on the host), its stdin and stdout wired through.
+    case "${@: -1}" in *fake-mcp-stdio*) exec bash -c "${@: -1}" ;; esac
     body=$(cat 2>/dev/null)    # the server always closes stdin; reading it avoids a broken pipe on big inputs
     # What listens inside: nothing, in here.
     case "${@: -1}" in *"/proc/net/tcp"*) exit 0 ;; esac
