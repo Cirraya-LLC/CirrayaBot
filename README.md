@@ -263,7 +263,11 @@ Without compose, pointing at an existing PostgreSQL:
 DATABASE_URL=postgres://user:pass@127.0.0.1:5432/multiagent node web/server.mjs
 ```
 
-## Desktop client (Windows / macOS) and Android
+## Desktop client (Windows / macOS / Linux) and Android
+
+**Ready-made packages** are on the [releases page](https://github.com/Cirraya-LLC/CirrayaBot/releases) for each
+version: macOS (.zip), Windows (.zip), Linux (.tar.gz) and Android (.apk), with checksums. They aren't signed by
+Apple or Microsoft, so macOS asks the first time (right-click → Open) and Windows SmartScreen may too.
 
 `app/` is a Flutter client that talks to the same server and the same data.
 **There's no account system**: enter the server address and token and go — paste the whole
@@ -300,8 +304,12 @@ again: a Caddy container serves `https://<PUBLIC_HOST>` on port 443 and gets the
 (only port 443 has to be reachable — port 80 isn't used). Plain http keeps working on `WEB_PORT`. No
 domain? `203-0-113-7.sslip.io` resolves to `203.0.113.7`.
 
-The release build is signed with the debug key — fine for installing it yourself, not for Google
-Play. The phone has to reach the server: a public address, the LAN, or over USB with
+**Signing.** A release build is signed with the keystore named in `app/android/key.properties` (never committed;
+`storeFile`, `storePassword`, `keyAlias`, `keyPassword`) or in `ANDROID_KEYSTORE` / `ANDROID_KEYSTORE_PASSWORD` /
+`ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`; the release workflow takes them from repository secrets
+(`ANDROID_KEYSTORE_BASE64` and the three passwords). Without one it is signed with the debug key — fine for
+installing it yourself, but a build signed with another key can't be installed over it. Keep the keystore safe:
+lose it and every phone has to uninstall and install again. The phone has to reach the server: a public address, the LAN, or over USB with
 `adb reverse tcp:8080 tcp:8080` and `http://127.0.0.1:8080` as the address. Plain `http://` is
 allowed (a self-hosted server on a LAN often has no certificate); a server on the internet should
 be behind HTTPS.
