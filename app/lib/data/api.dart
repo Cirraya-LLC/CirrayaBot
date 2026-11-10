@@ -1649,6 +1649,14 @@ class Api {
   Future<bool> skillReviewWeekly() async => (await _map('GET', '/api/settings/skills'))['review_weekly'] == true;
   Future<void> setSkillReviewWeekly(bool on) => _json('PUT', '/api/settings/skills', {'review_weekly': on});
 
+  /// The audit log of the last [days] days, as JSON lines.
+  Future<String> auditLog(int days) async {
+    final res = await _send('GET', '/api/audit?days=$days');
+    final text = await utf8.decoder.bind(res).join();
+    if (res.statusCode >= 400) throw ApiException(ApiFailure.server, tr('api.exportFailed', {'code': res.statusCode}));
+    return text;
+  }
+
   /// The skill as a SKILL.md file.
   Future<String> exportSkill(String id) async {
     final res = await _send('GET', '/api/skills/$id/export');

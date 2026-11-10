@@ -3385,6 +3385,10 @@ async function paintActivity() {
   $('#actmachsec').hidden = !machines.length
   $('#actmach').innerHTML = machines.map(m => `<span class="${m.state}${m.isolation === 'runc' && m.state !== 'none' ? ' weak' : ''}" title="${esc(m.last_use ? t('act.lastUse', { ago: ago(m.last_use) }) : '')}">${
     esc(bot(m.agent_id)?.name ?? m.agent_id)} · ${esc(t(`act.m.${m.state}`))}${m.isolation && m.state !== 'none' ? ` · ${esc(t(`iso.k.${m.isolation}`))}` : ''}${m.helpers ? ` · ${esc(t('act.helpers', { n: m.helpers }))}` : ''}</span>`).join('')
+  // Where the record goes: the audit log is always kept; traces only when a collector is set up.
+  const o = a.observability ?? {}
+  $('#actobs').textContent = [o.audit_days ? t('act.keptDays', { n: o.audit_days }) : t('act.keptForever'),
+    o.traces ? t(o.content ? 'act.tracesContent' : 'act.traces', { to: o.traces }) : t('act.noTraces')].join(' ')
   // What was run lately, newest first; a click opens where it happened.
   const rec = $('#actrecent'); rec.innerHTML = ''
   for (const x of a.actions.slice(0, 60)) {
@@ -3396,6 +3400,11 @@ async function paintActivity() {
     rec.append(row)
   }
   actEmpty(rec, 'act.noRecent')
+}
+$('#actaudit').onclick = () => {
+  const a = document.createElement('a')
+  a.href = api(`/api/audit?days=${$('#actaudays').value}`); a.download = ''
+  document.body.append(a); a.click(); a.remove()
 }
 $('#actbtn').onclick = async () => {
   $('#actdlg').showModal(); await paintActivity()

@@ -28,6 +28,7 @@ Map<String, Object?> sample() => {
       'next_run_at': DateTime.now().add(const Duration(hours: 3)).toIso8601String(), 'running': false},
   ],
   'isolation': {'tools': true, 'mode': 'auto', 'using': 'runc', 'weaker': true, 'problems': <String>[]},
+  'observability': {'traces': 'otel-collector:4318', 'content': false, 'audit_days': 90},
   'machines': [
     {'agent_id': 'kim', 'state': 'awake', 'last_use': _now, 'isolation': 'kata'},
     {'agent_id': 'lee', 'state': 'asleep', 'last_use': _now - 3600000, 'isolation': 'runc'},
@@ -73,6 +74,11 @@ void main() {
       expect(find.text(tr('iso.weakNote')), findsOneWidget, reason: 'and plain containers are called weaker');
       expect(find.textContaining(tr('act.helpers', {'n': '2'})), findsOneWidget,
           reason: 'an agent with helpers running is listed even without a machine of its own');
+      // A lazy list: scroll until the last section is built.
+      await tester.scrollUntilVisible(find.byKey(const ValueKey('act-audit')), 300, scrollable: find.byType(Scrollable).first);
+      expect(find.text(tr('act.export')), findsOneWidget);
+      expect(find.textContaining('kept 90 days'), findsOneWidget);
+      expect(find.textContaining('Traces go to otel-collector:4318, without'), findsOneWidget);
       expect(tester.takeException(), isNull);
       bench.dispose();
     });

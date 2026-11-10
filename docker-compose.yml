@@ -54,6 +54,15 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       # resolvers for Kata / gVisor machines, which can't use Docker's own DNS
       AGENT_DNS: ${AGENT_DNS:-8.8.8.8 1.1.1.1}
+      # how long the audit log is kept, in days (0 = forever); export it from the activity page or GET /api/audit
+      AUDIT_KEEP_DAYS: ${AUDIT_KEEP_DAYS:-90}
+      # traces for an OpenTelemetry collector (OTLP/HTTP): e.g. http://otel-collector:4318; empty = none
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-cirrayabot}
+      # 1 = also send prompts, replies, commands and outputs (they can hold the user's data)
+      OTEL_CAPTURE_CONTENT: ${OTEL_CAPTURE_CONTENT:-}
       # an agent's machine nobody used for this many minutes is stopped (files kept), 0 = never
       AGENT_IDLE_STOP_MIN: ${AGENT_IDLE_STOP_MIN:-30}
       # how long an agent's setup script may run, in minutes

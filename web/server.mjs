@@ -39,6 +39,7 @@ import { checkServer as checkMcp, checkEnv as checkMcpEnv, isMcp, mergeTools, sp
   StdioClient, McpError, MAX_TOOLS as MCP_MAX_TOOLS, parseWwwAuthenticate, resourceMetadataUrls, authServerMetadataUrls, endpointsOf,
   pkce, authorizeUrl, resourceOf, tokensFrom } from './mcp.mjs'
 import { termsOf, hitsText, aroundText, LIMITS as HISTORY } from './history.mjs'
+import { Tracer, KIND as SPAN, endpointOf as otelEndpoint, parseHeaders as otelHeaders } from './otel.mjs'
 import { REVIEW_SYSTEM, reviewPrompt, parseReview, unusedSuggestions, signature as suggestionKey } from './skillreview.mjs'
 import { checkTrigger, verify as verifyHook, deliveryId, matches as hookMatches, summarize as hookSummary, briefFor } from './triggers.mjs'
 
@@ -254,8 +255,11 @@ function askApproval(ctx, onTool, name, args, allow = []) {
     task: ctx.task ? Number(ctx.task.id) : null })
   if (ctx.task) taskWaitsForApproval(ctx.task, { id, name, args, always }).catch(e => console.error('[task] approval card:', e.message))
   return new Promise(resolve => {
-    const answer = async (ok, forever = false) => {
+    const answer = async (ok, forever = false, gone = false) => {
       if (!pendingApprovals.delete(id)) return
+      db.audit({ kind: 'approval', agent_id: ctx.bot?.id, scope: ctx.scope, scope_id: ctx.scopeId, session: ctx.session,
+        task: ctx.task ? Number(ctx.task.id) : null, subject: toolSubject(name, args),
+        detail: gone ? { answer: 'abandoned' } : { answer: ok ? 'approved' : 'denied', ...ok && forever ? { always: true } : {} } })
       liveAsks.delete(id)
       ctx.run?.asking.delete(id)
       ctx.signal?.removeEventListener('abort', onAbort)
@@ -265,7 +269,7 @@ function askApproval(ctx, onTool, name, args, allow = []) {
       if (ctx.task) db.updateTask(ctx.task.id, { status: 'running', approval: null }, { from: ['waiting'] }).catch(() => {})
       resolve(ok)
     }
-    const onAbort = () => answer(false)
+    const onAbort = () => answer(false, false, true)
     pendingApprovals.set(id, answer)
     ctx.run?.asking.add(id)
     ctx.signal?.addEventListener('abort', onAbort, { once: true })
@@ -412,6 +416,19 @@ const CLI = env.CONTAINER_CLI || 'docker'
 const IMAGE = !env.AGENT_IMAGE || /^multi-agent-worker:[1234]$/.test(env.AGENT_IMAGE) ? 'multi-agent-worker:5' : env.AGENT_IMAGE
 const EXEC_TIMEOUT = Number(env.AGENT_EXEC_TIMEOUT || 120) * 1000
 const OUT_MAX = 12_000
+// Traces for an OpenTelemetry collector, when OTEL_EXPORTER_OTLP_(TRACES_)ENDPOINT is set (web/otel.mjs).
+const tracer = new Tracer({ endpoint: otelEndpoint(env), headers: otelHeaders(env.OTEL_EXPORTER_OTLP_HEADERS),
+  service: env.OTEL_SERVICE_NAME || 'cirrayabot', content: env.OTEL_CAPTURE_CONTENT === '1',
+  flushMs: Math.max(100, Number(env.OTEL_BSP_SCHEDULE_DELAY) || 5000) })
+const AUDIT_KEEP_DAYS = Math.max(0, Number(env.AUDIT_KEEP_DAYS ?? 90) || 0)
+const QUIET_API = /^\/api\/(browser|desktop)\/[^/]+\/act$|^\/api\/voice\//
+// docker stop sends SIGTERM: send what traces are left before going (Node's default would drop them).
+for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { tracer.shutdown().finally(() => process.exit(0)) })
+if (AUDIT_KEEP_DAYS) {
+  const prune = () => db.pruneAudit(AUDIT_KEEP_DAYS).catch(e => console.warn(`[audit] pruning: ${e.message}`))
+  setTimeout(prune, 30_000).unref()
+  setInterval(prune, 6 * 3_600_000).unref()
+}
 // Container names are global on the whole host. Two deployments on the same machine that don't change the prefix
 // fight over the same ma-agent-chief — the mount check makes each side delete and recreate the other's container.
 const PREFIX = env.AGENT_PREFIX || 'ma'
@@ -2138,9 +2155,21 @@ function noteUsage(ctx, p, usage) {
 }
 
 /** Call the model once. Protocol translation and stream parsing live in protocols.mjs; here we only decide which tools to send. */
-function callModel(p, messages, onDelta, { bare = false, signal, specs = null } = {}) {
+async function callModel(p, messages, onDelta, { bare = false, signal, specs = null, span = null } = {}) {
   const tools = bare ? null : specs ?? (CFG.tools ? TOOL_SPECS : null)
-  return callUpstream(p, messages, tools?.length ? tools : null, onDelta, signal)
+  // One span per call (GenAI conventions): which model, what it cost; the prompt and reply only with OTEL_CAPTURE_CONTENT.
+  const s = tracer.start(`chat ${p.model}`, { parent: span, kind: SPAN.client, attrs: { 'gen_ai.operation.name': 'chat',
+    'gen_ai.provider.name': normProtocol(p.protocol) === 'messages' ? 'anthropic' : 'openai', 'gen_ai.request.model': p.model,
+    'server.address': (() => { try { return new URL(p.base_url).host } catch { return null } })(), 'cirrayabot.provider': p.name } })
+  try {
+    const r = await callUpstream(p, messages, tools?.length ? tools : null, onDelta, signal)
+    if (r.usage) s.set('gen_ai.usage.input_tokens', r.usage.prompt).set('gen_ai.usage.output_tokens', r.usage.completion)
+      .set('cirrayabot.cost_usd', db.isPriced(p) ? db.costOf(p, r.usage.prompt, r.usage.completion) / db.MICRO : null)
+      .set('cirrayabot.usage_estimated', r.usage.estimated === true)
+    s.set('gen_ai.response.finish_reasons', r.calls?.length ? 'tool_calls' : 'stop')
+    if (tracer.content) s.set('cirrayabot.reply', clipText(String(r.content ?? ''), 4000))
+    return r
+  } catch (e) { s.error(errorText(e, 'en')); throw e } finally { s.end() }
 }
 
 // Upstream failures come from protocols.mjs flagged with `upstream` / `upstreamStatus`.
@@ -2154,7 +2183,19 @@ const upstreamStatus = e => Number(e?.upstreamStatus) || 0
  * Re-trim to the context window before every model call — tool output grows the context within the turn,
  * and trimming only at the entrance would overflow by step three or four.
  */
+/** One agent turn, as a span when traces are on: everything it calls nests under it. */
 async function runAgent(p, messages, onDelta, onTool, ctx) {
+  const span = tracer.start(`invoke_agent ${ctx.bot?.name ?? ''}`.trim(), { attrs: { 'gen_ai.operation.name': 'invoke_agent',
+    'gen_ai.agent.id': ctx.bot?.id, 'gen_ai.agent.name': ctx.bot?.name, 'cirrayabot.scope': ctx.scope,
+    'cirrayabot.conversation': ctx.scopeId, 'cirrayabot.session': ctx.session, 'cirrayabot.task': ctx.task ? Number(ctx.task.id) : null,
+    'cirrayabot.checkin': ctx.checkin ? true : null, 'cirrayabot.unattended': ctx.unattended ? true : null } })
+  ctx.span = span
+  try { return await runAgentTurn(p, messages, onDelta, onTool, ctx) }
+  catch (e) { span.error(errorText(e, 'en')); throw e }
+  finally { span.end() }
+}
+
+async function runAgentTurn(p, messages, onDelta, onTool, ctx) {
   ctx.onTool = onTool                          // tools that talk to the person (request_secret) need the stream
   const limits = limitsFor(ctx.autonomy)
   const lang = ctx.lang ?? 'en'
@@ -2213,7 +2254,7 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
     for (const [i, wait] of RETRY_WAITS.entries()) {
       if (wait) await new Promise(t => setTimeout(t, wait))
       const specs = ctx.onLight ? [...ctx.specs ?? (CFG.tools ? TOOL_SPECS : []), STRONGER] : ctx.specs
-      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal, specs }); break }
+      try { r = await callModel(p, fit.messages, onDelta, { signal: ctx.signal, specs, span: ctx.span }); break }
       catch (e) {
         if (ctx.signal?.aborted) throw new Say('chat.aborted')
         // Rejected with a 4xx while carrying a screenshot: most likely this model doesn't accept images. Drop them and carry on,
@@ -2278,6 +2319,9 @@ async function runAgent(p, messages, onDelta, onTool, ctx) {
       let args = {}
       try { args = JSON.parse(c.args || '{}') } catch { args = {} }
       onTool?.({ phase: 'run', name: c.name, args })
+      const toolStarted = Date.now()
+      const ts = tracer.start(`execute_tool ${c.name}`, { parent: ctx.span, attrs: { 'gen_ai.operation.name': 'execute_tool',
+        'gen_ai.tool.name': c.name, 'gen_ai.tool.call.id': c.id } })
       // A rule the person set wins over everything: never done, nobody asked, in any mode.
       const never = forbidden(c.name, args, ctx.approval?.forbid)
       // A check-in looks, it doesn't touch: nobody asked for it, and nobody is there to approve anything.
@@ -2302,6 +2346,15 @@ Look things up only. If it should be done, propose it in your report — the use
           : ctx.run?.detached ? ' (the user closed the page, so nobody was there to approve it)' : ' by the user'}: ${toolSubject(c.name, args)}
 Do not try this again. Do it another way, or say why you cannot.`
       const out = typeof res === 'string' ? res : res.text
+      const outcome = never ? 'forbidden' : readOnly ? 'readonly' : !allowed ? 'refused' : failedResult(out) ? 'failed' : 'ran'
+      ts.set('cirrayabot.outcome', outcome)
+      if (tracer.content) ts.set('cirrayabot.tool.subject', clipText(toolSubject(c.name, args), 2000)).set('cirrayabot.tool.output', clipText(out ?? '', 4000))
+      if (outcome !== 'ran') ts.error(outcome)
+      ts.end()
+      db.audit({ kind: 'tool', agent_id: ctx.bot?.id, scope: ctx.scope, scope_id: ctx.scopeId, session: ctx.session,
+        task: ctx.task ? Number(ctx.task.id) : null, subject: toolSubject(c.name, args),
+        detail: { tool: c.name, outcome, ms: Date.now() - toolStarted, ...never ? { rule: never } : {},
+          ...ctx.unattended ? { unattended: true } : {}, ...ctx.checkin ? { checkin: true } : {} } })
       if (res?.image) shot = res.image
       // Send the screenshot to the UI too: people need to see what the agent saw. Only through this stream, never stored.
       // A file the agent sent rides on the same card, and is stored with it: that card is where the person sees it.
@@ -3037,6 +3090,9 @@ async function activityView(lang) {
   actions.sort((a, b) => b.at - a.at)
   return {
     now: Date.now(),
+    // Where this deployment's record goes: traces to a collector (its host only), the audit log kept for so many days.
+    observability: { traces: tracer.enabled ? (() => { try { return new URL(tracer.endpoint).host } catch { return 'on' } })() : null,
+      content: tracer.content, audit_days: AUDIT_KEEP_DAYS },
     runs: [...runs.values()].map(r => ({ ...runView(r), conv_name: convName(r.scope === 'dm' ? 'agent' : 'group', r.scopeId),
       who: bots.find(b => b.id === r.speaker)?.name ?? '' })),
     tasks: open.map(t => ({ ...taskView(t), kind: kindOf(t.scope), conv: t.scope_id, conv_name: convName(kindOf(t.scope), t.scope_id),
@@ -3812,7 +3868,12 @@ const server = createServer(async (req, res) => {
   }
   // External triggers (web/triggers.mjs): no access token — the sender signs with the trigger's own secret instead.
   const hook = url.pathname.match(/^\/hooks\/([A-Za-z0-9_-]{16,64})$/)
-  if (hook) return handleHook(req, hook[1], send).catch(e => {
+  // Every delivery is in the audit log, refused ones too (a run of 401s is someone guessing).
+  const hookSend = (code, body) => {
+    db.audit({ kind: 'trigger', subject: `hook ${hook[1]}`, detail: { status: code, ...body && typeof body === 'object' ? body : {} } })
+    return send(code, body)
+  }
+  if (hook) return handleHook(req, hook[1], hookSend).catch(e => {
     console.error('[hook]', e)
     if (!res.headersSent) send(500, { error: 'internal error' })
   })
@@ -3830,6 +3891,10 @@ const server = createServer(async (req, res) => {
 <p style="color:#888">${esc(say('mcp.oauthClose'))}</p></body>`)
   }
   if (!authed(req, url)) return send(401, t('auth.needToken'), 'text/plain; charset=utf-8')
+  // Every change made through the API, by method and path (never the body: it can hold a secret). Not the stream of
+  // clicks and keys a person sends into an agent's screen, nor speech.
+  if (req.method !== 'GET' && url.pathname.startsWith('/api/') && !QUIET_API.test(url.pathname))
+    res.on('finish', () => db.audit({ kind: 'api', subject: `${req.method} ${url.pathname}`, detail: { status: res.statusCode } }))
   // HttpOnly: no script on the page can read it. Lax, not Strict: Strict would drop it when the page is
   // opened from a link in another app, and every write here is a POST/PUT/PATCH/DELETE, which Lax
   // already keeps from other sites. Secure when a TLS proxy in front says the request was https.
@@ -4169,6 +4234,25 @@ const server = createServer(async (req, res) => {
       const md = parseSkillMd(str(b.text))
       const row = await checkSkillBody({ ...md, name: md.name || b.name, agents: b.agents ?? [] })
       return send(200, await db.saveSkill({ id: 'k' + Date.now().toString(36), ...row, source: 'human' }))
+    }
+    // ---- The audit log, as JSON lines: ?days=N (default 7) or ?since=&until= (ISO or ms), &kind=, &agent= ----
+    if (url.pathname === '/api/audit' && req.method === 'GET') {
+      const when = v => { if (!v) return null; const n = Number(v); const d = new Date(Number.isFinite(n) && /^\d+$/.test(v) ? n : v); return Number.isNaN(+d) ? null : d }
+      const until = when(url.searchParams.get('until')) ?? new Date()
+      const days = Math.min(3650, Math.max(0, Number(url.searchParams.get('days') ?? 7) || 0))
+      const since = when(url.searchParams.get('since')) ?? new Date(+until - days * 86_400_000)
+      const rows = await db.auditRange({ since, until, kind: url.searchParams.get('kind') || null, agent: url.searchParams.get('agent') || null })
+      const names = new Map((await loadBots()).map(b => [b.id, b.name]))
+      const day = new Date().toISOString().slice(0, 10)
+      res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store',
+        'content-disposition': `attachment; filename="cirrayabot-audit-${day}.jsonl"` })
+      for (const r of rows) {
+        res.write(JSON.stringify({ at: new Date(r.at).toISOString(), kind: r.kind, agent: r.agent_id ?? undefined,
+          agent_name: r.agent_id ? names.get(r.agent_id) ?? undefined : undefined, scope: r.scope ?? undefined,
+          conversation: r.scope_id ?? undefined, session: r.session ?? undefined, task: r.task == null ? undefined : Number(r.task),
+          subject: r.subject || undefined, ...r.detail }) + '\n')
+      }
+      return res.end()
     }
     // ---- Keeping skills in order ----
     if (url.pathname === '/api/skills/suggestions' && req.method === 'GET') return send(200, await suggestionsView(lang))

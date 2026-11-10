@@ -3041,6 +3041,36 @@ From the Hermes / OpenClaw comparison (2.6.3: Hermes' curator grades, merges and
   (every step kept, the fuller wording of each) and a real "when to use it" for the third, both reasons in Chinese.
   Left there as open suggestions.
 
+## 2.48 The record: an audit log, and traces for a collector (2026-11-11)
+
+From the comparison (2.6.3: Hermes has Langfuse, OpenClaw OpenTelemetry + an audit ledger), the boss: 「按照你的推荐来」.
+
+- **Audit log** (table `audit`, `db.audit` — fire-and-forget, a lost line is logged): `tool` (every call in the agent
+  loop: subject, `outcome` ran / failed / refused / forbidden / readonly, ms, unattended / checkin flags), `approval`
+  (approved / denied / always / abandoned — hanging up isn't a "no"), `api` (every non-GET `/api/*` after it finished:
+  method + path + status, **never the body**; not the clicks/keys into an agent's screen or speech — `QUIET_API`),
+  `trigger` (every `/hooks/<id>` delivery, refused ones too). Model calls are the `usage` rows, joined in on export
+  (`db.auditRange`). Kept `AUDIT_KEEP_DAYS` (default 90, 0 = forever; pruned 30 s after start and every 6 h).
+  `GET /api/audit?days=|since=&until=&kind=&agent=` → JSON lines, oldest first, ≤ 200 000, with agent names.
+  UI: a "Record" section at the end of the activity page (web and client): range + Export, and a line saying how long
+  the log is kept and where traces go.
+- **Traces** (`web/otel.mjs`, `node web/otel.mjs`): OTLP/HTTP with JSON, no dependency, on when
+  `OTEL_EXPORTER_OTLP_(TRACES_)ENDPOINT` is set (+ `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`,
+  `OTEL_BSP_SCHEDULE_DELAY` — the tests use 200 ms). `invoke_agent <name>` per `runAgent` (a wrapper around
+  `runAgentTurn`), and under it `chat <model>` per `callModel` (GenAI attributes: provider, model, input/output tokens,
+  finish reason, `cirrayabot.cost_usd` when priced) and `execute_tool <name>` (outcome; an outcome other than "ran" is
+  an error status). Bare calls (tidy, review, teach) are traces of their own. **No prompts, replies, commands or outputs
+  unless `OTEL_CAPTURE_CONTENT=1`.** Batched; a collector that is down costs one log line a minute and that batch; the
+  queue is capped at 4096 (oldest dropped). SIGTERM / SIGINT flush before exiting.
+- ⚠️ A comment inside the schema (a JS template literal) must not contain backticks — the second time this bit.
+- Tests: `test/e2e/observability.test.mjs` (a fake collector: the turn → two model calls + a tool call, parents and
+  trace ids, tokens, nothing of the message or command in any body; the audit export with tool / approval / api /
+  trigger / model lines, no request body or secret, filters, an empty range, the attachment name, 401 without the
+  token), `node web/otel.mjs`, `app/test/activity_test.dart`; web in Chromium (`$CLAUDE_JOB_DIR/tmp/vui/audit.mjs`,
+  the real download). **A real collector** (otel/opentelemetry-collector 0.165.0, debug exporter, next to the box's
+  stack for a few minutes, removed after) decoded every span of a real-model turn: `invoke_agent Mia`, two `chat
+  gpt-5.6-sol` with real token counts and finish reasons, `execute_tool bash` outcome ran.
+
 ## 3. What runs now
 
 ```bash
@@ -3064,6 +3094,7 @@ node web/triggers.mjs      # self-test for triggers: checking, signatures, deliv
 node web/mcp.mjs           # self-test for MCP: tool names, schemas, both transports, OAuth discovery and PKCE
 node web/history.mjs       # self-test for an agent searching its own history: words, snippets, what it is shown
 node web/skillreview.mjs   # self-test for skill reviews: unused, what the model is shown, which suggestions survive
+node web/otel.mjs          # self-test for traces: OTLP/JSON encoding, parents, a collector that is down
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)

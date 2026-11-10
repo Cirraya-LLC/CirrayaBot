@@ -224,6 +224,18 @@ From then on `ACCESS_TOKEN` is the only door — don't paste the link with `?k=`
 If it is asked to listen externally without a token, the service **refuses to start** rather than
 printing a warning nobody reads.
 
+## Audit log and traces
+
+Every tool call and how it ended (ran, refused, never allowed, failed), every approval card and its answer, every
+change made through the API (method and path — never the request body, which can hold a secret), every trigger
+delivery and every model call is kept for `AUDIT_KEEP_DAYS` (default 90; 0 = forever). Export it from the activity
+page, or `GET /api/audit?days=7` (also `since` / `until` / `kind` / `agent`), as JSON lines.
+
+To send traces to an OpenTelemetry collector, set `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://otel-collector:4318`;
+OTLP over HTTP) and, if it needs a key, `OTEL_EXPORTER_OTLP_HEADERS`. Each agent turn is a span with its model calls
+(model, tokens, cost) and tool calls (outcome, time) under it, named after the GenAI semantic conventions. What was said
+and run is **not** sent unless `OTEL_CAPTURE_CONTENT=1`.
+
 ## Where the data lives
 
 | What | Where | Backup |

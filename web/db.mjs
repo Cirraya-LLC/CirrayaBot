@@ -142,6 +142,22 @@ create table if not exists skill_suggestions (
   status      text not null default 'open',
   created_at  timestamptz not null default now()
 );
+-- Who did what, kept AUDIT_KEEP_DAYS (default 90): every tool call and its outcome, every approval card and its
+-- answer, every change made through the API (method and path — never a body: it can hold secrets), every trigger
+-- delivery. Model calls are in the usage table and joined in on export.
+create table if not exists audit (
+  id        bigserial primary key,
+  at        timestamptz not null default now(),
+  kind      text not null,
+  agent_id  text,
+  scope     text,
+  scope_id  text,
+  session   text,
+  task      bigint,
+  subject   text not null default '',
+  detail    jsonb not null default '{}'
+);
+create index if not exists audit_at_idx on audit (at);
 -- What every model call cost. One row per call, so a turn that used tools leaves several.
 -- cost_micro is null when the upstream has no prices: "we don't know" and "it was free"
 -- are different answers, and a 0 here would quietly become a 0 on the bill.
@@ -1241,6 +1257,33 @@ export async function dropStaleUploads(hours = 24) {
 export async function dropUpload(id) {
   return dropFiles('id = $1 and session_id is null', [id])
 }
+
+// ---------- audit ----------
+/** One line of the audit log. Not awaited by callers that are mid-turn; a lost line is logged, never fatal. */
+export function audit(e) {
+  return q(`insert into audit (kind, agent_id, scope, scope_id, session, task, subject, detail) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [e.kind, e.agent_id ?? null, e.scope ?? null, e.scope_id ?? null, e.session ?? null, e.task ?? null,
+     String(e.subject ?? '').slice(0, 2000), JSON.stringify(e.detail ?? {})])
+    .catch(err => console.error(`[audit] a ${e.kind} line was lost: ${err.message}`))
+}
+
+/** The audit log with the model calls joined in, oldest first, for an export. */
+export async function auditRange({ since, until, kind = null, agent = null, limit = 200_000 }) {
+  const params = [since, until, limit]
+  const k = kind ? `$${params.push(kind)}` : null, a = agent ? `$${params.push(agent)}` : null
+  const w1 = ['at >= $1', 'at < $2', k && `kind = ${k}`, a && `agent_id = ${a}`].filter(Boolean).join(' and ')
+  const w2 = ['at >= $1', 'at < $2', k && `'model' = ${k}`, a && `agent_id = ${a}`].filter(Boolean).join(' and ')
+  const { rows } = await q(`
+    select at, kind, agent_id, scope, scope_id, session, task, subject, detail from audit where ${w1}
+    union all
+    select at, 'model', agent_id, scope, scope_id, null, null, model,
+      jsonb_build_object('provider', provider_id, 'prompt_tokens', prompt_tokens, 'completion_tokens', completion_tokens,
+        'cost_micro', cost_micro, 'estimated', estimated)
+    from usage where ${w2}
+    order by at limit $3`, params)
+  return rows
+}
+export const pruneAudit = days => q(`delete from audit where at < now() - make_interval(days => $1)`, [days])
 
 // ---------- MCP servers ----------
 const MCP_COLS = `id, agent_id, name, kind, url, command, auth, header, tools, enabled, status, last_error, checked_at, created_at,

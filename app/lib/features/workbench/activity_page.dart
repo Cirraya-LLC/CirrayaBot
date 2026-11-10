@@ -3,11 +3,14 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../../data/api.dart';
 import '../../l10n.dart';
+import '../../platform.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
 
@@ -29,6 +32,67 @@ class _ActivityPageState extends State<ActivityPage> {
   final _answers = <int, TextEditingController>{};
 
   Api get _api => widget.bench.api;
+  int _auditDays = 7;
+  String _exported = '';
+
+  /// The audit log as a .jsonl file: a save dialog on a desktop, the share sheet on a phone.
+  Future<void> _exportAudit() async {
+    setState(() => _exported = tr('act.exporting'));
+    try {
+      final text = await _api.auditLog(_auditDays);
+      final name = 'cirrayabot-audit-${DateTime.now().toIso8601String().substring(0, 10)}.jsonl';
+      if (!AppPlatform.canSaveAs) {
+        await AppPlatform.shareText(name, text, 'application/x-ndjson');
+        if (mounted) setState(() => _exported = '');
+        return;
+      }
+      final loc = await getSaveLocation(suggestedName: name);
+      if (loc == null) {
+        if (mounted) setState(() => _exported = '');
+        return;
+      }
+      await File(loc.path).writeAsString(text);
+      if (mounted) setState(() => _exported = tr('act.exported', {'path': loc.path}));
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _exported = e.message);
+    } on FileSystemException catch (e) {
+      if (mounted) setState(() => _exported = e.message);
+    }
+  }
+
+  Widget _record(Map<String, Object?> a) {
+    final o = (a['observability'] as Map?)?.cast<String, Object?>() ?? const {};
+    final days = (o['audit_days'] as num?)?.toInt() ?? 0;
+    final traces = o['traces'] as String?;
+    return _section(tr('act.record'), [
+      Wrap(
+        spacing: 8,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          DropdownButton<int>(
+            key: const ValueKey('act-audit-days'),
+            value: _auditDays,
+            isDense: true,
+            style: TextStyle(fontSize: 12.5, color: C.ink),
+            items: [
+              for (final (d, k) in const [(1, 'act.au.1'), (7, 'act.au.7'), (30, 'act.au.30'), (3650, 'act.au.all')])
+                DropdownMenuItem(value: d, child: Text(tr(k))),
+            ],
+            onChanged: (v) => setState(() => _auditDays = v ?? 7),
+          ),
+          OutlinedButton(key: const ValueKey('act-audit'), onPressed: _exportAudit, child: Text(tr('act.export'), style: const TextStyle(fontSize: 12.5))),
+        ],
+      ),
+      if (_exported.isNotEmpty) Text(_exported, style: TextStyle(fontSize: 11.5, color: C.dim)),
+      const SizedBox(height: 4),
+      Text(
+        '${days > 0 ? tr('act.keptDays', {'n': '$days'}) : tr('act.keptForever')} '
+        '${traces == null ? tr('act.noTraces') : tr(o['content'] == true ? 'act.tracesContent' : 'act.traces', {'to': traces})}',
+        style: TextStyle(fontSize: 11.5, color: C.dim2),
+      ),
+    ], '');
+  }
 
   @override
   void initState() {
@@ -322,6 +386,7 @@ class _ActivityPageState extends State<ActivityPage> {
                         ),
                       ),
                   ], tr('act.noRecent')),
+                  _record(a),
                 ],
               ),
             ),

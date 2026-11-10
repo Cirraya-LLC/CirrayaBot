@@ -566,6 +566,18 @@ const M = {
   'mcp.st.unchecked': ['Not checked', '未检查', '未檢查'],
   'mcp.safety': ['A tool server sees what the agent sends it, and what it returns is treated as data, never instructions. Tools that only read run on their own; the others ask you first unless you change it here.', '工具服务器能看到 Agent 发给它的内容；它返回的东西只当资料、不当指令。只读的工具直接运行，其余的默认先问你，可以在这里改。', '工具伺服器能看到 Agent 傳給它的內容；它回傳的東西只當資料、不當指令。唯讀的工具直接執行，其餘的預設先問你，可以在這裡改。'],
   'mcp.confirmDelete': ['Disconnect “{name}”?', '断开「{name}」？', '中斷「{name}」？'],
+  // the record: audit log + traces
+  'act.record': ['Record', '记录', '紀錄'],
+  'act.export': ['Export audit log', '导出审计日志', '匯出稽核日誌'],
+  'act.au.1': ['Last 24 hours', '最近 24 小时', '最近 24 小時'],
+  'act.au.7': ['Last 7 days', '最近 7 天', '最近 7 天'],
+  'act.au.30': ['Last 30 days', '最近 30 天', '最近 30 天'],
+  'act.au.all': ['Everything kept', '保留的全部', '保留的全部'],
+  'act.keptDays': ['Every command, approval, change and model call is kept {n} days (AUDIT_KEEP_DAYS).', '每条命令、审批、改动和模型调用都保留 {n} 天（AUDIT_KEEP_DAYS）。', '每條指令、審批、變更和模型呼叫都保留 {n} 天（AUDIT_KEEP_DAYS）。'],
+  'act.keptForever': ['Every command, approval, change and model call is kept.', '每条命令、审批、改动和模型调用都会保留。', '每條指令、審批、變更和模型呼叫都會保留。'],
+  'act.traces': ['Traces go to {to}, without what was said or run.', '追踪数据发往 {to}，不含对话和命令内容。', '追蹤資料傳往 {to}，不含對話和指令內容。'],
+  'act.tracesContent': ['Traces go to {to}, including what was said and run.', '追踪数据发往 {to}，包含对话和命令内容。', '追蹤資料傳往 {to}，包含對話和指令內容。'],
+  'act.noTraces': ['No traces are sent (set OTEL_EXPORTER_OTLP_ENDPOINT to send them to a collector).', '没有发送追踪数据（设置 OTEL_EXPORTER_OTLP_ENDPOINT 可发往收集器）。', '沒有傳送追蹤資料（設定 OTEL_EXPORTER_OTLP_ENDPOINT 可傳往收集器）。'],
   // keeping skills in order
   'k.review': ['Review skills', '检查技能', '檢查技能'],
   'k.reviewFor': ['Whose skills', '检查谁的技能', '檢查誰的技能'],

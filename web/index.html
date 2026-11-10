@@ -509,6 +509,7 @@
   .tool .secask button{padding:3px 12px;font-size:11.5px}
   .rt .st.run{background:var(--tint);color:var(--tintink)}
   #tgdlg [data-k] input,#tgdlg>input,#tgdlg>select,#tgwho select{width:100%}
+  .actrecord .row{display:flex;gap:8px;align-items:center} .actrecord select{width:auto;margin:0}
   #mcpdlg{width:600px} #mcpdlg [hidden]{display:none} #mcpdlg input.mono,#mcpdlg textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
   #mcpdlg textarea.mono{min-height:70px} #mcpdlg details{margin:0 0 10px;font-size:13px;color:var(--dim)} #mcpdlg summary{cursor:pointer;margin-bottom:6px}
   #mcpstate{margin:4px 0 8px} #mcpstate .bad{color:var(--bad)} #mcpsignrow{gap:8px;align-items:center;margin-bottom:10px}
@@ -1018,6 +1019,11 @@
   <section><h5 data-i18n="act.coming"></h5><div id="actcoming"></div></section>
   <section id="actmachsec"><h5 data-i18n="act.machines"></h5><small class="isoweak" id="actweak" hidden></small><div id="actmach" class="actmach"></div></section>
   <section><h5 data-i18n="act.recent"></h5><div id="actrecent"></div></section>
+  <section class="actrecord"><h5 data-i18n="act.record"></h5>
+    <div class="row"><select id="actaudays"><option value="1" data-i18n="act.au.1"></option><option value="7" data-i18n="act.au.7" selected></option>
+      <option value="30" data-i18n="act.au.30"></option><option value="3650" data-i18n="act.au.all"></option></select>
+      <button class="btn" id="actaudit" data-i18n="act.export"></button></div>
+    <small class="rhint" id="actobs"></small></section>
 </dialog>
 
 <dialog id="impdlg">
