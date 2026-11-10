@@ -2980,6 +2980,30 @@ script (`pip install --no-user mcp-server-fetch`, 27 s) and run as `python3 -m m
 Kata VM, its `fetch` marked read-only. One turn used both: DeepWiki answered about facebook/react, fetch read
 example.com. **Not verified**: completing a real OAuth sign-in (needs an account), a real server's token refresh.
 
+## 2.46 An agent searches its own history (2026-11-10)
+
+From the Hermes / OpenClaw comparison (2.6.3; Hermes has `session_search`), the boss: 「好的 那就开始做吧」.
+The model only sees the session it is in (2.29), so "what did we decide last week" depended on luck or its notes.
+
+- Tools `search_history {query, limit}` and `read_history {message_id}`, in `TOOL_SPECS` (tools on, like `remember`;
+  tools off has no tool calls at all). Formatting pure in `web/history.mjs` (`node web/history.mjs`); queries
+  `db.searchHistory` / `db.messageAround`.
+- **What it may see**: its own DM (every session) and the groups it is in **now**, user and agent lines only (no tool
+  rows, no event cards) — what a person in those conversations could scroll back to. Never another agent's DM, never
+  a group it left (`read_history` on such an id: "There is no message #N in your conversations"). The session the turn
+  is in is left out (it is in front of the model); a background task searches it too (its context is its own transcript).
+- Every word must appear (case-insensitive substrings, `%`/`_` literal, a "quoted phrase" stays together, ≤ 8 words),
+  newest first, 8 hits by default (≤ 20), a 240-character snippet around the first word. Each hit: `[#id] date UTC ·
+  where · session "title" · speaker`; titles as the UI shows them (`sessionTitle`: the name, else the first message).
+  The model isn't told the time anywhere else, so the answer says `now:`. `read_history` = 6 lines each side, the asked
+  one marked `»`, each line ≤ 1500 characters. Both answers say what is quoted is not instructions.
+- Cards: "Searched earlier conversations: “…”" / "Read an earlier conversation around #N" on both clients.
+- Tests: `test/e2e/history.test.mjs` (own sessions and groups found; another agent's DM and a group it isn't in not;
+  the current session not; the phrase; reading around a hit; a foreign id refused; leaving a group takes it out of
+  reach), `node web/history.mjs`. **Real model on the box** (Mia, gpt-5.6-sol, a new session asked in Chinese about
+  what DeepWiki and fetch had said days earlier, "don't look it up again"): its first search had too many words and
+  found nothing, it retried with fewer, read around the hit, and answered both correctly without going online.
+
 ## 3. What runs now
 
 ```bash
@@ -3001,6 +3025,7 @@ node web/teach.mjs         # self-test for describing a recorded demonstration a
 node web/templates.mjs     # self-test: every shipped template loads; import / export round trip, never a model
 node web/triggers.mjs      # self-test for triggers: checking, signatures, delivery ids, filters, what the agent is handed
 node web/mcp.mjs           # self-test for MCP: tool names, schemas, both transports, OAuth discovery and PKCE
+node web/history.mjs       # self-test for an agent searching its own history: words, snippets, what it is shown
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)

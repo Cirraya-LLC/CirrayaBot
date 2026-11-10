@@ -24,7 +24,8 @@ of each answering on their own.
   back (a report, a chart, an archive). Images, video and audio play in place; PDF, Markdown and
   text open in a preview; anything else downloads. Up to 50 MB a file (`UPLOAD_MAX_MB`).
 - **Memory carries across contexts** — what was discussed in a group, he still remembers
-  in a direct chat.
+  in a direct chat. With tools on, an Agent can also search its own earlier sessions and the groups it is in
+  (never another Agent's direct chats) and read the exchange around what it found.
 - **Sessions, and search across them** — a DM or a group holds as many separate sessions as you
   like (the ▾ next to the name in the chat header: new, switch, rename, delete). The model only
   sees the session on screen; memory and skills carry across all of them. The same panel searches

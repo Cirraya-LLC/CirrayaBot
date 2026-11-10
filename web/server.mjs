@@ -38,6 +38,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { checkServer as checkMcp, checkEnv as checkMcpEnv, isMcp, mergeTools, specsOf as mcpSpecsOf, resultOf as mcpResult, RemoteClient,
   StdioClient, McpError, MAX_TOOLS as MCP_MAX_TOOLS, parseWwwAuthenticate, resourceMetadataUrls, authServerMetadataUrls, endpointsOf,
   pkce, authorizeUrl, resourceOf, tokensFrom } from './mcp.mjs'
+import { termsOf, hitsText, aroundText, LIMITS as HISTORY } from './history.mjs'
 import { checkTrigger, verify as verifyHook, deliveryId, matches as hookMatches, summarize as hookSummary, briefFor } from './triggers.mjs'
 
 const WEB = join(ROOT, 'web')
@@ -1089,6 +1090,20 @@ const TOOL_SPECS = [
     parameters: { type: 'object', required: ['fact'], properties: {
       fact: { type: 'string', description: 'One short fact worth keeping, e.g. "Deploys go through ./start.sh, never docker compose directly"' } } } } },
   { type: 'function', function: {
+    name: 'search_history',
+    description: 'Search what was said in your earlier conversations — your other sessions with the user and the groups you are in. ' +
+      'Use it when the user refers to something from before ("what did we decide about…", "the script from last week") or you need a ' +
+      'past detail that is not in front of you. Every word must appear (case-insensitive; put a phrase in "quotes"); newest first. ' +
+      'The session you are in now is already in front of you and is not searched. Other agents\' direct chats are never searched.',
+    parameters: { type: 'object', required: ['query'], properties: {
+      query: { type: 'string', description: 'Words that were probably said, e.g. "deploy script" or "invoice March"' },
+      limit: { type: 'integer', description: 'How many hits, 1–20 (default 8)' } } } } },
+  { type: 'function', function: {
+    name: 'read_history',
+    description: 'Read the exchange around one search_history hit: the lines before and after it in that session.',
+    parameters: { type: 'object', required: ['message_id'], properties: {
+      message_id: { type: 'integer', description: 'The number after # in a search_history hit' } } } } },
+  { type: 'function', function: {
     name: 'browser',
     description: 'Drive the browser on your own machine. It is stateful: open pages, half-filled forms and logins all persist (logins survive container restarts too). ' +
       'Workflow: open a URL → read the page text, which also numbers the elements you can click or fill → click / type by number → screenshot to see what the page looks like. ' +
@@ -1984,6 +1999,33 @@ async function mcpViewFull(m, req) {
   return v
 }
 
+// ---------- an agent's own history (web/history.mjs) ----------
+// Its DM and the groups it is in now, every session: what a person in those conversations could scroll back to.
+async function historyGroups(bot) { return (await db.listGroups()).filter(g => g.members.includes(bot.id)) }
+const historyNames = (ctx, groups) => ({ self: ctx.bot.name, speaker: modelSpeaker,
+  groupName: id => groups.find(g => g.id === id)?.name ?? null })
+
+async function searchHistoryTool(ctx, args) {
+  const query = String(args.query ?? '').trim()
+  const terms = termsOf(query)
+  if (!terms.length) return 'Give some words to search for.'
+  const limit = Math.min(HISTORY.hits, Math.max(1, Math.round(Number(args.limit)) || HISTORY.defaultHits))
+  const groups = await historyGroups(ctx.bot)
+  // A background task's own transcript isn't the session, so a task searches that too.
+  const rows = await db.searchHistory(ctx.bot.id, groups.map(g => g.id), terms, { exclude: ctx.task ? null : ctx.session, limit })
+  return hitsText(rows, { query, terms, ...historyNames(ctx, groups) })
+}
+
+async function readHistoryTool(ctx, args) {
+  const id = Number(args.message_id)
+  if (!Number.isInteger(id) || id < 1) return 'Give the number of a search_history hit (the one after #).'
+  const a = await db.messageAround(id, HISTORY.around)
+  const groups = await historyGroups(ctx.bot)
+  const mine = a && (a.scope === 'dm' ? a.scope_id === ctx.bot.id : groups.some(g => g.id === a.scope_id))
+  if (!mine) return `There is no message #${id} in your conversations.`
+  return clip(aroundText(a, id, historyNames(ctx, groups)))
+}
+
 async function runTool(name, args, ctx) {
   const res = await runToolRaw(name, args, ctx)
   const secrets = await secretValues(ctx)
@@ -2019,6 +2061,8 @@ async function runToolRaw(name, args, ctx) {
   if (name === 'save_skill') return saveSkillFromAgent(ctx.bot, args)
   if (name === 'send_file') return sendFromAgent(ctx, args)
   if (name === 'remember') return rememberFromAgent(ctx.bot, args.fact)
+  if (name === 'search_history') return searchHistoryTool(ctx, args)
+  if (name === 'read_history') return readHistoryTool(ctx, args)
   if (name === 'update_plan') {
     const plan = checkPlan(args.plan)
     if (typeof plan === 'string') return `Plan not saved: ${plan}`

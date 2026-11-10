@@ -59,6 +59,8 @@ const M = {
   'msg.you': ['Me', '你', '你'],
   'tool.exec': ['ran', '执行', '執行'],
   'tool.read': ['Read {path}', '读 {path}', '讀取 {path}'],
+  'tool.searchHistory': ['Searched earlier conversations: “{q}”', '搜索了以前的对话：「{q}」', '搜尋了以前的對話：「{q}」'],
+  'tool.readHistory': ['Read an earlier conversation around #{id}', '翻看了以前的对话（#{id} 前后）', '翻看了以前的對話（#{id} 前後）'],
   'tool.write': ['Write {path}', '写 {path}', '寫入 {path}'],
   'tool.screenshot': ['Screenshot', '截图', '螢幕截圖'],
   'note.retry': ['{name} retrying: {reason}', '{name} 重试一次：{reason}', '{name} 重試一次：{reason}'],

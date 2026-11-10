@@ -635,6 +635,8 @@ function toolLabel(name, args = {}) {
   }
   if (name === 'http_request') return `${String(args.method || 'GET').toUpperCase()} ${args.url ?? ''}${args.secret ? `  · ${args.secret}` : ''}`
   if (name === 'request_secret') return t('tool.requestSecret', { name: args.name ?? '' })
+  if (name === 'search_history') return t('tool.searchHistory', { q: args.query ?? '' })
+  if (name === 'read_history') return t('tool.readHistory', { id: args.message_id ?? '' })
   if (name.startsWith('mcp__')) {
     const [, server, ...tool] = name.split('__')
     const a = JSON.stringify(args ?? {})

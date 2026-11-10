@@ -1084,6 +1084,8 @@ class Workbench extends ChangeNotifier {
     'browser' => tr('tool.browser', {'what': _browserLabel(args)}),
     'http_request' => '${'${args['method'] ?? 'GET'}'.toUpperCase()} ${args['url'] ?? ''}${args['secret'] != null ? '  · ${args['secret']}' : ''}',
     'request_secret' => tr('tool.requestSecret', {'name': args['name'] ?? ''}),
+    'search_history' => tr('tool.searchHistory', {'q': '${args['query'] ?? ''}'}),
+    'read_history' => tr('tool.readHistory', {'id': '${args['message_id'] ?? ''}'}),
     String t when t.startsWith('mcp__') => _mcpLabel(t, args),
     'computer' => tr('tool.computer', {
       'what': [args['action'], args['keys'] ?? (args['text'] != null ? '"${args['text']}"' : null), args['x'] != null ? '${args['x']},${args['y']}' : null]

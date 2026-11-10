@@ -541,10 +541,11 @@ export async function listSessions(scope, scopeId) {
       (select content from messages m where m.session_id = s.id and m.role = 'user' order by m.id limit 1) as first
     from sessions s where s.scope = $1 and s.scope_id = $2
     order by s.updated_at desc, s.id desc`, [scope, scopeId])
-  return rows.map(({ name, first, ...r }) => ({
-    ...r, named: !!name, title: name || String(first ?? '').replace(/^\[Scheduled task[^\]]*\]\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 60),
-  }))
+  return rows.map(({ name, first, ...r }) => ({ ...r, named: !!name, title: sessionTitle(name, first) }))
 }
+/** A session's title: the name it was given, else the start of its first message (a routine's prefix taken off). */
+const sessionTitle = (name, first) =>
+  name || String(first ?? '').replace(/^\[Scheduled task[^\]]*\]\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 60)
 
 export async function renameSession(id, title) {
   await q('update sessions set title = $2 where id = $1', [id, title])
@@ -702,6 +703,47 @@ export async function searchMessages(text, { scope = null, scopeId = null, limit
     where m.role in ('user','assistant') and m.content ilike $1 ${where}
     order by m.id desc limit $2`, params)
   return rows
+}
+
+/**
+ * What search_history looks through: an agent's own DM and the groups it is in now — every session, user and agent
+ * lines only. Every word must appear (case-insensitive, as written: `%` and `_` are literal). `exclude` = a session
+ * left out (the one the agent is already reading). Newest first.
+ */
+export async function searchHistory(agentId, groupIds, terms, { exclude = null, limit = 8 } = {}) {
+  const params = [agentId, groupIds, limit]
+  const conds = terms.map(t => { params.push('%' + t.replace(/[\\%_]/g, c => '\\' + c) + '%'); return `m.content ilike $${params.length}` })
+  if (exclude) { params.push(exclude); conds.push(`m.session_id is distinct from $${params.length}`) }
+  const { rows } = await q(`
+    select m.id, m.session_id, m.scope, m.scope_id, m.role, m.speaker, m.content, m.at, s.title,
+      (select content from messages f where f.session_id = s.id and f.role = 'user' order by f.id limit 1) as first
+    from messages m left join sessions s on s.id = m.session_id
+    where m.role in ('user','assistant')
+      and ((m.scope = 'dm' and m.scope_id = $1) or (m.scope = 'group' and m.scope_id = any($2)))
+      and ${conds.join(' and ')}
+    order by m.id desc limit $3`, params)
+  return rows.map(({ first, ...r }) => ({ ...r, title: sessionTitle(r.title, first) }))
+}
+
+/** One message and the `n` user/agent lines on each side of it in its session (read_history). null when it isn't there. */
+export async function messageAround(id, n = 6) {
+  const found = (await q(`select m.id, m.session_id, m.scope, m.scope_id, s.title,
+      (select content from messages f where f.session_id = s.id and f.role = 'user' order by f.id limit 1) as first
+    from messages m left join sessions s on s.id = m.session_id where m.id = $1 and m.role in ('user','assistant')`, [id])).rows[0]
+  if (!found) return null
+  const { first, ...m } = found
+  m.title = sessionTitle(m.title, first)
+  // Every bind parameter must be used, or PostgreSQL can't type it: a line from before sessions goes by its conversation.
+  const same = m.session_id ? 'session_id = $1' : 'session_id is null and scope = $1 and scope_id = $4'
+  const params = m.session_id ? [m.session_id, id, n] : [m.scope, id, n, m.scope_id]
+  const cols = 'id, role, speaker, content, at'
+  const { rows } = await q(`
+    select * from (
+      (select ${cols} from messages where ${same} and role in ('user','assistant') and id <= $2 order by id desc limit $3 + 1)
+      union all
+      (select ${cols} from messages where ${same} and role in ('user','assistant') and id > $2 order by id asc limit $3)
+    ) x order by id`, params)
+  return { ...m, rows }
 }
 
 /** Agents that name this upstream, as their own or as a backup: deleting it would quietly change what they use. */
