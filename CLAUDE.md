@@ -262,6 +262,44 @@ release notes and press; dates marked (2nd) were not confirmed against a primary
   come with a "ChatGPT Space" where dots and a human team work together; Grok's usage cut is confirmed (Musk: serving
   it cost more than subscriptions brought in); Devin Desktop runs up to eight local sessions side by side.
 
+### 2.6.3 Hermes Agent and OpenClaw (checked 2026-11-10)
+
+The boss: 「我们这个和 hermes和clawbot对比一下」. From the repos, docs and releases; (2nd) = press only. **Research, not decisions.**
+"Clawbot" = **OpenClaw** (Clawdbot → Moltbot 2026-01-27 → OpenClaw 2026-01-30); "ClawBot" itself is only the name of
+Tencent's WeChat and Zalo channel plugins for it.
+
+- **Hermes Agent** (NousResearch/hermes-agent, MIT, Python): v0.23.1 (2026-11-10), ~262k stars, ~1.6k PRs merged in two
+  weeks; Nous Portal plans and a paid Hermes Cloud (an always-on agent per plan in its own container). Commands run **on
+  the host by default** (`local` backend); the Docker backend is one container shared by sessions and subagents, and
+  approvals are skipped inside sandboxes; SECURITY.md: "the only security boundary against an adversarial LLM is the
+  operating system". Bots are profiles in one gateway process; group chats of 2–6 bots (lead / router / everyone),
+  `message_agent`, subagents up to 10 in parallel, a Kanban board. Memory: `MEMORY.md` + `USER.md` (~3.6k characters)
+  + **`session_search`** (FTS5 over every past session) + user-model plugins. Self-written skills + a **curator** that
+  grades, merges and archives them weekly; a skills hub + 1,050-entry plugin catalog. Cron, HMAC webhooks, 26+ chat
+  channels, Electron desktop, a single-user webapp, a mobile beta, wake word. MCP client (OAuth, sampling, elicitation)
+  and server. Computer use on macOS/Windows/Linux. 30+ providers, **subscription sign-in** (ChatGPT/Codex, Claude Max,
+  SuperGrok…), Ollama / LM Studio / vLLM. Approvals default **`smart`** (a side model judges risk), deny list even in YOLO,
+  unattended runs deny. Keys stripped from tool environments, `browser_vault` fills logins unseen. **No spend cap**, turns
+  unlimited by default. 10 advisories May–June 2026 (DNS rebinding, world-readable HMAC secrets, scanner bypasses).
+- **OpenClaw** (openclaw/openclaw, MIT, TypeScript): v2026.11.2 (2026-11-08), ~394k stars, a release every 2–5 days, an
+  independent 501(c)(3) foundation, no hosted tier. **Sandbox off by default**; exec defaults to `security: full, ask: off`
+  (no prompts); `agentToAgent` on and session visibility `all` (an unsandboxed agent reads every agent's transcripts);
+  one trust boundary per gateway. When enabled the sandbox is strong (per agent, `network: none`, read-only root, caps
+  dropped; docker / podman / ssh / OpenShell / Daytona). ~33 chat channels + phone calls, apps for macOS / Windows / Linux
+  / iOS / Android / Apple Watch (app builds lag the gateway), talk mode + wake words, Canvas, nodes (camera, screen,
+  location). Markdown memory + hybrid search + nightly "dreaming", import from Codex / Claude Code / Hermes. Self-written
+  skills on by default; ClawHub registry with scan results (2nd: "ClawHavoc", hundreds of malicious skills, Feb 2026).
+  Automations (cron), webhooks off by default, Gmail Pub/Sub. MCP client + server. ~80 providers, ChatGPT / Claude-CLI
+  subscription reuse, two-stage failover. Recommended (not default) `auto` = an LLM reviewer. DM pairing on by default.
+  Secrets partial (plaintext config readable by the agent). **No dollar cap.** 722 advisories Jan–Sep 2026 (14 critical);
+  (2nd) 40k internet-exposed instances in Feb.
+- **Where we lead both**: a separate machine per agent **by default** (VM where possible), approvals on by default without a
+  model in the loop, a per-agent daily spend cap, secrets never in the model, side effects not redone after a restart, a
+  full desktop + LibreOffice per agent that a person can take over. **Where both lead us**: community and release pace,
+  chat channels (out of scope), store apps on every platform, subscription sign-in and local-model setup, searching past
+  sessions as an agent tool, a skill registry and curator, an LLM risk reviewer (declined), acting on the person's own
+  computer (declined), observability export (Hermes Langfuse; OpenClaw OTel + an audit ledger).
+
 ## 2.7 So what's left — after checking one by one, only one and a half items
 
 **Every item checked removed one thing to do. The below comes from reading the source item by item on
