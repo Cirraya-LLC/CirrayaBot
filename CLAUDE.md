@@ -3004,6 +3004,43 @@ The model only sees the session it is in (2.29), so "what did we decide last wee
   what DeepWiki and fetch had said days earlier, "don't look it up again"): its first search had too many words and
   found nothing, it retried with fewer, read around the hit, and answered both correctly without going online.
 
+## 2.47 Keeping skills in order (2026-11-11)
+
+From the Hermes / OpenClaw comparison (2.6.3: Hermes' curator grades, merges and archives skills weekly), the boss:
+「按照你的推荐来」. Rules pure in `web/skillreview.mjs` (`node web/skillreview.mjs`).
+
+- **Use is counted**: `skills.uses` / `used_at`, one per `read_skill` that returned the skill. **Archived**
+  (`skills.archived_at`): kept in the library (shown under "Archived", with Restore), left out of `skillsFor` — so out
+  of the prompt and `read_skill`. An agent `save_skill`-ing one of its own archived skills, or a template installing an
+  archived one, brings it back.
+- **A review** (`POST /api/skills/review {agent}`, or weekly — settings key `skills` `{review_weekly}`, off by default,
+  in the 03:00 hour, at most once in 7 days per agent with skills): **rules** — every skill of the agent unused for 30
+  days (counted from when it was made if never used) → an `archive` suggestion; **the agent's light model** (`taskModel`,
+  one bare call, counted and capped) with `REVIEW_SYSTEM` → `merge` (2–4 skills into one that keeps every step; a merged
+  body under 60% of the longest original is dropped as a summary; skills over 3000 characters are shown cut and never
+  merged), `describe` (a clearer "when to use it"), `archive` (only when replaced or contradicted — "unused" is the
+  rules' job). `parseReview` keeps only known ids, drafts `checkSkill` accepts, no skill in two suggestions, ≤ 8. A
+  failed model call still leaves the rules' suggestions and says why (`problem`); the cap (402) is not swallowed.
+- **Suggestions** (table `skill_suggestions`): nothing changes until a person applies one (`POST
+  /api/skills/suggestions/:id {action: apply|dismiss, draft?}`). A suggestion made before (open or dismissed, same kind
+  + same skills) is never made again. `stamps` = each skill's `updated_at` when suggested: a skill edited, deleted or
+  archived since makes it 409 `skills.stale`. Applying a merge rewrites the skill whose name the merge keeps (else the
+  first), installs it on every agent the originals were on, archives the rest; `describe` changes only the description;
+  both make the skill the person's (`source: human`). Applying drops the other open suggestions about those skills.
+  Deleting a skill / an agent deletes its suggestions. Why-texts from the rules are rendered in the reader's language
+  (`skills.why.*`); the model writes its own in the skills' language.
+- UI: the skill library (web `#kdlg`, client `SkillsPage`): "Review skills" for a chosen agent (defaults to the open
+  conversation's), "Every week", suggestion cards (merge shows the draft, describe the new line) with Apply / Dismiss,
+  "used N× · last …" / "never used" on each skill, an Archived section, Archive / Restore in the editor.
+- Tests: `test/e2e/skillreview.test.mjs` (use counted; what the model is shown; suggestions checked; not made twice;
+  apply merge / describe with the person's wording / dismiss; archived out of the prompt; stale after an edit; a failing
+  model leaves the rules' suggestion; archiving by hand drops open suggestions; save_skill restores), `node
+  web/skillreview.mjs`, `app/test/skillreview_test.dart` (desktop and 360 ×1.3); web in Chromium
+  (`$CLAUDE_JOB_DIR/tmp/vui/ksug.mjs`). **Real model on the box** (Mia's light model = gpt-5.6-sol, three skills in
+  Chinese: two deploy procedures saying the same thing, one described only as "东西"): it suggested merging the two
+  (every step kept, the fuller wording of each) and a real "when to use it" for the third, both reasons in Chinese.
+  Left there as open suggestions.
+
 ## 3. What runs now
 
 ```bash
@@ -3026,6 +3063,7 @@ node web/templates.mjs     # self-test: every shipped template loads; import / e
 node web/triggers.mjs      # self-test for triggers: checking, signatures, delivery ids, filters, what the agent is handed
 node web/mcp.mjs           # self-test for MCP: tool names, schemas, both transports, OAuth discovery and PKCE
 node web/history.mjs       # self-test for an agent searching its own history: words, snippets, what it is shown
+node web/skillreview.mjs   # self-test for skill reviews: unused, what the model is shown, which suggestions survive
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
 node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)

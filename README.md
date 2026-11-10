@@ -37,6 +37,10 @@ of each answering on their own.
   conversations still being worked on, and **Stop** is on the conversation. Switch an Agent (or
   the whole platform, in ⚙) to *manual* to go back to a few steps per message. Approvals and the
   daily cap apply either way.
+- **Skills that stay in order** — Agents save what worked as skills (procedures they read before similar work),
+  and you can write or import them (the SKILL.md format). The library shows how often each one is used; "Review
+  skills" (or a weekly review) suggests archiving the unused ones, merging duplicates and clearer "when to use it"
+  lines — nothing changes until you apply a suggestion, and archived skills can be restored.
 - **Tools from MCP servers** — connect an Agent to a remote MCP server (a URL, with no sign-in, a token, or
   OAuth: "Sign in" opens the server's own page in your browser) or run one on the Agent's own machine (a command such as
   `npx -y …`, with sealed environment values). Each tool the server lists can run on its own, ask you first, or be off;

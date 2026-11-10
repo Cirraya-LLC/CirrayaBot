@@ -29,7 +29,7 @@ jobs:
       - run: pip install pyyaml          # check-bots.py reads the seed definitions
       - name: Self-tests
         run: |
-          for f in model schedule skill approve sandbox memory autonomy tasks files markdown protocols i18n secrets voice effects templates teach triggers mcp history; do
+          for f in model schedule skill approve sandbox memory autonomy tasks files markdown protocols i18n secrets voice effects templates teach triggers mcp history skillreview; do
             echo "== $f"; node web/$f.mjs
           done
           python3 check-bots.py

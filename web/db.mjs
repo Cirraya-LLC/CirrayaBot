@@ -125,6 +125,23 @@ create table if not exists skills (
 );
 create unique index if not exists skills_name_idx on skills (lower(name));
 
+-- Skills in use (read_skill counts), and put away: an archived skill stays in the library but no agent sees it.
+alter table skills add column if not exists uses int not null default 0;
+alter table skills add column if not exists used_at timestamptz;
+alter table skills add column if not exists archived_at timestamptz;
+-- What a review suggests (web/skillreview.mjs): applied by a person or dismissed; a dismissed one is not suggested again.
+-- stamps = each skill's updated_at when suggested: a skill changed since makes the suggestion stale.
+create table if not exists skill_suggestions (
+  id          text primary key,
+  agent_id    text not null,
+  kind        text not null check (kind in ('merge', 'describe', 'archive')),
+  skills      text[] not null,
+  stamps      jsonb not null default '{}',
+  draft       jsonb,
+  why         jsonb not null default '{}',
+  status      text not null default 'open',
+  created_at  timestamptz not null default now()
+);
 -- What every model call cost. One row per call, so a turn that used tools leaves several.
 -- cost_micro is null when the upstream has no prices: "we don't know" and "it was free"
 -- are different answers, and a 0 here would quietly become a 0 on the bill.
@@ -477,6 +494,7 @@ export async function deleteAgent(id) {
   await q(`delete from routines where target_kind = 'agent' and target_id = $1`, [id])
   await deleteTriggers(`(scope = 'dm' and scope_id = $1) or agent_id = $1`, [id])
   await q(`update skills set agents = array_remove(agents, $1)`, [id])
+  await q('delete from skill_suggestions where agent_id = $1', [id])
   await q('delete from secrets where agent_id = $1', [id])
   await q('delete from mcp_servers where agent_id = $1', [id])
   await q('delete from front_runs where scope = $1 and scope_id = $2', ['dm', id])
@@ -801,8 +819,28 @@ export async function skillByName(name) {
 
 /** The skills installed on an Agent */
 export async function skillsFor(agentId) {
-  return (await q('select * from skills where $1 = any(agents) order by lower(name)', [agentId])).rows
+  return (await q('select * from skills where $1 = any(agents) and archived_at is null order by lower(name)', [agentId])).rows
 }
+
+/** read_skill handed this one out. */
+export const noteSkillUse = id => q('update skills set uses = uses + 1, used_at = now() where id = $1', [id])
+export const setSkillArchived = (id, on) =>
+  q(`update skills set archived_at = ${on ? 'coalesce(archived_at, now())' : 'null'}, updated_at = now() where id = $1`, [id])
+
+// ---------- skill suggestions (web/skillreview.mjs) ----------
+export const listSuggestions = async (status = 'open') =>
+  (await q('select * from skill_suggestions where status = $1 order by created_at, id', [status])).rows
+export const getSuggestion = async id => (await q('select * from skill_suggestions where id = $1', [id])).rows[0] ?? null
+export async function addSuggestion(x) {
+  await q(`insert into skill_suggestions (id, agent_id, kind, skills, stamps, draft, why) values ($1,$2,$3,$4,$5,$6,$7)`,
+    [x.id, x.agent_id, x.kind, x.skills, JSON.stringify(x.stamps ?? {}), x.draft == null ? null : JSON.stringify(x.draft), JSON.stringify(x.why ?? {})])
+}
+/** Every suggestion made for this agent before, open or dismissed: kind + its skills, so none is made twice. */
+export const suggestionsOf = async agentId =>
+  (await q(`select kind, skills from skill_suggestions where agent_id = $1`, [agentId])).rows
+export const dismissSuggestion = id => q(`update skill_suggestions set status = 'dismissed' where id = $1`, [id])
+/** Open suggestions about any of these skills: applying one makes the others stale. */
+export const dropSuggestionsAbout = ids => q(`delete from skill_suggestions where status = 'open' and skills && $1`, [ids])
 
 export async function saveSkill(k) {
   const { rows } = await q(`
@@ -816,6 +854,7 @@ export async function saveSkill(k) {
 
 export async function deleteSkill(id) {
   await q('delete from skills where id = $1', [id])
+  await q('delete from skill_suggestions where $1 = any(skills)', [id])
 }
 
 // ---------- routines ----------

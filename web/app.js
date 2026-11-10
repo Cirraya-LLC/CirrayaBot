@@ -2477,19 +2477,76 @@ async function loadSkills() {
 }
 // Source: human-written is unmarked; Agent-saved is marked, since skills change how they work later
 const skillSource = k => k.source?.startsWith('agent:') ? t('k.selfSaved', { name: bot(k.source.slice(6))?.name ?? k.source.slice(6) }) : ''
+const skillUse = k => k.uses ? t('k.used', { n: k.uses, when: when(new Date(k.used_at).getTime()) }) : t('k.never')
 function renderSkills() {
   const box = $('#klist'); box.innerHTML = ''
   if (!SKILLS.length) { box.innerHTML = `<div style="padding:10px 2px;color:var(--dim2);font-size:12.5px">${esc(t('k.empty'))}</div>`; return }
-  for (const k of SKILLS) {
+  const live = SKILLS.filter(k => !k.archived_at), gone = SKILLS.filter(k => k.archived_at)
+  const row = k => {
     const el = document.createElement('div')
-    el.className = 'pitem' + (kEditing?.id === k.id ? ' on' : '')
+    el.className = 'pitem' + (kEditing?.id === k.id ? ' on' : '') + (k.archived_at ? ' arch' : '')
     const who = listJoin(k.agents.map(id => bot(id)?.name ?? id)) || t('k.nobody')
     const src = skillSource(k)
     el.innerHTML = `<div class="pn"><b>${esc(k.name)}${src ? ` <span class="st" style="font-size:10.5px;font-weight:400;color:var(--dim)">· ${esc(src)}</span>` : ''}</b>
-      <small>${esc(k.description)} · ${esc(who)}</small></div>`
+      <small>${esc(k.description)} · ${esc(who)} · ${esc(skillUse(k))}</small></div>`
     el.onclick = () => fillSkill(k)
     box.appendChild(el)
   }
+  live.forEach(row)
+  if (gone.length) { const h = document.createElement('div'); h.className = 'khead'; h.textContent = t('k.archived'); box.appendChild(h); gone.forEach(row) }
+}
+
+// Suggestions from a review: applied by the person, or dismissed. Nothing changes before that.
+let SUGS = []
+const sugLabel = x => x.kind === 'merge' ? t('k.sug.merge', { n: x.skills.length }) : t(`k.sug.${x.kind}`)
+function renderSuggestions() {
+  const box = $('#ksug'); box.innerHTML = ''
+  for (const x of SUGS) {
+    const el = document.createElement('div'); el.className = 'ksg'
+    const names = listJoin(x.skills.map(k => t('common.quote', { s: k.name })))
+    el.innerHTML = `<b>${esc(sugLabel(x))}</b> <span class="st">${esc(x.agent_name)}</span><small>${esc(names)}</small>
+      ${x.why ? `<div class="why">${esc(x.why)}</div>` : ''}
+      ${x.kind === 'describe' ? `<q>${esc(x.draft?.description ?? '')}</q>` : ''}
+      ${x.kind === 'merge' ? `<details><summary>${esc(x.draft?.name ?? '')} — ${esc(x.draft?.description ?? '')}</summary><pre>${esc(x.draft?.body ?? '')}</pre></details>` : ''}
+      <div class="row"><button class="btn pri" data-a="apply">${esc(t('k.apply'))}</button><button class="btn" data-a="dismiss">${esc(t('k.dismiss'))}</button></div>`
+    el.querySelectorAll('button[data-a]').forEach(b => { b.onclick = () => answerSuggestion(x, b.dataset.a) })
+    box.appendChild(el)
+  }
+}
+async function answerSuggestion(x, action) {
+  const r = await fetch(api(`/api/skills/suggestions/${x.id}`), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action }) })
+  if (!r.ok) { alert(await errText(r)); await loadSuggestions(); return }
+  const j = await r.json()
+  SUGS = j.suggestions; SKILLS = j.skills
+  renderSuggestions()
+  fillSkill(kEditing ? SKILLS.find(k => k.id === kEditing.id) ?? null : null)
+}
+async function loadSuggestions() {
+  SUGS = await fetch(api('/api/skills/suggestions')).then(r => r.ok ? r.json() : []).catch(() => [])
+  renderSuggestions()
+}
+$('#krev').onclick = async () => {
+  const agent = $('#krevagent').value; if (!agent) return
+  $('#krev').disabled = true; $('#krevmsg').textContent = t('k.reviewing', { name: bot(agent)?.name ?? '' })
+  const r = await fetch(api('/api/skills/review'), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ agent }) }).catch(() => null)
+  $('#krev').disabled = false
+  if (!r?.ok) { $('#krevmsg').textContent = r ? await errText(r) : t('df.failed'); return }
+  const j = await r.json()
+  SUGS = j.suggestions; renderSuggestions()
+  $('#krevmsg').textContent = (j.added ? t('k.reviewed', { n: j.added }) : t('k.reviewedNone')) + (j.problem ? ' ' + t('k.reviewProblem', { why: j.problem }) : '')
+}
+$('#kweekly').onchange = async () => {
+  await fetch(api('/api/settings/skills'), { method: 'PUT', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ review_weekly: $('#kweekly').checked }) })
+}
+$('#karch').onclick = async () => {
+  if (!kEditing) return
+  const r = await fetch(api(`/api/skills/${kEditing.id}/archive`), { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ archived: !kEditing.archived_at }) })
+  if (!r.ok) { alert(await errText(r)); return }
+  await loadSkills(); await loadSuggestions(); fillSkill(SKILLS.find(k => k.id === kEditing.id) ?? null)
 }
 function fillSkill(k, preselect = []) {
   kEditing = k
@@ -2500,8 +2557,9 @@ function fillSkill(k, preselect = []) {
   const on = new Set(k?.agents ?? preselect)
   $('#kagents').innerHTML = BOTS.map(b => `<label><input type="checkbox" value="${esc(b.id)}" ${on.has(b.id) ? 'checked' : ''}>${esc(b.name)}</label>`).join('')
   const src = k && skillSource(k)
-  $('#ksrc').textContent = src ? t('k.srcNote', { src }) : ''
-  $('#kdel').style.display = $('#kexp').style.display = k ? '' : 'none'
+  $('#ksrc').textContent = [src ? t('k.srcNote', { src }) : '', k?.archived_at ? t('k.archivedNote') : ''].filter(Boolean).join(' ')
+  $('#kdel').style.display = $('#kexp').style.display = $('#karch').style.display = k ? '' : 'none'
+  $('#karch').textContent = t(k?.archived_at ? 'k.restore' : 'k.archive')
   renderSkills()
 }
 // ── Teaching by demonstration: record what the person does in the agent's browser, then its model drafts a skill ──
@@ -2573,7 +2631,13 @@ $('#teachgo').onclick = async () => {
 async function openSkills(k = null, preselect = []) {
   await loadSkills()
   fillSkill(k ? SKILLS.find(x => x.id === k.id) ?? null : null, preselect)
+  const prev = $('#krevagent').value
+  $('#krevagent').innerHTML = BOTS.map(b => `<option value="${esc(b.id)}">${esc(b.name)}</option>`).join('')
+  $('#krevagent').value = BOTS.some(b => b.id === prev) ? prev : cur?.kind === 'agent' ? cur.id : BOTS[0]?.id ?? ''
+  $('#krevmsg').textContent = ''
   $('#kdlg').showModal()
+  loadSuggestions()
+  fetch(api('/api/settings/skills')).then(r => r.json()).then(j => { $('#kweekly').checked = !!j.review_weekly }).catch(() => {})
 }
 const skillBody = () => ({ name: $('#kname').value.trim(), description: $('#kdesc').value.trim(), body: $('#kbody').value,
   agents: [...document.querySelectorAll('#kagents input:checked')].map(i => i.value) })

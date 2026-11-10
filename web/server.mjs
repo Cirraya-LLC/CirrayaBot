@@ -39,6 +39,7 @@ import { checkServer as checkMcp, checkEnv as checkMcpEnv, isMcp, mergeTools, sp
   StdioClient, McpError, MAX_TOOLS as MCP_MAX_TOOLS, parseWwwAuthenticate, resourceMetadataUrls, authServerMetadataUrls, endpointsOf,
   pkce, authorizeUrl, resourceOf, tokensFrom } from './mcp.mjs'
 import { termsOf, hitsText, aroundText, LIMITS as HISTORY } from './history.mjs'
+import { REVIEW_SYSTEM, reviewPrompt, parseReview, unusedSuggestions, signature as suggestionKey } from './skillreview.mjs'
 import { checkTrigger, verify as verifyHook, deliveryId, matches as hookMatches, summarize as hookSummary, briefFor } from './triggers.mjs'
 
 const WEB = join(ROOT, 'web')
@@ -2055,6 +2056,7 @@ async function runToolRaw(name, args, ctx) {
   if (name === 'read_skill') {
     const mine = await db.skillsFor(ctx.bot.id)
     const k = mine.find(x => x.name.toLowerCase() === String(args.name ?? '').trim().toLowerCase())
+    if (k) db.noteSkillUse(k.id).catch(e => console.warn(`[skills] use of ${k.name} not counted: ${e.message}`))
     return k ? `# ${k.name}\nWhen to use: ${k.description}\n\n${k.body}`
       : `You have no skill named "${args.name}". Installed for you: ${mine.map(x => x.name).join(', ') || '(none)'}`
   }
@@ -2345,6 +2347,7 @@ async function saveSkillFromAgent(bot, args) {
     return `There is already a skill named "${cur.name}" that you didn't write, so you can't change it. Pick another name, or ask the user to edit it in the skill library.`
   await db.saveSkill({ id: cur?.id ?? 'k' + Date.now().toString(36), ...k, source,
     agents: [...new Set([...(cur?.agents ?? []), bot.id])] })
+  if (cur?.archived_at) await db.setSkillArchived(cur.id, false)     // saving it again = it wants it back
   return `${cur ? 'Updated' : 'Saved'} the skill "${k.name}", installed only for you. Next time you get a "${k.description}" kind of task, read_skill first, then do it.`
 }
 
@@ -3419,6 +3422,7 @@ async function installSkills(agentId, skills) {
     const same = await db.skillByName(k.name)
     if (same && same.body.trim() === k.body.trim()) {
       if (!same.agents.includes(agentId)) await db.saveSkill({ ...same, agents: [...same.agents, agentId] })
+      if (same.archived_at) await db.setSkillArchived(same.id, false)
       continue
     }
     let name = k.name
@@ -3466,6 +3470,89 @@ async function tidyNightly() {
   }
 }
 setInterval(() => tidyNightly().catch(e => console.warn(`[memory] ${e.message}`)), 10 * 60_000).unref()
+
+// ---------- Keeping skills in order (web/skillreview.mjs) ----------
+// A review suggests; a person applies. Rules find the unused ones, the agent's light model the duplicates, the unclear
+// "when to use it" lines and the obsolete ones — one bare call, counted and capped like any other.
+async function reviewSkills(bot, lang = 'en') {
+  const skills = await db.skillsFor(bot.id)
+  const found = unusedSuggestions(skills)
+  let problem = null
+  if (skills.length >= 2) {
+    try {
+      const { p } = await taskModel(bot, {})
+      await checkCap(bot, p)
+      const r = await callModel(p, [{ role: 'system', content: REVIEW_SYSTEM }, { role: 'user', content: reviewPrompt(skills) }],
+        () => {}, { bare: true })
+      noteUsage({ bot }, p, r.usage)
+      found.push(...parseReview(r.content, skills))
+    } catch (e) {
+      if (e.capped) throw e
+      problem = errorText(e, lang)              // the rules' suggestions still count
+    }
+  }
+  const seen = new Set((await db.suggestionsOf(bot.id)).map(suggestionKey))
+  let added = 0
+  for (const x of found) {
+    const key = suggestionKey(x)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const stamps = Object.fromEntries(x.skills.map(id => [id, +new Date(skills.find(k => k.id === id).updated_at)]))
+    await db.addSuggestion({ id: 'sg' + randomBytes(6).toString('base64url'), agent_id: bot.id, ...x, stamps })
+    added++
+  }
+  await db.setSetting(`skills.reviewed:${bot.id}`, Date.now())
+  return { added, problem }
+}
+
+/** Apply one suggestion, as the person's own edit. `draft` = their changes to what was suggested (merge / describe). */
+async function applySuggestion(x, draft) {
+  const now = []
+  for (const id of x.skills) {
+    const k = await db.getSkill(id)
+    if (!k || k.archived_at || +new Date(k.updated_at) !== Number(x.stamps?.[id])) throw new Say('skills.stale', {}, 409)
+    now.push(k)
+  }
+  if (x.kind === 'archive') await db.setSkillArchived(x.skills[0], true)
+  if (x.kind === 'describe') {
+    const k = now[0]
+    const d = checkSkill({ name: k.name, description: draft?.description ?? x.draft?.description, body: k.body })
+    await db.saveSkill({ ...k, description: d.description, source: 'human' })
+  }
+  if (x.kind === 'merge') {
+    const d = checkSkill({ ...x.draft, ...draft ?? {} })
+    // The merged skill takes the place of the one whose name it keeps (else the first); the rest are archived.
+    const keep = now.find(k => k.name.toLowerCase() === d.name.toLowerCase()) ?? now[0]
+    const taken = await db.skillByName(d.name)
+    if (taken && !x.skills.includes(taken.id)) throw new Say('skills.nameTaken', { name: d.name }, 409)
+    await db.saveSkill({ ...keep, ...d, agents: [...new Set(now.flatMap(k => k.agents))], source: 'human' })
+    for (const k of now) if (k.id !== keep.id) await db.setSkillArchived(k.id, true)
+  }
+  await db.dropSuggestionsAbout(x.skills)
+}
+
+async function suggestionsView(lang) {
+  const [rows, skills, bots] = [await db.listSuggestions(), await db.listSkills(), await loadBots()]
+  return rows.map(x => ({
+    id: x.id, kind: x.kind, agent_id: x.agent_id, agent_name: bots.find(b => b.id === x.agent_id)?.name ?? x.agent_id,
+    skills: x.skills.map(id => ({ id, name: skills.find(k => k.id === id)?.name ?? id })), draft: x.draft,
+    why: x.why?.code === 'unused' ? tr(lang, x.why.used ? 'skills.why.unused' : 'skills.why.never', { days: x.why.days }) : x.why?.text ?? '',
+    created_at: +new Date(x.created_at),
+  }))
+}
+
+/** Weekly, when the platform setting says so: each agent with skills, at most once in 7 days, in the 03:00 hour. */
+const skillSettings = async () => ({ review_weekly: (await db.getSetting('skills', null))?.review_weekly === true })
+async function reviewWeekly() {
+  if (!(await skillSettings()).review_weekly || new Date().getHours() !== 3) return
+  for (const bot of await loadBots()) {
+    const last = Number(await db.getSetting(`skills.reviewed:${bot.id}`, 0))
+    if (Date.now() - last < 7 * 86_400_000 || !(await db.skillsFor(bot.id)).length) continue
+    await reviewSkills(bot).then(r => r.added && console.log(`[skills] ${r.added} suggestion(s) for ${bot.name}'s skills`))
+      .catch(e => console.warn(`[skills] could not review ${bot.name}'s skills: ${errorText(e, 'en')}`))
+  }
+}
+setInterval(() => reviewWeekly().catch(e => console.warn(`[skills] ${e.message}`)), 10 * 60_000).unref()
 
 const MAX_FALLBACKS = 3
 // How long to wait before each try of one model call. MODEL_RETRY_WAITS exists for the tests, which
@@ -4082,6 +4169,37 @@ const server = createServer(async (req, res) => {
       const md = parseSkillMd(str(b.text))
       const row = await checkSkillBody({ ...md, name: md.name || b.name, agents: b.agents ?? [] })
       return send(200, await db.saveSkill({ id: 'k' + Date.now().toString(36), ...row, source: 'human' }))
+    }
+    // ---- Keeping skills in order ----
+    if (url.pathname === '/api/skills/suggestions' && req.method === 'GET') return send(200, await suggestionsView(lang))
+    if (url.pathname === '/api/skills/review' && req.method === 'POST') {
+      const bot = await db.getAgent(str((await readBody(req)).agent))
+      if (!bot) return send(404, { error: t('err.noAgent') })
+      const r = await reviewSkills(bot, lang)
+      return send(200, { ...r, suggestions: await suggestionsView(lang) })
+    }
+    const sgm = url.pathname.match(/^\/api\/skills\/suggestions\/([\w-]+)$/)
+    if (sgm && req.method === 'POST') {
+      const x = await db.getSuggestion(sgm[1])
+      if (!x || x.status !== 'open') return send(404, { error: t('skills.noSuggestion') })
+      const b = await readBody(req)
+      if (b.action === 'dismiss') await db.dismissSuggestion(x.id)
+      else if (b.action === 'apply') await applySuggestion(x, b.draft && typeof b.draft === 'object' ? b.draft : null)
+      else return send(400, { error: t('skills.noSuggestion') })
+      return send(200, { suggestions: await suggestionsView(lang), skills: await db.listSkills() })
+    }
+    const kam = url.pathname.match(/^\/api\/skills\/([\w-]+)\/archive$/)
+    if (kam && req.method === 'POST') {
+      if (!await db.getSkill(kam[1])) return send(404, { error: t('err.noSkill') })
+      const on = (await readBody(req)).archived !== false
+      await db.setSkillArchived(kam[1], on)
+      if (on) await db.dropSuggestionsAbout([kam[1]])
+      return send(200, await db.getSkill(kam[1]))
+    }
+    if (url.pathname === '/api/settings/skills' && req.method === 'GET') return send(200, await skillSettings())
+    if (url.pathname === '/api/settings/skills' && req.method === 'PUT') {
+      await db.setSetting('skills', { review_weekly: (await readBody(req)).review_weekly === true })
+      return send(200, await skillSettings())
     }
     const km = url.pathname.match(/^\/api\/skills\/([\w-]+)(\/export)?$/)
     if (km) {

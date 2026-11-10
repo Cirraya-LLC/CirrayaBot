@@ -43,6 +43,10 @@ class _SkillsPageState extends State<SkillsPage> {
   final Set<String> _agents = {};
   String _hint = '';
   Color _hintColor = C.dim;
+  List<SkillSuggestion> _suggestions = const [];
+  late String? _reviewFor = widget.preselect.firstOrNull ?? widget.agents.firstOrNull?.id;
+  bool _weekly = false, _reviewing = false;
+  String _reviewNote = '';
 
   static const _mdType = XTypeGroup(label: 'Markdown', extensions: ['md', 'markdown', 'txt']);
 
@@ -72,6 +76,12 @@ class _SkillsPageState extends State<SkillsPage> {
   Future<void> _load({String? select}) async {
     widget.api.templates().then((t) {
       if (mounted) setState(() => _templates = t.skills);
+    }, onError: (_) {});
+    widget.api.skillSuggestions().then((x) {
+      if (mounted) setState(() => _suggestions = x);
+    }, onError: (_) {});
+    widget.api.skillReviewWeekly().then((on) {
+      if (mounted) setState(() => _weekly = on);
     }, onError: (_) {});
     try {
       _rows = await widget.api.skills();
@@ -106,7 +116,10 @@ class _SkillsPageState extends State<SkillsPage> {
     _agents
       ..clear()
       ..addAll(k?.agents ?? widget.preselect);
-    _hint = k?.savedBy != null ? tr('skills.savedByHint', {'name': _agentName(k!.savedBy!)}) : '';
+    _hint = [
+      if (k?.savedBy != null) tr('skills.savedByHint', {'name': _agentName(k!.savedBy!)}),
+      if (k?.archived ?? false) tr('skills.archivedNote'),
+    ].join(' ');
     _hintColor = C.dim;
     if (mounted) setState(() {});
   }
@@ -171,6 +184,39 @@ class _SkillsPageState extends State<SkillsPage> {
     });
   }
 
+  Future<void> _review() async {
+    final agent = _reviewFor;
+    if (agent == null || _reviewing) return;
+    setState(() {
+      _reviewing = true;
+      _reviewNote = tr('skills.reviewing', {'name': _agentName(agent)});
+    });
+    try {
+      final r = await widget.api.reviewSkills(agent);
+      _suggestions = r.suggestions;
+      _reviewNote = (r.added > 0 ? tr('skills.reviewed', {'n': '${r.added}'}) : tr('skills.reviewedNone')) +
+          (r.problem.isNotEmpty ? ' ${tr('skills.reviewProblem', {'why': r.problem})}' : '');
+    } on ApiException catch (e) {
+      _reviewNote = e.message;
+    } finally {
+      if (mounted) setState(() => _reviewing = false);
+    }
+  }
+
+  Future<void> _answer(SkillSuggestion x, String action) => _act('', () async {
+    final r = await widget.api.answerSuggestion(x.id, action);
+    _suggestions = r.suggestions;
+    _rows = r.skills;
+    final keep = _editing == null ? null : _rows.where((k) => k.id == _editing!.id).firstOrNull;
+    _fill(keep);
+  });
+
+  Future<void> _archive() => _act('', () async {
+    final k = _editing!;
+    await widget.api.archiveSkill(k.id, !k.archived);
+    await _load(select: k.id);
+  });
+
   Future<void> _export() => _act(tr('skills.exporting'), () async {
     final k = _editing!;
     final text = await widget.api.exportSkill(k.id);
@@ -234,13 +280,28 @@ class _SkillsPageState extends State<SkillsPage> {
                         tr('skills.intro'),
                         style: TextStyle(fontSize: 12, color: C.dim, height: 1.6),
                       ),
+                      const SizedBox(height: 10),
+                      _reviewRow(),
+                      if (_reviewNote.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(_reviewNote, key: const ValueKey('skills-review-note'), style: TextStyle(fontSize: 11.5, color: C.dim)),
+                        ),
+                      for (final x in _suggestions) _suggestion(x),
                       const SizedBox(height: 12),
                       if (_rows.isEmpty)
                         Padding(
                           padding: const EdgeInsets.symmetric(vertical: 8),
                           child: Text(tr('skills.none'), style: TextStyle(fontSize: 12.5, color: C.dim2)),
                         ),
-                      for (final k in _rows) _row(k),
+                      for (final k in _rows.where((k) => !k.archived)) _row(k),
+                      if (_rows.any((k) => k.archived)) ...[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                          child: Text(tr('skills.archived'), style: TextStyle(fontSize: 11.5, color: C.dim2)),
+                        ),
+                        for (final k in _rows.where((k) => k.archived)) Opacity(opacity: 0.6, child: _row(k)),
+                      ],
                       const SizedBox(height: 16),
                       const Divider(height: 1),
                       const SizedBox(height: 16),
@@ -294,6 +355,11 @@ class _SkillsPageState extends State<SkillsPage> {
                               style: TextButton.styleFrom(foregroundColor: C.code),
                               child: Text(tr('common.delete')),
                             ),
+                            TextButton(
+                              key: const ValueKey('skill-archive'),
+                              onPressed: _busy ? null : _archive,
+                              child: Text(tr(_editing!.archived ? 'skills.restore' : 'skills.archive')),
+                            ),
                             TextButton(onPressed: _busy ? null : _export, child: Text(tr('common.export'))),
                           ],
                           TextButton(onPressed: _busy ? null : _import, child: Text(tr('skills.importMd'))),
@@ -339,13 +405,104 @@ class _SkillsPageState extends State<SkillsPage> {
               ),
             ),
             Text(
-              '${k.description} · $who',
+              '${k.description} · $who · ${k.uses > 0 ? tr('skills.used', {'n': '${k.uses}', 'when': _ago(k.usedAt)}) : tr('skills.never')}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(fontSize: 11.5, color: C.dim),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  static String _ago(DateTime? t) {
+    if (t == null) return '';
+    final d = DateTime.now().difference(t);
+    return d.inDays >= 1 ? tr('skills.daysAgo', {'n': '${d.inDays}'}) : d.inHours >= 1 ? tr('skills.hoursAgo', {'n': '${d.inHours}'}) : tr('skills.justNow');
+  }
+
+  Widget _reviewRow() => Wrap(
+    spacing: 8,
+    runSpacing: 6,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      DropdownButton<String>(
+        key: const ValueKey('skills-review-agent'),
+        value: widget.agents.any((a) => a.id == _reviewFor) ? _reviewFor : null,
+        hint: Text(tr('skills.reviewFor'), style: const TextStyle(fontSize: 12.5)),
+        isDense: true,
+        style: TextStyle(fontSize: 12.5, color: C.ink),
+        items: [for (final a in widget.agents) DropdownMenuItem(value: a.id, child: Text(a.name))],
+        onChanged: (v) => setState(() => _reviewFor = v),
+      ),
+      OutlinedButton(
+        key: const ValueKey('skills-review'),
+        onPressed: _reviewing || _reviewFor == null ? null : _review,
+        child: Text(tr('skills.review'), style: const TextStyle(fontSize: 12.5)),
+      ),
+      Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Checkbox(
+            key: const ValueKey('skills-weekly'),
+            value: _weekly,
+            onChanged: (v) async {
+              setState(() => _weekly = v ?? false);
+              try {
+                await widget.api.setSkillReviewWeekly(_weekly);
+              } on ApiException catch (e) {
+                _say(e.message, bad: true);
+              }
+            },
+          ),
+          Text(tr('skills.weekly'), style: TextStyle(fontSize: 12.5, color: C.dim)),
+        ],
+      ),
+    ],
+  );
+
+  Widget _suggestion(SkillSuggestion x) {
+    final small = TextStyle(fontSize: 11.5, color: C.dim2);
+    final title = x.kind == 'merge' ? tr('skills.sug.merge', {'n': '${x.skills.length}'}) : tr('skills.sug.${x.kind}');
+    return Container(
+      key: ValueKey('suggestion-${x.id}'),
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
+      decoration: BoxDecoration(border: Border.all(color: C.line), borderRadius: BorderRadius.circular(10)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text.rich(TextSpan(children: [
+            TextSpan(text: title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            TextSpan(text: '  ${x.agentName}', style: TextStyle(fontSize: 11.5, color: C.dim)),
+          ])),
+          Text(x.skills.map((n) => '"$n"').join(tr('skills.listSep')), style: small),
+          if (x.why.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(x.why, style: TextStyle(fontSize: 12.5, color: C.dim))),
+          if (x.kind == 'describe' && x.draftDescription.isNotEmpty)
+            Padding(padding: const EdgeInsets.only(top: 4), child: Text('"${x.draftDescription}"', style: const TextStyle(fontSize: 12.5))),
+          if (x.kind == 'merge')
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              dense: true,
+              title: Text('${x.draftName} — ${x.draftDescription}', style: TextStyle(fontSize: 12.5, color: C.dim)),
+              children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SelectableText(x.draftBody,
+                      style: TextStyle(fontFamily: AppTheme.mono, fontFamilyFallback: AppTheme.monoFallback, fontSize: 12)),
+                ),
+              ],
+            ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            children: [
+              FilledButton(onPressed: _busy ? null : () => _answer(x, 'apply'), child: Text(tr('skills.apply'))),
+              TextButton(onPressed: _busy ? null : () => _answer(x, 'dismiss'), child: Text(tr('skills.dismiss'))),
+            ],
+          ),
+        ],
       ),
     );
   }

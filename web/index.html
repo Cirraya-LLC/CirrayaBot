@@ -668,6 +668,18 @@
   .pitem:hover{background:var(--raise)}
   .pitem.on{border-color:var(--accent);background:var(--tint)}
   .pitem .pn{flex:1;min-width:0}
+  .krev{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 2px} .krev select{width:auto;margin:0;flex:0 1 180px}
+  .krev .pick{margin:0}
+  #ksug:not(:empty){margin:6px 0 10px;display:flex;flex-direction:column;gap:8px;max-height:34vh;overflow-y:auto}
+  .ksg{border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-size:13px}
+  .ksg small{display:block;color:var(--dim2);font-size:11.5px;margin-top:2px}
+  .ksg .st{font-size:10.5px;padding:1px 6px;border-radius:5px;background:var(--on);color:var(--dim);margin-left:4px}
+  .ksg .why{color:var(--dim);margin-top:4px} .ksg q{display:block;margin-top:4px}
+  .ksg details{margin-top:4px} .ksg summary{cursor:pointer;color:var(--dim)}
+  .ksg pre{white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,monospace;max-height:160px;overflow:auto;margin:6px 0 0;
+    background:var(--field);padding:8px;border-radius:8px}
+  .ksg .row{display:flex;gap:8px;margin-top:8px}
+  .pitem.arch{opacity:.6} .khead{font-size:11.5px;color:var(--dim2);padding:8px 10px 2px}
   .pitem b{display:block;font-size:13.5px;font-weight:600}
   .pitem small{display:block;color:var(--dim);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pitem .dot{width:8px;height:8px;border-radius:50%;background:var(--chip2);flex:none}
@@ -842,6 +854,11 @@
 <dialog id="kdlg" style="width:640px">
   <h4 data-i18n="side.skills"></h4>
   <small class="rhint" data-i18n="k.intro"></small>
+  <div class="krev"><select id="krevagent" data-i18n-title="k.reviewFor"></select>
+    <button class="btn" id="krev" data-i18n="k.review"></button>
+    <label class="pick"><input type="checkbox" id="kweekly"> <span data-i18n="k.weekly"></span></label></div>
+  <small class="rhint" id="krevmsg"></small>
+  <div id="ksug"></div>
   <div id="klist"></div>
   <div class="psplit"></div>
   <h4 id="ktitle" style="margin-bottom:10px" data-i18n="k.write"></h4>
@@ -852,7 +869,8 @@
   <div class="wd" id="kagents"></div>
   <small class="rhint" id="ksrc"></small>
   <div class="acts">
-    <button class="btn" style="margin-right:auto;color:var(--bad)" id="kdel" data-i18n="common.delete"></button>
+    <button class="btn" style="color:var(--bad)" id="kdel" data-i18n="common.delete"></button>
+    <button class="btn" style="margin-right:auto" id="karch"></button>
     <button class="btn" id="kexp" data-i18n="common.export"></button>
     <button class="btn" id="kimp" data-i18n="k.importMd"></button>
     <input type="file" id="kfile" accept=".md,text/markdown,text/plain" hidden>

@@ -668,10 +668,20 @@ class Skill {
     required this.body,
     required this.agents,
     required this.source,
+    this.uses = 0,
+    this.usedAt,
+    this.archived = false,
   });
 
   final String id;
   final String name;
+
+  /// How often an agent read it (read_skill), and when last.
+  final int uses;
+  final DateTime? usedAt;
+
+  /// Archived: kept in the library, seen by no agent until restored.
+  final bool archived;
 
   /// When to use it — the only thing an Agent sees until he decides to read it.
   final String description;
@@ -692,7 +702,49 @@ class Skill {
     body: (j['body'] as String?) ?? '',
     agents: [for (final a in (j['agents'] as List?) ?? const []) if (a is String) a],
     source: (j['source'] as String?) ?? 'human',
+    uses: (j['uses'] as num?)?.toInt() ?? 0,
+    usedAt: j['used_at'] is String ? DateTime.tryParse(j['used_at'] as String)?.toLocal() : null,
+    archived: j['archived_at'] != null,
   );
+}
+
+/// What a review of an agent's skills suggests (`merge` / `describe` / `archive`). Nothing changes until it is applied.
+class SkillSuggestion {
+  const SkillSuggestion({
+    required this.id,
+    required this.kind,
+    required this.agentName,
+    required this.skills,
+    required this.why,
+    this.draftName = '',
+    this.draftDescription = '',
+    this.draftBody = '',
+  });
+
+  final String id;
+  final String kind;
+  final String agentName;
+
+  /// The skills it is about, by name.
+  final List<String> skills;
+  final String why;
+  final String draftName;
+  final String draftDescription;
+  final String draftBody;
+
+  static SkillSuggestion fromJson(Map<String, Object?> j) {
+    final d = (j['draft'] as Map?)?.cast<String, Object?>() ?? const {};
+    return SkillSuggestion(
+      id: (j['id'] as String?) ?? '',
+      kind: (j['kind'] as String?) ?? 'archive',
+      agentName: (j['agent_name'] as String?) ?? '',
+      skills: [for (final k in (j['skills'] as List?) ?? const []) if (k is Map) '${k['name'] ?? ''}'],
+      why: (j['why'] as String?) ?? '',
+      draftName: (d['name'] as String?) ?? '',
+      draftDescription: (d['description'] as String?) ?? '',
+      draftBody: (d['body'] as String?) ?? '',
+    );
+  }
 }
 
 /// A scheduled task: at its time the server posts [prompt] into the target
@@ -1570,6 +1622,32 @@ class Api {
   );
 
   Future<void> deleteSkill(String id) => _json('DELETE', '/api/skills/$id');
+
+  Future<List<SkillSuggestion>> skillSuggestions() async =>
+      (await _list('/api/skills/suggestions')).map((e) => SkillSuggestion.fromJson(e as Map<String, Object?>)).toList();
+
+  /// Review an agent's skills: new suggestions (rules + its light model), and why the model couldn't if it couldn't.
+  Future<({int added, String problem, List<SkillSuggestion> suggestions})> reviewSkills(String agentId) async {
+    final j = await _map('POST', '/api/skills/review', {'agent': agentId});
+    return (
+      added: (j['added'] as num?)?.toInt() ?? 0,
+      problem: (j['problem'] as String?) ?? '',
+      suggestions: [for (final e in (j['suggestions'] as List?) ?? const []) SkillSuggestion.fromJson((e as Map).cast<String, Object?>())],
+    );
+  }
+
+  /// `apply` or `dismiss`; what is left to suggest, and the library afterwards.
+  Future<({List<SkillSuggestion> suggestions, List<Skill> skills})> answerSuggestion(String id, String action) async {
+    final j = await _map('POST', '/api/skills/suggestions/$id', {'action': action});
+    return (
+      suggestions: [for (final e in (j['suggestions'] as List?) ?? const []) SkillSuggestion.fromJson((e as Map).cast<String, Object?>())],
+      skills: [for (final e in (j['skills'] as List?) ?? const []) Skill.fromJson((e as Map).cast<String, Object?>())],
+    );
+  }
+
+  Future<void> archiveSkill(String id, bool archived) => _json('POST', '/api/skills/$id/archive', {'archived': archived});
+  Future<bool> skillReviewWeekly() async => (await _map('GET', '/api/settings/skills'))['review_weekly'] == true;
+  Future<void> setSkillReviewWeekly(bool on) => _json('PUT', '/api/settings/skills', {'review_weekly': on});
 
   /// The skill as a SKILL.md file.
   Future<String> exportSkill(String id) async {
