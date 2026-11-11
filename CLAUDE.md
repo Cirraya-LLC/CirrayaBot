@@ -3150,6 +3150,12 @@ main / light tiers with failover channels — that stays optional (「auto model
 Not done: a model reviewing risky actions (「不做」). Order: isolation + desktop (2.41, 2.42) → auto model (2.43) →
 triggers (2.44) → MCP (2.45).
 
+**Telegram, considered and dropped (2026-11-11).** The boss asked for a Telegram bot to talk to and manage CirrayaBot
+(「我觉得我们还是要支持一下telegram bot的调用」); after the design (one bot per deployment, pairing, private chats only,
+approvals as buttons, secrets never through Telegram) he decided against it: 「算了算了 还是不用telegram了 还是很不安全的」 —
+a public bot in front of agents that can run commands, and messages through Telegram's servers. **Chat channels stay
+out, Telegram included**; don't propose one again without the boss bringing it up.
+
 Same day: 「客户端倒是不急 当前就desktop和android就够了」 (no iOS, desktop notifications or packaging for now — packaging
 done 2026-11-11 on 「按照你的推荐来」, 2.49) and
 **「我们只允许自己添加上游 不内置 也不预设AImodel」** — the person adds every upstream; the product ships no
