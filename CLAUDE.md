@@ -2374,6 +2374,10 @@ output masked; validation; tasks get no request_secret. `app/test/secret_test.da
   directory), up again; without `--yes` it only explains. `./start.sh upgrade` → backup, `git pull --ff-only`,
   redeploy (refuses outside a git checkout). Verified on the test box: backup, a marker agent and file added,
   restore → both gone, the four original agents back.
+  ⚠️ **Restoring onto a new machine failed at first** (2026-11-11): the database container had just been made and
+  `pg_restore` ran before PostgreSQL listened ("No such file or directory" on its socket). On the box the database had
+  always been running. `restore` now waits up to a minute for `pg_isready`; checked by moving the old box's data onto a
+  new one (7 agents back), which was then wiped — the new test box started fresh.
 - ⚠️ **CI found a crash the Mac never showed**: `cliRun` wrote to the stdin of a docker command that had already
   exited (inspect, a container that's gone) → EPIPE → an unhandled 'error' event → **the server process died**.
   `p.stdin.on('error', () => {})` in `cliRun` and `execStream`. Timing-dependent: green locally, red on Linux.
