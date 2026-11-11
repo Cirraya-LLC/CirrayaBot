@@ -3086,13 +3086,21 @@ From the comparison (2.6.3: both peers ship installable apps), the boss: 「按�
   Flutter's own android/.gitignore) or `ANDROID_KEYSTORE` / `_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`;
   in CI from the secrets `ANDROID_KEYSTORE_BASE64` + the three passwords. Without one: the debug key, a CI warning,
   and the release notes say to uninstall before updating. ⚠️ **A CI debug key is new on every runner**, so two such
-  builds can't be installed over each other — a real keystore is needed before handing APKs to anyone. **None is set
-  up yet** (it is the boss's to create and keep: lose it and every install must be removed and redone).
+  builds can't be installed over each other — a real keystore is needed before handing APKs to anyone.
+  **Set up 2026-11-11** (the boss: 「全部帮我做」): RSA 4096, alias `cirrayabot`, `CN=CirrayaBot, O=Cirraya`, valid to
+  2056, certificate SHA-256 `62:C6:0F:36:…:7F:65:E6`; the `.jks` and its `key.properties` (random password, the same
+  for store and key — PKCS12) live **only** in `/Users/derrity/Main/Cirraya/keys/cirrayabot-android/` on the boss's
+  Mac (outside every repo, 700/600) and in the four repository secrets. **Lose both and every install must be removed
+  and redone** — the boss was asked to keep a second copy. Locally: copy that `key.properties` to
+  `app/android/key.properties` (git-ignored) to sign a release build the same way.
+- **v0.1.0 published** (2026-11-11, the boss: 「ok」): https://github.com/Cirraya-LLC/CirrayaBot/releases/tag/v0.1.0 — six
+  packages + `SHA256SUMS.txt`; the arm64 APK checked after publishing: checksum OK, signed by the key above,
+  versionCode 2002 (split-per-abi adds 1000 × ABI to the run number; later releases' run numbers keep it rising).
 - Verified: locally, an APK signed with a throwaway keystore (`CN=CirrayaBot test`) and one without (`Android Debug`),
   `apksigner` on both; `flutter build macos --release` on the boss's Mac (Xcode 27.2) — **the first time the macOS app
   was ever compiled**; the workflow run by hand: all four jobs green, packages downloaded and opened (the .app, the
   .exe with its DLLs, the Linux binary, APKs debug-signed). **Not verified**: launching the macOS / Windows / Linux
-  builds; a tagged release (none made — publishing is the boss's call).
+  builds; installing the v0.1.0 APK on a phone.
 
 ## 3. What runs now
 
