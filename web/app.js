@@ -344,9 +344,14 @@ async function drawHistory(c, ticket) {
       finishTool(el, e.output)
     // 'User' is the speaker the server stores for the person in group logs (data, not UI text)
     } else if (c.kind === 'group') {
-      (el = bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, e.role === 'user' || e.speaker === 'User')).innerHTML = fmt(e.text)
+      const mine = e.role === 'user' || e.speaker === 'User'
+      ;(el = bubble(BOTS.find(b => b.name === e.speaker)?.id ?? null, mine)).innerHTML = mine ? fmt(e.text) : agentHtml(e.text)
       addAtts(el, e.files)
-    } else { (el = bubble(c.id, e.role === 'user')).innerHTML = fmt(e.content); addAtts(el, e.files) }
+    } else {
+      const mine = e.role === 'user'
+      ;(el = bubble(c.id, mine)).innerHTML = mine ? fmt(e.content) : agentHtml(e.content)
+      addAtts(el, e.files)
+    }
     // Which model wrote it: auto mode moves between the light and the main one, and this is where that shows.
     if (e.role === 'assistant' && e.model) el.closest('.mwrap')?.insertAdjacentHTML('beforeend',
       `<small class="mmodel">${esc(t('msg.model', { model: e.model }))}</small>`)
@@ -598,18 +603,37 @@ function renderMembers(c) {
 $('#htoggle').onclick = () => $('#side2').classList.toggle('hide')
 
 // ═══ Messages ═══
-// Highlight identifiers, and turn @name into a pill with the avatar
+// What the person typed is shown as typed: identifiers highlighted, @name as a pill with the avatar
 function fmt(text) {
   let h = esc(text)
   // Fenced blocks first, otherwise later rules would chew their contents
   h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, cl, body) =>
     `<pre class="cb">${cl ? `<b>${cl}</b>` : ''}${body.replace(/\n$/, '')}</pre>`)
   h = h.replace(/`([^`\n]{1,80})`/g, (_, c) => `<code>${c}</code>`)
-  for (const b of [...BOTS].sort((x, y) => y.name.length - x.name.length)) {
-    const re = new RegExp(`@\\s*${b.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g')
-    h = h.replace(re, `<span class="at"><i style="background:${col(b.color)}"></i>${esc(b.name)}</span>`)
-  }
-  return h
+  return mentions(h)
+}
+
+// What an agent wrote is Markdown — models write it whether asked or not — so it is drawn as Markdown,
+// with the same escaping and http(s)-only links as a file preview. Called on every streamed piece too.
+const agentHtml = text => mentions(renderMarkdown(text, { chat: true }))
+
+// @name → a pill, in text only: never inside code, a link or a tag. Longest name first, so "Lin2" isn't eaten by "Lin".
+function mentions(html) {
+  const names = [...BOTS].sort((x, y) => y.name.length - x.name.length)
+    .map(b => [new RegExp(`@\\s*${esc(b.name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'),
+      `<span class="at"><i style="background:${col(b.color)}"></i>${esc(b.name)}</span>`])
+  if (!names.length) return html
+  let inside = 0
+  return html.split(/(<[^>]*>)/).map(part => {
+    if (part.startsWith('<')) {
+      const m = /^<(\/?)(code|pre|a)\b/i.exec(part)
+      if (m) inside = Math.max(0, inside + (m[1] ? -1 : 1))
+      return part
+    }
+    if (inside) return part
+    for (const [re, pill] of names) part = part.replace(re, pill)
+    return part
+  }).join('')
 }
 
 function bubble(botId, mine) {
@@ -623,7 +647,7 @@ function bubble(botId, mine) {
     mine ? esc(t('msg.you')) : esc(b?.name?.slice(0,1) ?? '?')}</div>
     <div class="mwrap"><div class="mname" style="color:${b ? col(b.color) : 'var(--dim)'}">${esc(b?.name ?? '')}${
       mine ? '' : `<button class="say" title="${esc(t('vo.readThis'))}" aria-label="${esc(t('vo.readThis'))}">${SAY_ICON}</button>`}</div>
-    <div class="bub"></div></div>`
+    <div class="bub${mine ? '' : ' rich'}"></div></div>`
   log.appendChild(el); log.scrollTop = log.scrollHeight
   return el.querySelector('.bub')
 }
@@ -1076,7 +1100,7 @@ async function send(spoken = null) {
         else if (ev === 'delta') {
           let s = bubs.get(d.botId)
           if (!s) { s = { el: bubble(d.botId, false), raw: '' }; bubs.set(d.botId, s) }
-          s.raw += d.text; s.el.innerHTML = fmt(s.raw); $('#log').scrollTop = $('#log').scrollHeight
+          s.raw += d.text; s.el.innerHTML = agentHtml(s.raw); $('#log').scrollTop = $('#log').scrollHeight
           readFeed(d.botId, d.text)
         }
         else if (ev === 'error') { readFlush(d.botId); (bubs.get(d.botId)?.el ?? bubble(d.botId, false)).textContent = '⚠ ' + d.message }
@@ -1259,6 +1283,9 @@ $('#log').addEventListener('click', e => {
   if (VOICE.tts.mode === 'device' && !canSpeak()) { note(t('vo.noVoices')); return }
   const copy = bub.cloneNode(true)
   copy.querySelectorAll('pre').forEach(p => p.replaceWith(`\n(${t('vo.code')})\n`))
+  // Markdown is drawn as blocks with no line breaks between them: without these, list items run into one sentence.
+  copy.querySelectorAll('br').forEach(b => b.replaceWith('\n'))
+  copy.querySelectorAll('p,li,h1,h2,h3,h4,h5,h6,tr,blockquote').forEach(n => n.append('\n'))
   const pieces = sentences(speakable(copy.textContent, { codeWord: t('vo.code') }), { final: true }).out
   if (!pieces.length) return
   readingBub = bub; btn.classList.add('on')
@@ -3069,7 +3096,11 @@ function eventCard(e) {
   } else if (e.kind === 'approval') {
     el.insertAdjacentHTML('beforeend', '<code></code>'); el.querySelector('code').textContent = e.text
     if (x?.status === 'waiting' && x.approval?.id === e.approval) askOn(el, e.approval, x.approval.always)
-  } else if (e.kind === 'done' || e.kind === 'failed') {
+  } else if (e.kind === 'done') {
+    // A report is the agent's writing, so it is drawn like its messages; a failure is an error text, kept as it is.
+    el.insertAdjacentHTML('beforeend', `<div class="rich rep">${agentHtml(e.text ?? '')}</div>`)
+    if (e.files?.length) el.appendChild(attsEl(e.files))
+  } else if (e.kind === 'failed') {
     el.insertAdjacentHTML('beforeend', '<pre></pre>'); el.querySelector('pre').textContent = e.text
     if (e.files?.length) el.appendChild(attsEl(e.files))
   }

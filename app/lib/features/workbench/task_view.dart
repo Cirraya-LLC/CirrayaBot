@@ -10,6 +10,7 @@ import '../../l10n.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
 import 'attachments.dart';
+import 'markdown_view.dart';
 import 'message_view.dart' show alwaysWhat;
 
 TextStyle get _mono => TextStyle(
@@ -101,7 +102,12 @@ class NewsCard extends StatelessWidget {
               const SizedBox(height: 6),
               ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 220),
-                child: SingleChildScrollView(child: SelectableText(n.text, style: _mono)),
+                child: SingleChildScrollView(
+                  // A report is the agent's writing, drawn like its messages; a failure is an error text, kept as it is.
+                  child: n.kind == 'done'
+                      ? MarkdownView(text: n.text, chat: true)
+                      : SelectableText(n.text, style: _mono),
+                ),
               ),
             ],
           ],

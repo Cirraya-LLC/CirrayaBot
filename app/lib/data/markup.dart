@@ -1,13 +1,13 @@
-/// What a message looks like, before anyone decides how to paint it.
+/// What the person's own message looks like, before anyone decides how to paint it.
 ///
 /// Three things earn special rendering and nothing else does: fenced code
-/// blocks (the Agents paste commands), inline code (technical talk is all
+/// blocks (people paste commands), inline code (technical talk is all
 /// slugs and field names), and `@name` (a handoff is a visible event in the
 /// group, not a word in a sentence).
 ///
-/// Deliberately not a Markdown renderer. The Agents' output is untrusted text
-/// that we display in our own window — the smaller the grammar, the smaller
-/// the surface. Bold and headings can wait until someone misses them.
+/// Not Markdown: what someone typed is shown as typed. An agent's message is
+/// Markdown and goes through data/markdown.dart (people missed bold and lists
+/// there, 2026-11-11) — still escaped text, no HTML, no images fetched.
 library;
 
 sealed class Block {

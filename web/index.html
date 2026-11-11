@@ -313,13 +313,33 @@
             font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
   .bub .at{background:var(--tint);color:var(--tintink);border-radius:5px;padding:1px 6px 1px 3px;
            font-size:12.5px;white-space:nowrap}
-  .bub .cb{background:var(--cb);border:1px solid var(--cbline);border-radius:8px;padding:9px 11px;
+  .bub .cb,.rich .cb{background:var(--cb);border:1px solid var(--cbline);border-radius:8px;padding:9px 11px;
            margin:7px 0;overflow-x:auto;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
            color:var(--cbink);white-space:pre}
-  .bub .cb b{display:block;color:var(--dim2);font-size:10.5px;font-weight:500;margin-bottom:5px;
+  .bub .cb b,.rich .cb b{display:block;color:var(--dim2);font-size:10.5px;font-weight:500;margin-bottom:5px;
              text-transform:uppercase;letter-spacing:.5px}
   .bub .at i{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:-2px;
              margin-right:3px}
+  /* An agent's message is Markdown (renderMarkdown): blocks, not pre-wrapped text */
+  .rich{white-space:normal}
+  .rich>:first-child{margin-top:0}.rich>:last-child{margin-bottom:0}
+  .rich p,.rich ul,.rich ol,.rich blockquote,.rich table{margin:0 0 .6em}
+  .rich h1,.rich h2,.rich h3,.rich h4,.rich h5,.rich h6{margin:.9em 0 .4em;line-height:1.35;font-weight:600}
+  .rich h1{font-size:1.3em}.rich h2{font-size:1.18em}.rich h3{font-size:1.06em}.rich h4,.rich h5,.rich h6{font-size:1em}
+  .rich ul,.rich ol{padding-left:1.4em}
+  .rich li{margin:.15em 0}.rich li.l1{margin-left:1.3em}.rich li.l2{margin-left:2.6em}.rich li.l3{margin-left:3.9em}
+  .rich li input{margin:0 4px 0 0;vertical-align:-1px}
+  .rich blockquote{border-left:3px solid var(--chip2);margin-left:0;padding-left:10px;color:var(--dim)}
+  .rich table{border-collapse:collapse;display:block;max-width:100%;overflow-x:auto}
+  .rich th,.rich td{border:1px solid var(--line);padding:4px 9px;text-align:left}
+  .rich th{background:var(--tool);font-weight:600}
+  .rich hr{border:0;border-top:1px solid var(--line);margin:.8em 0}
+  .rich a{color:var(--accent)}
+  .rich strong{font-weight:650}
+  .rich .cb{white-space:pre}
+  .rich .cb code{background:none;color:inherit;padding:0;font:inherit;border-radius:0}
+  .tev .rep{color:var(--ink);font-size:12.5px;line-height:1.55;margin-top:4px;max-height:320px;overflow:auto}
+  .md li.l1{margin-left:1.3em}.md li.l2{margin-left:2.6em}.md li.l3{margin-left:3.9em}
   .day{align-self:center;color:var(--dim2);font-size:11.5px;margin:6px 0 14px}
 
   .tool{max-width:min(78%,860px);background:var(--tool);border:1px solid var(--line);border-radius:11px;

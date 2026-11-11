@@ -10,11 +10,11 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../../data/api.dart';
-import '../../data/markdown.dart';
 import '../../l10n.dart';
 import '../../platform.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
+import 'markdown_view.dart';
 
 IconData iconFor(String kind) => switch (kind) {
   'image' => Icons.image_outlined,
@@ -473,139 +473,4 @@ Future<String> downloadToTemp(Api api, Attachment f) async {
   final path = '${dir.path}${Platform.pathSeparator}${f.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')}';
   await api.downloadFile(f.id, path);
   return path;
-}
-
-// ---------- Markdown ----------
-
-/// Draws what parseMarkdown read. Links are drawn as links but never followed
-/// or fetched from here.
-class MarkdownView extends StatelessWidget {
-  const MarkdownView({super.key, required this.text});
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [for (final b in parseMarkdown(text)) _block(b)],
-  );
-
-  TextStyle get _body => TextStyle(fontSize: 14, height: 1.6, color: C.ink, fontFamilyFallback: AppTheme.textFallback);
-
-  Widget _rich(String s, {TextStyle? style}) => SelectableText.rich(
-    TextSpan(
-      style: style ?? _body,
-      children: [
-        for (final sp in parseInline(s))
-          TextSpan(
-            text: sp.text,
-            style: TextStyle(
-              fontWeight: sp.bold ? FontWeight.w700 : null,
-              fontStyle: sp.italic ? FontStyle.italic : null,
-              fontFamily: sp.code ? AppTheme.mono : null,
-              fontFamilyFallback: sp.code ? AppTheme.monoFallback : null,
-              color: sp.code ? C.code : (sp.link != null ? C.tintInk : null),
-              decoration: sp.link != null ? TextDecoration.underline : null,
-            ),
-          ),
-      ],
-    ),
-  );
-
-  Widget _block(MdBlock b) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
-    child: switch (b) {
-      MdHeading h => _rich(
-        h.text,
-        style: _body.copyWith(
-          fontSize: const [22.0, 19.0, 16.5, 15.0, 14.0, 14.0][h.level - 1],
-          fontWeight: FontWeight.w700,
-          height: 1.35,
-        ),
-      ),
-      MdParagraph p => _rich(p.text),
-      MdList l => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (var i = 0; i < l.items.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 3),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox(
-                    width: 24,
-                    child: l.items[i].checked != null
-                        ? Icon(
-                            l.items[i].checked! ? Icons.check_box_outlined : Icons.check_box_outline_blank,
-                            size: 16,
-                            color: C.dim,
-                          )
-                        : Text(l.ordered ? '${i + 1}.' : '•', style: _body.copyWith(color: C.dim)),
-                  ),
-                  Expanded(child: _rich(l.items[i].text)),
-                ],
-              ),
-            ),
-        ],
-      ),
-      MdCode c => Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(11),
-        decoration: BoxDecoration(
-          color: C.codeBlock,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: C.codeBlockLine),
-        ),
-        child: SelectableText(
-          c.code,
-          style: TextStyle(
-            fontFamily: AppTheme.mono,
-            fontFamilyFallback: AppTheme.monoFallback,
-            fontSize: 12.5,
-            height: 1.5,
-            color: C.ink,
-          ),
-        ),
-      ),
-      MdQuote q => Container(
-        padding: const EdgeInsets.only(left: 12),
-        decoration: BoxDecoration(border: Border(left: BorderSide(color: C.line, width: 3))),
-        child: DefaultTextStyle.merge(
-          style: TextStyle(color: C.dim),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [for (final x in q.blocks) _block(x)]),
-        ),
-      ),
-      MdRule _ => Divider(color: C.line, height: 12),
-      MdTable t => SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Table(
-          defaultColumnWidth: const IntrinsicColumnWidth(),
-          border: TableBorder.all(color: C.line),
-          children: [
-            TableRow(
-              decoration: BoxDecoration(color: C.panel),
-              children: [
-                for (final h in t.header)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                    child: _rich(h, style: _body.copyWith(fontWeight: FontWeight.w600)),
-                  ),
-              ],
-            ),
-            for (final r in t.rows)
-              TableRow(
-                children: [
-                  // A short row is padded, a long one cut: Table needs every row the same width.
-                  for (var i = 0; i < t.header.length; i++)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                      child: _rich(i < r.length ? r[i] : ''),
-                    ),
-                ],
-              ),
-          ],
-        ),
-      ),
-    },
-  );
 }

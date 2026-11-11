@@ -51,4 +51,26 @@ void main() {
   test('stars inside a word are not italics', () {
     expect(parseInline('2*3*4').every((x) => !x.italic), isTrue);
   });
+
+  test('lists keep their number and nesting; a table right under a paragraph is a table', () {
+    final b = parseMarkdown('**Steps**\n- a\n  - b\n\t- c\n\n3. third\n\nBefore\n| x | y |\n|---|---|\n| 1 | 2 |');
+    expect((b[0] as MdParagraph).text, '**Steps**');
+    final l = b[1] as MdList;
+    expect(l.items.map((i) => i.level), [0, 1, 1]);
+    final n = b[2] as MdList;
+    expect(n.ordered, isTrue);
+    expect(n.start, 3);
+    expect((b[3] as MdParagraph).text, 'Before');
+    expect((b[4] as MdTable).rows, [
+      ['1', '2'],
+    ]);
+  });
+
+  test('mentions: in text and bold, never in code or a link; longest name first; Chinese names', () {
+    final s = parseInline('@小林二 和 **@Tao** 看 `@Tao` [@Tao](https://x.dev) @tao', names: ['Tao', '小林', '小林二']);
+    expect(s.where((x) => x.mention != null).map((x) => x.mention), ['小林二', 'Tao', 'Tao']);
+    expect(s.where((x) => x.code).single.text, '@Tao');
+    expect(s.where((x) => x.link != null).single.text, '@Tao');
+    expect(parseInline('@nobody hi', names: ['Tao']).every((x) => x.mention == null), isTrue);
+  });
 }

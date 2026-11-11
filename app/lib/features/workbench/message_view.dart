@@ -12,6 +12,7 @@ import '../../data/markup.dart';
 import '../../l10n.dart';
 import '../../state/workbench.dart';
 import '../../theme/app_theme.dart';
+import 'markdown_view.dart';
 
 /// A round initial. Same idea as the web UI's avatars — a colour and a
 /// character is enough to tell four colleagues apart at a glance.
@@ -263,6 +264,7 @@ class _Bubble extends StatelessWidget {
               text: said.text.isEmpty && said.streaming ? '…' : said.text,
               names: names,
               colorOf: colorOf,
+              markdown: !said.mine,
             ),
           ),
         if (said.files.isNotEmpty && files != null)
@@ -294,15 +296,26 @@ class _Bubble extends StatelessWidget {
 
 /// Renders parsed blocks. Text is selectable — people copy what an Agent
 /// produced, and a chat you cannot copy out of is a demo.
+///
+/// An agent's message is Markdown (models write it whether asked or not), so it is drawn as Markdown
+/// ([markdown]); what the person typed is shown as typed, with only code and mentions marked.
 class MessageBody extends StatelessWidget {
-  const MessageBody({super.key, required this.text, required this.names, required this.colorOf});
+  const MessageBody({
+    super.key,
+    required this.text,
+    required this.names,
+    required this.colorOf,
+    this.markdown = false,
+  });
 
   final String text;
   final List<String> names;
   final Color Function(String) colorOf;
+  final bool markdown;
 
   @override
   Widget build(BuildContext context) {
+    if (markdown) return MarkdownView(text: text, names: names, colorOf: colorOf, chat: true);
     final blocks = parseMessage(text, names: names);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

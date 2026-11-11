@@ -3106,6 +3106,28 @@ From the comparison (2.6.3: both peers ship installable apps), the boss: 「按�
   .exe with its DLLs, the Linux binary, APKs debug-signed). **Not verified**: launching the macOS / Windows / Linux
   builds; installing the v0.1.0 APK on a phone.
 
+## 2.50 Agents' messages drawn as Markdown (2026-11-11)
+
+The boss, with a screenshot of a reply full of literal `**…**` and `- ` lines: 「怎么网页版没有markdown了」. It never had
+it: both clients drew only fenced code, inline code and @mentions (markup.dart said "bold and headings can wait until
+someone misses them") — and models write Markdown whether asked or not.
+
+- **An agent's message, live and from history, and a task's report** (the `done` card) go through the same small
+  reader the file previews use: web `renderMarkdown(text, {chat: true})` (web/markdown.mjs) + `mentions()` in app.js;
+  client `MarkdownView(chat: true)` (moved to `features/workbench/markdown_view.dart`) with `parseInline(names:)`.
+  Still escaped first, links http(s) only and opened in a new tab, no images, no HTML. **What the person typed is shown
+  as typed** (old `fmt` / `parseMessage`); a failed task's error text stays monospace.
+- Added to both readers: a numbered item after a blank line keeps its number (`<ol start>` / `MdList.start` — models
+  write "1.", blank line, "2."), nested items indented (two spaces or a tab a level, three at most), a table right
+  under a paragraph line, a code block's language on top in a bubble (`pre.cb`), an unfinished fence (still
+  streaming) running to the end. Mentions become chips only in text — never inside code, a link or a tag.
+- Web: the bubble is `.bub.rich` (`white-space: normal`; `.rich …` styles in index.html; `.bub .cb` styles shared with
+  `.rich .cb` so a report's code block looks the same); read-aloud adds line breaks after blocks before reading
+  `textContent`, or list items ran into one sentence.
+- Tests: `node web/markdown.mjs`, `app/test/markdown_test.dart`, `app/test/chat_markdown_test.dart` (900 and 277
+  wide); web in headless Chromium against a local server with a scripted model (history, live stream, reload, a task
+  report, dark and light, `<script>` / `javascript:` shown as text, zero page errors).
+
 ## 3. What runs now
 
 ```bash
@@ -3132,7 +3154,7 @@ node web/skillreview.mjs   # self-test for skill reviews: unused, what the model
 node web/otel.mjs          # self-test for traces: OTLP/JSON encoding, parents, a collector that is down
 npm install --prefix web && npm run test:e2e   # end-to-end: real server + throwaway PostgreSQL + scripted model (2.36.1)
 ./start.sh backup | restore <dir> --yes | upgrade   # 2.36.9
-node web/markdown.mjs      # self-test for the Markdown preview (escaping, links, tables)
+node web/markdown.mjs      # self-test for Markdown in agents' messages and file previews (escaping, links, lists, tables)
 node web/protocols.mjs     # self-test for translating the three protocols (including images)
 node web/i18n.mjs          # server message tables self-test
 python3 check-bots.py      # check the seed definitions in bots/
