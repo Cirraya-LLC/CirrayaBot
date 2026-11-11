@@ -58,6 +58,12 @@ restore() {
   set -a; . ./.env; set +a
   local ws="${WORKSPACE_HOST_PATH:-$(pwd)/data/workspace}" stamp; stamp=$(date +%Y%m%d-%H%M%S)
   "${COMPOSE[@]}" up -d db
+  # A database container that was just made needs a few seconds before it takes connections.
+  local i; for i in $(seq 1 60); do
+    if "${COMPOSE[@]}" exec -T db pg_isready -U multiagent -d multiagent >/dev/null 2>&1; then break; fi
+    if [ "$i" = 60 ]; then echo "The database didn't come up within a minute" >&2; exit 1; fi
+    sleep 1
+  done
   "${COMPOSE[@]}" stop app
   echo "Restoring the database…"
   "${COMPOSE[@]}" exec -T db pg_restore -U multiagent -d multiagent --clean --if-exists --no-owner < "$dir/db.dump"
